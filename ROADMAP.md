@@ -228,4 +228,4 @@ Write `benchmarks/PREREG.md` **before** any GPU run. It fixes:
 Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/SHA>`
 
 - 2026-10-30 · — · Roadmap created; replaces the old `roadmap.md` (whose phase "completion" statuses were not backed by measurements) · —
-- 2026-10-30 · S0.1 · Gitignore, untracked caches and egg-info, ROADMAP.md replaces the old roadmap. Phase-completion docs kept pending an owner decision. · branch chore/S0.1-repo-hygiene
+- 2026-10-30 · S0.1 · Gitignore, untracked caches and egg-info, ROADMAP.md replaces the old roadmap. Phase-completion docs kept pending an owner decision. · 33bed64
