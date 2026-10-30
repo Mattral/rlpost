@@ -62,8 +62,7 @@ tests/
 ├── test_dpo_engine.py
 ├── test_ppo_engine.py
 ├── test_rollout.py
-├── test_topology.py
-└── run_benchmark_comparison.py   # not collected by pytest
+└── test_topology.py
 
 docs/
 ├── index.md               # Short index of the docs that remain

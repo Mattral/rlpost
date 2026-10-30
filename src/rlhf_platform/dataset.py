@@ -315,11 +315,11 @@ class ToyDatasetLoader:
         return pairs
 
 
-class LoRAMaskingCollator:
-    """Pad a batch and set ``labels`` to -100 on padding tokens.
+class IgnorePaddingLabelCollator:
+    """Pad a batch and set padding labels to -100.
 
-    The name says LoRA masking. The body does not look at LoRA modules.
-    It copies ``input_ids`` into ``labels`` and ignores pad positions.
+    ``labels`` is a clone of ``input_ids``. Positions where ``attention_mask``
+    is 0 are set to -100, the ignore index used by a causal-LM loss.
     """
 
     def __init__(self, tokenizer, max_length: int = 512):
@@ -333,15 +333,14 @@ class LoRAMaskingCollator:
         self.max_length = max_length
 
     def __call__(self, batch: list[dict]) -> dict:
-        """Collate batch with optional LoRA masking.
+        """Pad the batch and set padding labels to -100.
 
         Args:
             batch: List of tokenized examples
 
         Returns:
-            Dict with input_ids, attention_mask, labels
+            Dict with input_ids, attention_mask, and labels. Padding labels are -100.
         """
-        # Pad batch
         padded = self.tokenizer.pad(
             batch,
             max_length=self.max_length,
@@ -349,8 +348,6 @@ class LoRAMaskingCollator:
             return_tensors="pt",
         )
 
-        # LoRA masking: set attention to 0 for padded tokens
-        # (In practice, use peft.LoraConfig for automatic masking)
         padded["labels"] = padded["input_ids"].clone()
         padded["labels"][padded["attention_mask"] == 0] = -100
 
@@ -392,7 +389,7 @@ def get_dataloader(
     tokenized = [tokenize_fn(pair) for pair in pairs]
 
     # Create DataLoader
-    collator = LoRAMaskingCollator(tokenizer, config.max_seq_length)
+    collator = IgnorePaddingLabelCollator(tokenizer, config.max_seq_length)
     return DataLoader(
         tokenized,
         batch_size=config.batch_size,
