@@ -1,34 +1,20 @@
-"""
-Production-grade PPO implementation with GAE, clipped surrogate objective, and adaptive KL control.
+"""PPO with GAE, a clipped surrogate, and an adaptive KL coefficient.
 
-This module provides a robust, type-safe implementation of Proximal Policy Optimization (PPO)
-with the following features:
+This is the only PPO implementation. The step is:
 
-- **Generalized Advantage Estimation (GAE):** Flexible lambda parameter for advantage smoothing
-- **Clipped Surrogate Objective:** Policy gradient loss with epsilon clipping
-- **Dynamic KL Penalty:** Adaptive beta adjustment based on target KL divergence
-- **Entropy Regularization:** Prevents policy collapse through exploration bonus
-- **Value Function Loss:** Critic network training with optional gradient clipping
-- **Mixed Precision:** BF16/FP16 support for memory-efficient training
-- **Weights & Biases Logging:** Real-time tracking of all training metrics
+    delta_t = r_t + gamma * next_value_t * (1 - done_t) - value_t
+    A_t = delta_t + gamma * lambda * (1 - done_t) * A_{t+1}
+    ratio_t = exp(log_pi_new(a_t) - log_pi_old(a_t))
+    L = -mean(min(ratio * A, clip(ratio, 1-eps, 1+eps) * A))
+        + c_v * MSE(value, A + value)
+        - c_ent * entropy
+        + beta * KL
 
-Mathematical References:
-    Clipped Surrogate Objective:
-        L^CLIP(θ) = Ê_t [ min(r_t(θ)Â_t, clip(r_t(θ), 1-ε, 1+ε)Â_t) ]
-
-    KL Divergence (for adaptive penalty):
-        D_KL(P || Q) = Σ_x P(x) log(P(x)/Q(x))
-
-    Generalized Advantage Estimation:
-        Â_t^GAE(γ,λ) = Σ_{l=0}^∞ (γλ)^l δ_t+l^V
-        where δ_t^V = r_t + γV(s_{t+1}) - V(s_t)
-
-Example:
-    >>> from rlhf_platform.config import TrainingConfig
-    >>> from rlhf_platform.ppo_engine import PPOTrainer
-    >>> config = TrainingConfig.toy_mode()
-    >>> trainer = PPOTrainer(config)
-    >>> trainer.train_step(batch)
+``train_step`` gathers token log-probabilities on dimension 1. That is wrong,
+and it is left for S0.6a. ``compute_kl_divergence`` is the full-vocabulary
+KL(old || new). ``train_step`` passes (policy, reference), so the penalty is
+KL(reference || policy). Naming that estimator is S0.6e. The value loss is
+unclipped MSE. A clipped value loss is S0.6d.
 """
 
 import logging
@@ -146,7 +132,7 @@ class GeneralizedAdvantageEstimation:
 
 
 class PPOTrainer:
-    """Production-grade PPO trainer with adaptive KL control and W&B logging.
+    """PPO trainer with adaptive KL control and optional W&B logging.
 
     This trainer orchestrates policy gradient updates, value function training,
     and KL-based adaptive penalty coefficient adjustment. All hyperparameters
@@ -255,9 +241,10 @@ class PPOTrainer:
         value_pred: Tensor,
         returns: Tensor,
     ) -> Tensor:
-        """Compute critic (value function) loss with optional clipping.
+        """Compute the critic loss.
 
-        Standard MSE loss on predicted values vs. bootstrapped returns.
+        Mean squared error, multiplied by ``value_loss_coefficient``.
+        There is no value clip.
 
         Args:
             value_pred: Predicted values from critic, shape (batch_size,)
@@ -293,15 +280,21 @@ class PPOTrainer:
     ) -> Tensor:
         """Compute KL divergence between new and old policy distributions.
 
-        For Categorical distributions:
-            D_KL(p || q) = Σ_a p(a) * (log p(a) - log q(a))
+        This is KL(logits_old || logits_new):
+
+            sum_a p_old(a) * (log p_old(a) - log p_new(a))
+
+        ``train_step`` calls it as ``(policy_logits, ref_logits)``, so the
+        number added to the loss is KL(reference || policy). S0.6e names
+        the estimator. The sampled-token estimators k1, k2, and k3 are not
+        implemented here.
 
         Args:
-            logits_new: Logits from current policy, shape (batch_size, num_actions)
-            logits_old: Logits from reference policy, shape (batch_size, num_actions)
+            logits_new: Logits treated as the second distribution, shape (..., num_actions)
+            logits_old: Logits treated as the first distribution, shape (..., num_actions)
 
         Returns:
-            kl_div: Mean KL divergence across batch (scalar)
+            kl_div: Mean KL over every dimension except the action axis (scalar)
         """
         log_probs_new = F.log_softmax(logits_new, dim=-1)
         log_probs_old = F.log_softmax(logits_old, dim=-1)
@@ -373,7 +366,7 @@ class PPOTrainer:
         2. Value loss (critic training)
         3. Entropy bonus (exploration)
         4. KL penalty (policy constraint)
-        5. Combined loss = policy_loss + value_loss - entropy - kl_penalty
+        5. Combined loss = policy_loss + value_loss - entropy_coef * entropy + beta * KL
 
         Args:
             batch: Dict with keys:
@@ -422,7 +415,12 @@ class PPOTrainer:
             adv_std = advantages.std() + 1e-8
             advantages = (advantages - adv_mean) / adv_std
 
-        # Get new log probs
+        # Get new log probs.
+        # S0.6a: this gather is the known bug. It is not fixed here.
+        # input_ids is [B, T], so the index is [B, T, 1]. gather uses dimension 1.
+        # DummyModel logits are [B, V], and the index rank does not match.
+        # Causal-LM logits are [B, T, V]. Dimension 1 is time, not vocabulary,
+        # and there is no shift (logits at t predict token t+1).
         log_probs_new = F.log_softmax(policy_logits, dim=-1)
         log_probs_action = log_probs_new.gather(1, input_ids.unsqueeze(-1)).squeeze(-1)
 
@@ -488,19 +486,3 @@ class PPOTrainer:
         self.global_step += 1
 
         return metrics
-
-    def log_config_to_wandb(self: "PPOTrainer") -> None:
-        """Log training configuration to Weights & Biases for reproducibility."""
-        if not self.use_wandb:
-            return
-
-        config_dict = {
-            "alignment": self.alignment_config.model_dump(),
-            "optimization": self.opt_config.model_dump(),
-        }
-        wandb.config.update(config_dict)
-
-
-if __name__ == "__main__":
-    # Example usage (for testing)
-    print("PPO Trainer module loaded successfully")

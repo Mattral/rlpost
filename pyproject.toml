@@ -126,8 +126,7 @@ select = ["E", "F", "I"]
 ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
-# These files put the repo root on sys.path before importing the package.
-"train.py" = ["E402"]
+# This file puts the repo root on sys.path before importing the package.
 "scripts/simulate_runtime.py" = ["E402"]
 
 [tool.pytest.ini_options]

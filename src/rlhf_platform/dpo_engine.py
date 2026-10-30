@@ -1,4 +1,4 @@
-"""Direct Preference Optimization (DPO) for reference-free alignment.
+"""Direct Preference Optimization (DPO). Reward-model-free, with a frozen reference policy.
 
 This module provides:
 - DPO trainer for direct preference learning on pair data
