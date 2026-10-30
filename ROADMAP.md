@@ -270,7 +270,8 @@ Cover:
   - SFT and the reward model read undeclared config fields (`lora_target_modules`,
     `dataset_size`). Declare and validate them as part of S0.11.
 
-### [ ] S0.9 Delete the orphaned distributed scaffolding
+### [~] S0.9 Delete the orphaned distributed scaffolding
+- Branch: `chore/S0.9-delete-distributed`.
 - Nothing calls this code after S0.4. Stage 2 will build rollout and weight-sync
   distribution from scratch.
 - Delete `src/rlhf_platform/distributed/topology.py`, `comm_hooks.py`, `async_io.py`,
