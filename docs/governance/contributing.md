@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This document defines the contribution and merge governance rules for the RLHF infrastructure framework. It is designed for core contributors and engineering teams operating under strict production constraints: deterministic tensor shapes, invariant regression checks, and fully auditable continuous integration.
+This document defines the contribution and merge governance rules for the RLHF infrastructure framework. It is designed for core contributors and engineering teams operating under strict constraints: deterministic tensor shapes, invariant regression checks, and fully auditable continuous integration.
 
 ---
 
