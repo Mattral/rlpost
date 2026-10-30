@@ -270,7 +270,7 @@ Cover:
   - SFT and the reward model read undeclared config fields (`lora_target_modules`,
     `dataset_size`). Declare and validate them as part of S0.11.
 
-### [~] S0.9 Delete the orphaned distributed scaffolding
+### [x] S0.9 Delete the orphaned distributed scaffolding
 - Branch: `chore/S0.9-delete-distributed`.
 - Nothing calls this code after S0.4. Stage 2 will build rollout and weight-sync
   distribution from scratch.
@@ -295,6 +295,23 @@ Cover:
     `torch.cat(..., dim=1)` raised `IndexError`. Both are code bugs. Fixed: pin only when
     `torch.cuda.is_available()`, and keep sampled tokens shaped `[batch, 1]`.
     `tests/test_rollout.py` then passed (3 tests). `tests/test_topology.py` passed.
+  - Done. Deleted `distributed/topology.py`, `comm_hooks.py`, `async_io.py`, and the
+    package `__init__.py`. Also deleted `scripts/simulate_runtime.py`,
+    `configs/cluster_topology.yaml`, `docs/design.md`, and `tests/test_topology.py`.
+    `rlhf_platform` no longer lists `distributed`.
+  - `TrainingConfig` has no field that only those modules read. `num_gpus`, `use_fsdp`,
+    `use_deepspeed`, and `deepspeed_config` stay. `tests/test_config.py` and the config
+    constructors set them. The cluster YAML was the only topology config.
+  - `NCCLProfiler` and `DistributedMetricsCollector` remain in `utils/telemetry.py`.
+    Nothing calls them. They were not in the delete list. Stage 2 does not extend them.
+  - The two deleted tests were passing:
+    `test_load_topology_from_yaml_loads_model_placements` and
+    `test_topology_validate_rejects_conflicting_assignments`. The 11 failures under
+    S0.6 are unchanged.
+  - CPU pytest on this branch, `.venv`, torch 2.15.0+cpu, `PYTHONPATH=src`,
+    `pytest -m "not slow and not gpu"`: 80 collected, 69 passed, 11 failed, in 18.20s.
+    `.venv/bin/ruff check .` and `.venv/bin/ruff format --check .` pass.
+  - `git grep -i "asymmetric\|topology\|10,000\|petascale"` returns only this file.
 
 ### [ ] S0.10 P2000 CUDA smoke test (optional)
 - Use the cu126 wheel, fp32, a tiny model, and run 20 steps each of SFT, DPO and PPO.
@@ -398,3 +415,4 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-10-30 · S0.6 · Triage recorded, not implemented. Margin is beta-scaled and reference-adjusted (both test and code wrong). Accuracy uses that reward (code's 0.75 stands). `dpo_beta` becomes its own config field. S0.6b confirms against TRL. · 615cd83
 - 2026-10-30 · S0.4 · One PPO trainer (`PPOTrainer`). The second engine and its loss module are gone. The logprob gather is unchanged and lives in `train_step` only. `docs/CODE_MAP.md` is written from the code. · 9bfc8a5
 - 2026-10-30 · S0.4b · Removed the hardcoded benchmark script, renamed the padding-label collator, and dropped the dead early-stopping callback and the constant DPO explained-variance field. The 11 known failures are unchanged. · b500b17
+- 2026-10-30 · S0.9 · Deleted the unused process-group, hook, and checkpoint modules, the multi-rank script, the cluster YAML, and docs/design.md. The 11 known failures are unchanged. Two passing tests went with the deleted module. · f8ce6d0
