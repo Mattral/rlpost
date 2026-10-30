@@ -309,4 +309,4 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-10-30 · S0.1 · Gitignore, untracked caches and egg-info, ROADMAP.md replaces the old roadmap. Phase-completion docs kept pending an owner decision. · 33bed64
 - 2026-10-30 · S0.2 · README states the CPU test result and drops unmeasured numbers. The GPU-count table moved to docs/design.md as a design target. The fake telemetry JSON was deleted. · 5f288b9
 - 2026-10-30 · S0.3 · CI is one CPU job: pinned torch, ruff, and pytest, with no swallowed failures. Ruff passes. Pytest is 69 passed, 13 failed, and the job is expected to be red until those failures are fixed. · 42c71a9
-- 2026-10-30 · owner · Deleted the eight unverified docs. Judged each of the 13 failures and left the 11 algorithm disagreements red. Fixed the CPU pin_memory crash and the 1-D rollout cat. Added S0.11. · pending-sha
+- 2026-10-30 · owner · Deleted the eight unverified docs. Judged each of the 13 failures and left the 11 algorithm disagreements red. Fixed the CPU pin_memory crash and the 1-D rollout cat. Added S0.11. · a8db00d
