@@ -347,6 +347,25 @@ Cover:
     `docs/operations/system_design.md` still describe an NCCL install. They do
     not name these classes or this YAML.
 
+### [~] S0.9c Docs truth pass
+- Depends on: S0.9b.
+- Branch: `docs/S0.9c-docs-truth`.
+- Remove the optional `deepspeed` extra from `pyproject.toml`.
+- Delete `docs/operations/setup.md` and `docs/operations/system_design.md`.
+  They describe multi-node SLURM, Kubernetes, and NCCL setup this repo never had.
+- Fix links to those files in `docs/index.md`, `README.md`, and
+  `docs/governance/contributing.md`.
+- In the PR, list every production, scale, or hardware claim in
+  `docs/core/philosophy.md`, `docs/governance/security.md`,
+  `docs/educational_deepdive.md`, `docs/DEVELOPMENT.md`, and `docs/index.md`
+  that no code or result file supports, and propose delete or rewrite per file.
+  Do not edit those claims in this item.
+- After this item, `git grep -i "slurm\|kubernetes\|infiniband\|multi-node\|deepspeed"`
+  matches only this file and those five docs.
+- Notes:
+  - 2026-10-30: `origin/main` is `96a648c` (PR #14). S0.9b is on main. This branch
+    starts there.
+
 ### [ ] S0.10 P2000 CUDA smoke test (optional)
 - Use the cu126 wheel, fp32, a tiny model, and run 20 steps each of SFT, DPO and PPO.
 - This catches device and dtype bugs only. **It is not a benchmark.**
