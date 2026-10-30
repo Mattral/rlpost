@@ -22,9 +22,9 @@ Tests: `tests/test_config.py`.
 
 ## `src/rlhf_platform/dataset.py`
 
-Loads preference pairs as strings: `prompt`, `chosen`, `rejected`, and optional reward floats. `PreferencePairDataset.load` prefers a local JSONL cache, then Hugging Face `datasets`. `get_dataloader` tokenizes `prompt + chosen` with `return_tensors="pt"` (each field is `[1, L]` before padding) and collates with `LoRAMaskingCollator`.
+Loads preference pairs as strings: `prompt`, `chosen`, `rejected`, and optional reward floats. `PreferencePairDataset.load` prefers a local JSONL cache, then Hugging Face `datasets`. `get_dataloader` tokenizes `prompt + chosen` with `return_tensors="pt"` (each field is `[1, L]` before padding) and collates with `IgnorePaddingLabelCollator`.
 
-The collator asks the tokenizer to pad to `max_seq_length`. It then sets `labels = input_ids` and `labels[attention_mask == 0] = -100`. After a successful collate the batch is `input_ids` `[B, max_seq]`, `attention_mask` `[B, max_seq]`, `labels` `[B, max_seq]`. No test builds that batch. The class name says LoRA masking. The body only masks padding in `labels`.
+The collator asks the tokenizer to pad to `max_seq_length`. It then sets `labels = input_ids` and `labels[attention_mask == 0] = -100`. After a successful collate the batch is `input_ids` `[B, max_seq]`, `attention_mask` `[B, max_seq]`, `labels` `[B, max_seq]`. No test builds that batch. The class only sets padding labels to -100. It does not look at a LoRA module.
 
 `ToyDatasetLoader` and the HH-RLHF branch both require a `prompt` column. The public Anthropic HH-RLHF split is `chosen` and `rejected` dialogues, not `prompt` / `chosen` / `rejected`. A real load raises `KeyError` or `ValueError`. Nothing in `tests/` loads it.
 
@@ -34,9 +34,7 @@ Tests: none.
 
 ## `src/rlhf_platform/sft_engine.py`
 
-`load_model_with_lora` loads `AutoModelForCausalLM` and wraps it with PEFT LoRA (`task_type="CAUSAL_LM"`). It always applies LoRA. It does not read `use_peft_lora`. Optional 4-bit or 8-bit quantization goes through `BitsAndBytesConfig`. `SFTTrainer.train` builds a Hugging Face `Trainer` on `get_dataloader(...).dataset`, with `eval_dataset=None` and `evaluation_strategy="steps"`. The return value is the Trainer result object (`training_loss` is an attribute). The annotation says `dict`.
-
-`EarlyStoppingCallback.on_evaluate` reads `metrics["eval_loss"]` and may set `control.should_training_stop`. Evaluation never runs while `eval_dataset` is `None`, so the callback does not see a loss.
+`load_model_with_lora` loads `AutoModelForCausalLM` and wraps it with PEFT LoRA (`task_type="CAUSAL_LM"`). It always applies LoRA. It does not read `use_peft_lora`. Optional 4-bit or 8-bit quantization goes through `BitsAndBytesConfig`. `SFTTrainer.train` builds a Hugging Face `Trainer` on `get_dataloader(...).dataset`, with `eval_dataset=None`, `evaluation_strategy="steps"`, and `load_best_model_at_end=True`. There is no early-stopping callback. The return value is the Trainer result object (`training_loss` is an attribute). The annotation says `dict`.
 
 No tensor is built in this file except inside the Hugging Face trainer, which is not called by tests.
 
@@ -75,7 +73,7 @@ accuracy    = mean(margin > 0)                         # Python float
 
 `compute_log_probs(model, input_ids [B, T], attention_mask [B, T])` shifts by one (logits at `t` score token `t+1`), gathers on the vocabulary axis (`dim=2`), masks with `attention_mask[:, 1:]`, and returns the mean token log-prob per row, shape `[B]`. The usual DPO statistic is the sum, not the mean. Prompt tokens are inside that mean, because `train_step` tokenizes `prompt + response` as one string. That path is untested. The shift-and-gather itself is the pattern S0.6a wants in PPO. It is not what PPO does.
 
-`explained_variance` on `DPOMetrics` is the constant `0.0`. There is no value head.
+`DPOMetrics` holds `dpo_loss`, `policy_diff_mean`, `margin_mean`, and `accuracy`. There is no value head, and no explained-variance field.
 
 `train_step` runs the policy forward with gradients, the reference forward under `no_grad`, then `loss.backward()`. It is untested. Several tests fail earlier, on an empty parameter list, because the stand-in model has no parameters.
 
@@ -165,7 +163,7 @@ Status: untested as an import. The rollout pieces below are what the tests impor
 
 `RolloutGenerator.generate_rollout(query_tokens [B, T_query])` samples `max_response_length` tokens. Each step reads `policy_out.logits[:, -1, :]` and the same slice from the reference, shape `[B, V]`, and appends a token of shape `[B, 1]`. `_sample_token` divides by `temperature` and, when `top_p < 1`, drops tokens whose sorted cumulative probability is already above `top_p`, always keeping the top token. The reward forward is `reward_model(cat(query, response))`. `_decode_reward` uses `logits.squeeze(-1)` when `logits` is rank 2 (`[B, 1]` becomes `[B]`). Rank 3 averages the last two axes. A `pooler_output` is averaged over its last axis. Anything else raises.
 
-Status: buffer, collator, and generator are tested on CPU with stand-in modules. The rank-3 reward branch is untested. See [S0.9](../ROADMAP.md#s09-distributed-claims-test-or-delete) for the CPU pin fix, and [S0.7](../ROADMAP.md#s07-classic-rlhf-edge-case-tests) for reward position.
+Status: buffer, collator, and generator are tested on CPU with stand-in modules. The rank-3 reward branch is untested. See [S0.9](../ROADMAP.md#s09-delete-the-orphaned-distributed-scaffolding) for the CPU pin fix, and [S0.7](../ROADMAP.md#s07-classic-rlhf-edge-case-tests) for reward position.
 
 Tests: `tests/test_rollout.py` (3 tests, passing).
 
@@ -177,7 +175,7 @@ Tests: `tests/test_rollout.py` (3 tests, passing).
 
 `load_topology_from_yaml(path, rank, local_rank) -> ClusterTopology` reads `cluster` and `models.{actor,critic,reference,reward}`. Global rank is `node_id * gpus_per_node + local_device`. Groups are created only when `dist.is_initialized()`.
 
-Status: YAML load and the overlap check are tested. Group creation is untested. See [S0.9](../ROADMAP.md#s09-distributed-claims-test-or-delete).
+Status: YAML load and the overlap check are tested. Group creation is untested. See [S0.9](../ROADMAP.md#s09-delete-the-orphaned-distributed-scaffolding).
 
 Tests: `tests/test_topology.py` (2 tests, passing). They do not init a process group.
 
@@ -193,7 +191,7 @@ Tests: `tests/test_topology.py` (2 tests, passing). They do not init a process g
 
 `AsynchronousReduceScatter.async_reduce_scatter` calls `dist.reduce_scatter_multigpu`. Nothing calls the class. `CollectiveProfiler` stores timings a caller would pass in. Nothing calls it.
 
-Status: untested. See [S0.9](../ROADMAP.md#s09-distributed-claims-test-or-delete). S0.4 left this file in place because that item is the one that tests it or removes it.
+Status: untested. See [S0.9](../ROADMAP.md#s09-delete-the-orphaned-distributed-scaffolding). S0.4 left this file in place because that item is the one that tests it or removes it.
 
 Tests: none. Importing the package used to fail on a name torch 2.15 does not export. That unused import is already gone.
 
@@ -201,7 +199,7 @@ Tests: none. Importing the package used to fail on a name torch 2.15 does not ex
 
 `CheckpointBuffer` is a `queue.Queue`. `AsyncCheckpointWriter` starts a daemon-less thread in `__init__` and writes `torch.save` payloads from the queue. `DistributedCheckpointManager.save_checkpoint` enqueues only on rank 0 and also writes `checkpoint-step-{step}-metadata.json` on the calling thread. `CheckpointMetadata.load` does `cls(**json)`. The JSON includes `timestamp`, and `__init__` does not take `timestamp`, so a load of a file this class wrote raises `TypeError`. Nothing in `tests/` constructs these objects.
 
-Status: untested, and the metadata load path is known-broken. See [S0.9](../ROADMAP.md#s09-distributed-claims-test-or-delete).
+Status: untested, and the metadata load path is known-broken. See [S0.9](../ROADMAP.md#s09-delete-the-orphaned-distributed-scaffolding).
 
 Tests: none.
 
@@ -211,7 +209,7 @@ Tests: none.
 
 `NCCLProfiler` and `DistributedMetricsCollector` have no callers. `allgather_metrics` pickles a summary into a `uint8` tensor and `all_gather`s it. Only rank 0 deserializes. Untested.
 
-Status: untested. See [S0.9](../ROADMAP.md#s09-distributed-claims-test-or-delete).
+Status: untested. See [S0.9](../ROADMAP.md#s09-delete-the-orphaned-distributed-scaffolding).
 
 Tests: none.
 
@@ -233,25 +231,17 @@ Tests: none.
 
 Spawns ranks with `torch.multiprocessing`, builds a topology with `TopologyBuilder`, pushes `Rollout` objects through `RolloutBuffer`, and logs with `RankAwareTelemetry`. Pytest does not collect it (`python_files = test_*.py`). S0.9 owns this script.
 
-Status: untested. See [S0.9](../ROADMAP.md#s09-distributed-claims-test-or-delete).
-
-## `tests/run_benchmark_comparison.py`
-
-Not collected by pytest. `benchmark_custom_ppo` calls `PPOTrainer(config, use_toy=False)`. `PPOTrainer.__init__` takes `(config, policy, value, reference, optimizer)`, so that call does not match. The TRL branch fills `throughput=1.9` and `vram_peak=3.5` in the exception handler and again as a default. Those numbers are not a measurement. S0.3 already says this file is not a result.
-
-Status: untested, and the hardcoded pair is not a result. See [S0.3](../ROADMAP.md#s03-ci-that-tells-the-truth).
+Status: untested. See [S0.9](../ROADMAP.md#s09-delete-the-orphaned-distributed-scaffolding).
 
 ## Code I cannot explain confidently
 
 External history on the current files: Kyle (`insiderzzz0005@gmail.com`) wrote the first versions of `config.py`, `dataset.py`, `sft_engine.py`, `reward_engine.py`, `dpo_engine.py`, `ppo_engine.py`, `cli.py`, and the config and PPO tests. thitsarhmwe-commits wrote `tests/test_dpo_engine.py`. Later edits on those files are from the repo owner. I can walk the PPO and DPO formulas above. The items below are the parts I would not defend.
 
-From Kyle:
+S0.4b removed four of these. `IgnorePaddingLabelCollator` sets padding labels to -100. `EarlyStoppingCallback` is gone. `DPOMetrics` has no explained-variance field. `tests/run_benchmark_comparison.py` is deleted.
 
-- `LoRAMaskingCollator` is named and documented as a LoRA mask. The body only sets padding labels to `-100`. I cannot point at a LoRA module it inspects.
-- `SFTTrainer.train` passes `eval_dataset=None` and still builds `EarlyStoppingCallback`. I can see that `on_evaluate` will not run. I cannot explain why the callback is attached.
-- `sft_engine.py` and `reward_engine.py` read `ModelConfig.lora_target_modules`. `dataset.py` reads `DatasetConfig.dataset_size`. Those fields are not declared. I can explain the `AttributeError`. I cannot explain the missing fields as an API.
-- `DPOMetrics.explained_variance` is always `0.0`. DPO has no value head. I cannot say what the field is supposed to measure.
-- `tests/run_benchmark_comparison.py` (Kyle, with a later edit) reports `1.9` steps/s and `3.5` GB when the TRL path does not run. I can see the literals. I cannot treat them as a measurement of anything.
+From Kyle, still unexplained as an API:
+
+- `sft_engine.py` and `reward_engine.py` read `ModelConfig.lora_target_modules`. `dataset.py` reads `DatasetConfig.dataset_size`. Those fields are not declared. I can explain the `AttributeError`. I cannot explain the missing fields as an API. S0.11 declares and validates them.
 
 From thitsarhmwe-commits:
 

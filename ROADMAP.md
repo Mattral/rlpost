@@ -161,7 +161,7 @@ The exit criteria for Stage 0:
     The 11 names are the ones already listed under S0.6. No other test failed.
     `.venv/bin/ruff check .` and `.venv/bin/ruff format --check .` pass.
 
-### [~] S0.4b Remove fabricated and unexplainable code
+### [x] S0.4b Remove fabricated and unexplainable code
 - Depends on: S0.4.
 - Branch: `refactor/S0.4b-remove-unexplainable`.
 - Delete `tests/run_benchmark_comparison.py`. Its throughput and VRAM numbers are literals.
@@ -178,6 +178,17 @@ The exit criteria for Stage 0:
   - GitHub `main` is still `764079a` (PR #6). This branch starts at the stack tip
     `03f74a1` (merge of PR #10). A branch from GitHub `main` would not contain S0.4 or
     `docs/CODE_MAP.md`.
+  - Done. `IgnorePaddingLabelCollator` sets padding labels to -100.
+    `EarlyStoppingCallback` is deleted. `DPOMetrics` no longer has
+    `explained_variance`. `tests/run_benchmark_comparison.py` is deleted. It was not
+    collected by pytest, so the failure set did not shrink.
+  - `SFTTrainer.train` still sets `evaluation_strategy="steps"` and
+    `load_best_model_at_end=True` with `eval_dataset=None`. No test calls `train`.
+    S0.11 meets this when the command actually runs.
+  - CPU pytest on this branch, `.venv`, torch 2.15.0+cpu, `PYTHONPATH=src`,
+    `pytest -m "not slow and not gpu"`: 82 collected, 71 passed, 11 failed. The 11
+    names are the ones already listed under S0.6. No other test failed.
+    `.venv/bin/ruff check .` and `.venv/bin/ruff format --check .` pass.
 
 ### [ ] S0.5 Package rename `rlhf_platform` → `rlpost`
 - Depends on: the owner renaming the GitHub repo first.
@@ -385,3 +396,4 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-10-30 · owner · Deleted the eight unverified docs. Judged each of the 13 failures and left the 11 algorithm disagreements red. Fixed the CPU pin_memory crash and the 1-D rollout cat. Added S0.11. · a8db00d
 - 2026-10-30 · S0.6 · Triage recorded, not implemented. Margin is beta-scaled and reference-adjusted (both test and code wrong). Accuracy uses that reward (code's 0.75 stands). `dpo_beta` becomes its own config field. S0.6b confirms against TRL. · 615cd83
 - 2026-10-30 · S0.4 · One PPO trainer (`PPOTrainer`). The second engine and its loss module are gone. The logprob gather is unchanged and lives in `train_step` only. `docs/CODE_MAP.md` is written from the code. · 9bfc8a5
+- 2026-10-30 · S0.4b · Removed the hardcoded benchmark script, renamed the padding-label collator, and dropped the dead early-stopping callback and the constant DPO explained-variance field. The 11 known failures are unchanged. · b500b17
