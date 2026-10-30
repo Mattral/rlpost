@@ -103,7 +103,7 @@ The exit criteria for Stage 0:
     (for example 1.9 steps/s and 3.5 GB) whether or not TRL imports. Pytest does not collect
     it (`python_files = test_*.py`). It is not a result.
 
-### [ ] S0.4 Code ownership pass
+### [x] S0.4 Code ownership pass
 - Merge `ppo_engine.py` and `alignment/ppo_engine.py` into one implementation. Delete dead code.
 - Write `docs/CODE_MAP.md`: one paragraph per module covering what it does, its inputs and
   outputs with tensor shapes, and which tests cover it. The owner reads this before Stage 0.6.
@@ -113,6 +113,50 @@ The exit criteria for Stage 0:
   - Choose the surviving PPO engine by correctness, including the `train_step` gather bug
     in `src/rlhf_platform/ppo_engine.py`, not by which file is longer. Document the choice
     in the PR. Write `docs/CODE_MAP.md` from the code, not from the deleted phase docs.
+  - 2026-10-30: GitHub `main` is still the S0.1 merge (`764079a`, PR #6). PRs #7, #8, and #9
+    are on the stack that ends at `fix/owner-decisions-docs-and-rollout` (`80d4aed`). This
+    branch starts there. A branch from GitHub `main` would not contain the README, the CI
+    job, or the 11 failures this item is not allowed to add to.
+  - The survivor is `PPOTrainer` in `src/rlhf_platform/ppo_engine.py`. Deleted
+    `alignment/ppo_engine.py` (`DistributedPPOEngine`) and `alignment/loss.py`. Only the
+    deleted engine imported `loss.py`.
+  - Why that file, not the longer one: `PPOTrainer` splits GAE, the clipped policy loss,
+    the value loss, entropy, KL, the adaptive coefficient, and explained variance into
+    methods the tests call, and those methods take per-action log-probs or rank-2 rewards
+    and values. `DistributedPPOEngine.ppo_step` passed a full-vocabulary `log_softmax`
+    (`[B, T, V]`) into a ratio that needs an action log-prob, discarded the reference
+    forward, never called the reward model, left `collect_rollouts` empty, ignored the
+    advantages it had just computed because `PPOLossFn` computed them again, called
+    `optimizer.zero_grad()` at the start of every step, read critic values from `.logits`,
+    set `old_values` to the detached current values so the value clip could not apply,
+    and added `lambda * sum(values**2)` to the value loss. It also used
+    `dist.ReduceOp.MEAN`, which torch 2.15 does not define. The `except` path returned
+    the local metrics.
+  - The gather stays in one place: `PPOTrainer.train_step`,
+    `log_softmax(...).gather(1, input_ids.unsqueeze(-1))`. The line is unchanged.
+    A comment above it names S0.6a. `input_ids` is `[B, T]`, so the index is `[B, T, 1]`.
+    `DummyModel` logits are `[B, V]`. Causal-LM logits are `[B, T, V]`, and dimension 1
+    is time, with no shift.
+  - KL direction and the value loss were not edited. `compute_kl_divergence(policy_logits,
+    ref_logits)` is the full-vocabulary KL(reference || policy). The value loss is
+    `value_loss_coefficient * MSE`, with no clip. S0.6d and S0.6e own those.
+  - Also removed, because nothing remaining called them: the old `train.py` loop (the
+    file stays and exits 2; it does not call `PPOTrainer`); `sample_batch_to_device`,
+    `RolloutDataset`, `AsyncRolloutPipeline`, `QuerySampler`, and `RolloutBuffer.is_full`;
+    `PPOSample` and `async_load_dataset`; `create_default_topology` (actor and reference
+    device lists overlapped, and `validate` would have rejected it; nothing called it);
+    `log_config_to_wandb` and the `ppo_engine` `__main__` print. Docstrings that said
+    production-grade, mixed precision, optional value clipping, a constructor
+    `PPOTrainer(config)`, or reference-free DPO now match the code.
+  - Left for S0.9: `distributed/comm_hooks.py`, `distributed/async_io.py`,
+    `scripts/simulate_runtime.py`, and the unused `NCCLProfiler` and
+    `DistributedMetricsCollector`. Config fields the tests construct stay, including
+    `use_peft_lora`, `attn_implementation`, and `ppo_num_epochs`, even where no trainer
+    reads them.
+  - CPU pytest on this branch, `.venv`, torch 2.15.0+cpu, `PYTHONPATH=src`,
+    `pytest -m "not slow and not gpu"`: 82 collected, 71 passed, 11 failed, in 18.72s.
+    The 11 names are the ones already listed under S0.6. No other test failed.
+    `.venv/bin/ruff check .` and `.venv/bin/ruff format --check .` pass.
 
 ### [ ] S0.5 Package rename `rlhf_platform` → `rlpost`
 - Depends on: the owner renaming the GitHub repo first.
@@ -303,3 +347,4 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-10-30 · S0.3 · CI is one CPU job: pinned torch, ruff, and pytest, with no swallowed failures. Ruff passes. Pytest is 69 passed, 13 failed, and the job is expected to be red until those failures are fixed. · 42c71a9
 - 2026-10-30 · owner · Deleted the eight unverified docs. Judged each of the 13 failures and left the 11 algorithm disagreements red. Fixed the CPU pin_memory crash and the 1-D rollout cat. Added S0.11. · a8db00d
 - 2026-10-30 · S0.6 · Triage recorded, not implemented. Margin is beta-scaled and reference-adjusted (both test and code wrong). Accuracy uses that reward (code's 0.75 stands). `dpo_beta` becomes its own config field. S0.6b confirms against TRL. · 615cd83
+- 2026-10-30 · S0.4 · One PPO trainer (`PPOTrainer`). The second engine and its loss module are gone. The logprob gather is unchanged and lives in `train_step` only. `docs/CODE_MAP.md` is written from the code. · pending-sha

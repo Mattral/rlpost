@@ -38,17 +38,15 @@ pip install -e ".[dev]"
 ```
 src/rlhf_platform/
 ├── __init__.py
-├── config.py              # Configuration system (Phase 1)
-├── ppo_engine.py          # PPO algorithm (Phase 2)
-├── cli.py                 # CLI orchestration (Phase 3)
-├── dataset.py             # Dataset pipeline (Phase 3)
-├── sft_engine.py          # SFT trainer (Phase 3)
-├── reward_engine.py       # Reward trainer (Phase 3)
-├── dpo_engine.py          # DPO trainer (Phase 4)
+├── config.py
+├── ppo_engine.py          # the only PPO trainer
+├── cli.py
+├── dataset.py
+├── sft_engine.py
+├── reward_engine.py
+├── dpo_engine.py
 ├── alignment/
 │   ├── __init__.py
-│   ├── loss.py
-│   ├── ppo_engine.py
 │   └── rollout.py
 ├── distributed/
 │   ├── __init__.py
@@ -60,11 +58,12 @@ src/rlhf_platform/
     └── telemetry.py
 
 tests/
-├── __init__.py
-├── test_config.py         # Config system tests (Phase 1)
-├── test_ppo_engine.py     # PPO algorithm tests (Phase 2)
-├── test_pipelines.py      # Integration tests (Phase 3)
-└── run_benchmark_comparison.py  # Benchmarks (Phase 4)
+├── test_config.py
+├── test_dpo_engine.py
+├── test_ppo_engine.py
+├── test_rollout.py
+├── test_topology.py
+└── run_benchmark_comparison.py   # not collected by pytest
 
 docs/
 ├── index.md               # Short index of the docs that remain
