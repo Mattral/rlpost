@@ -360,8 +360,8 @@ Cover:
   `docs/educational_deepdive.md`, `docs/DEVELOPMENT.md`, and `docs/index.md`
   that no code or result file supports, and propose delete or rewrite per file.
   Do not edit those claims in this item.
-- After this item, `git grep -i "slurm\|kubernetes\|infiniband\|multi-node\|deepspeed"`
-  matches only this file and `docs/core/philosophy.md`.
+- After the owner decision below, `git grep -i "production\|petascale\|multi-node\|slurm\|kubernetes\|infiniband\|deepspeed"`
+  matches this file, and `LICENSE` where the Apache-2.0 text says "reproduction".
 - Notes:
   - 2026-10-30: `origin/main` is `96a648c` (PR #14). S0.9b is on main. This branch
     starts there.
@@ -387,6 +387,30 @@ Cover:
     `pytest -m "not slow and not gpu"`: 79 collected, 68 passed, 11 failed, in
     19.76s. The 11 names are the ones already listed under S0.6. No other test
     failed. `.venv/bin/ruff check .` and `.venv/bin/ruff format --check .` pass.
+  - 2026-10-30 owner decision, done on this branch. Deleted
+    `docs/core/philosophy.md` and `docs/governance/security.md` (`116dd75`).
+    `docs/index.md` drops those two rows and nothing else. Added root
+    `SECURITY.md`: report through GitHub private vulnerability reporting or a
+    GitHub issue. Research codebase, no security guarantees, no feature claims.
+  - `df564d9` rewrites `docs/educational_deepdive.md`. The literature sections
+    and the four paper references stay. The notebook inventory, the cluster-scale
+    section, and the sentence that called `src/rlhf_platform/` a production
+    implementation are gone. `docs/DEVELOPMENT.md` now matches the one CPU CI
+    job: Python 3.11+ in `pyproject.toml`, Python 3.12 in CI because of the
+    numpy pin, CPU torch, ruff, `pytest -q`, and the cu126 wheel for Pascal
+    (sm_61). The clone URL is `https://github.com/Mattral/rlpost`.
+  - `587df62` removes the word production from the files that still had it
+    outside this roadmap. `TrainingConfig.default_config` and
+    `configs/default.yaml` use `rlhf_default_run` and `./outputs/default_run`.
+    The module docstring, the `test_default_config` docstring, and the purpose
+    sentence in `docs/governance/contributing.md` changed with them. Tests do
+    not assert the old run name.
+  - `git grep -i "production\|petascale\|multi-node\|slurm\|kubernetes\|infiniband\|deepspeed"`
+    returns this file and `LICENSE`. Every `LICENSE` hit is the substring inside
+    "reproduction" in the Apache-2.0 text. That file was not edited.
+  - CPU pytest after the decision, same command: 79 collected, 68 passed,
+    11 failed, in 20.40s. The 11 names are unchanged. Ruff check and format
+    check pass.
 
 ### [ ] S0.10 P2000 CUDA smoke test (optional)
 - Use the cu126 wheel, fp32, a tiny model, and run 20 steps each of SFT, DPO and PPO.
@@ -493,3 +517,4 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-10-30 · S0.9 · Deleted the unused process-group, hook, and checkpoint modules, the multi-rank script, the cluster YAML, and docs/design.md. The 11 known failures are unchanged. Two passing tests went with the deleted module. · f8ce6d0
 - 2026-10-30 · S0.9b · Removed the unused NCCL profiler, the distributed metrics collector, the four TrainingConfig device fields, and the unread ZeRO-3 YAML. The 11 known failures are unchanged. One passing config test went with the fields. · c72ccd7
 - 2026-10-30 · S0.9c · Removed the unused DeepSpeed extra and deleted the operations docs that described SLURM, Kubernetes, and NCCL. Claim text in the five files is unchanged pending an owner decision. · 3cbd7b5
+- 2026-10-30 · S0.9c · Owner decision: deleted philosophy.md and governance/security.md, added SECURITY.md, and rewrote the deep dive and DEVELOPMENT.md. The grep matches this file, and LICENSE on the substring inside "reproduction". · 116dd75
