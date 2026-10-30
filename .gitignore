@@ -1,0 +1,29 @@
+# Bytecode and packaging
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.egg-info/
+
+# Tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+coverage.xml
+.venv/
+build/
+dist/
+
+# Local-only agent and editor files
+.claude/
+agent.md
+CLAUDE.md
+AGENTS.md
+*:Zone.Identifier
+
+# Training artifacts
+checkpoints/
+wandb/
+outputs/

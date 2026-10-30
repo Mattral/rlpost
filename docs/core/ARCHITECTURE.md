@@ -426,7 +426,7 @@ telemetry.log_ppo_step(
 | `train.py` | Production entrypoint with 5-stage initialization |
 | `scripts/simulate_runtime.py` | Multi-rank CPU simulator for validation |
 | `scripts/README.md` | Usage guide and troubleshooting |
-| `roadmap.md` | Completion status and architecture decisions |
+| `ROADMAP.md` | Work status, notes, and change log |
 | `src/rlhf_platform/distributed/topology.py` | Asymmetric topology definition and group creation |
 | `src/rlhf_platform/distributed/async_io.py` | Non-blocking checkpoint streaming |
 | `src/rlhf_platform/distributed/comm_hooks.py` | Communication overlapping and safety checks |
