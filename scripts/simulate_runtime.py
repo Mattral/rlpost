@@ -19,12 +19,11 @@ import logging
 import os
 import sys
 import tempfile
-import threading
 import time
 import traceback
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 import torch
 import torch.distributed as dist
@@ -34,10 +33,12 @@ import torch.nn as nn
 ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT_DIR / "src"))
 
-from rlhf_platform.alignment.rollout import RolloutBuffer, Rollout
-from rlhf_platform.distributed.topology import ClusterTopology, ModelRole, ParallelStrategy, ModelPlacement, TopologyBuilder
+from rlhf_platform.alignment.rollout import Rollout, RolloutBuffer
+from rlhf_platform.distributed.topology import (
+    ClusterTopology,
+    TopologyBuilder,
+)
 from rlhf_platform.utils.telemetry import RankAwareTelemetry
-
 
 logging.basicConfig(
     level=logging.INFO,
@@ -49,6 +50,7 @@ logging.basicConfig(
 @dataclass
 class SimulationContext:
     """Holds rank-local simulation state."""
+
     rank: int
     world_size: int
     local_rank: int
@@ -176,7 +178,9 @@ def rank_worker(rank: int, world_size: int, num_iterations: int, output_dir: Pat
 
         # Initialize distributed process group (gloo backend for CPU)
         ctx.log_trace("Initializing distributed process group with gloo backend.")
-        dist.init_process_group(backend="gloo", init_method="env://", rank=rank, world_size=world_size)
+        dist.init_process_group(
+            backend="gloo", init_method="env://", rank=rank, world_size=world_size
+        )
         ctx.log_trace("Distributed process group initialized successfully.")
 
         # Synchronize all ranks before topology creation
@@ -213,7 +217,9 @@ def rank_worker(rank: int, world_size: int, num_iterations: int, output_dir: Pat
                 for rollout in rollouts:
                     buffer.add(rollout)
 
-                ctx.log_trace(f"Iteration {iteration}: Generated 2 rollouts. Buffer size: {buffer.size()}.")
+                ctx.log_trace(
+                    f"Iteration {iteration}: Generated 2 rollouts. Buffer size: {buffer.size()}."
+                )
 
                 # Simulate sampling and non-blocking device transfer
                 if buffer.size() > 0:
@@ -222,8 +228,8 @@ def rank_worker(rank: int, world_size: int, num_iterations: int, output_dir: Pat
 
                     # Non-blocking transfer to device
                     for rollout in sampled:
-                        q = rollout.query_tokens.to(device, non_blocking=True)
-                        r = rollout.response_tokens.to(device, non_blocking=True)
+                        rollout.query_tokens.to(device, non_blocking=True)
+                        rollout.response_tokens.to(device, non_blocking=True)
                         ctx.log_trace(f"Iteration {iteration}: Non-blocking transfer completed.")
 
                 # Synchronize ranks periodically
@@ -251,7 +257,9 @@ def rank_worker(rank: int, world_size: int, num_iterations: int, output_dir: Pat
 
         # Write trace log
         ctx.dump_trace(output_dir)
-        logger.info(f"Rank {rank} completed successfully. Trace written to {output_dir / f'trace_rank_{rank}.json'}.")
+        logger.info(
+            f"Rank {rank} completed successfully. Trace written to {output_dir / f'trace_rank_{rank}.json'}."
+        )
 
     except Exception as e:
         logger.error(f"Rank {rank} encountered fatal error: {e}")
@@ -267,7 +275,9 @@ def main() -> None:
     )
     parser.add_argument("--num-ranks", type=int, default=4, help="Number of simulated ranks.")
     parser.add_argument("--iterations", type=int, default=10, help="Number of iterations per rank.")
-    parser.add_argument("--output-dir", type=str, default=None, help="Output directory for trace logs.")
+    parser.add_argument(
+        "--output-dir", type=str, default=None, help="Output directory for trace logs."
+    )
     args = parser.parse_args()
 
     if args.output_dir is None:

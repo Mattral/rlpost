@@ -1,7 +1,7 @@
 import tempfile
 import textwrap
 
-from rlhf_platform.distributed.topology import load_topology_from_yaml, ModelRole, ParallelStrategy
+from rlhf_platform.distributed.topology import ModelRole, ParallelStrategy, load_topology_from_yaml
 
 
 def test_load_topology_from_yaml_loads_model_placements():
@@ -100,4 +100,6 @@ def test_topology_validate_rejects_conflicting_assignments():
         except AssertionError as exc:
             assert "assigned to both active training and frozen inference groups" in str(exc)
         else:
-            raise AssertionError("load_topology_from_yaml() should raise on overlapping active and inference placements.")
+            raise AssertionError(
+                "load_topology_from_yaml() should raise on overlapping active and inference placements."
+            )

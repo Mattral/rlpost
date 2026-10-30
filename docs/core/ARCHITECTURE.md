@@ -1,131 +1,22 @@
-# RLHF Platform: Production Entrypoints & Architecture Summary
+# Distributed layout
 
-This document summarizes the completed distributed RLHF alignment platform, focusing on the two primary execution paths: production training (`train.py`) and local cluster simulation (`scripts/simulate_runtime.py`).
+This note is not a measured result. The module-by-module map, with tensor shapes and test status, is [CODE_MAP.md](../CODE_MAP.md).
 
----
+`train.py` exits with status 2. S0.4 removed `DistributedPPOEngine`. The PPO update is `PPOTrainer` in `src/rlhf_platform/ppo_engine.py`. Connecting a run is S0.11.
 
-## Executive Summary
+What the remaining code does:
 
-The RLHF platform merges **algorithmic alignment rigor** (PPO, KL regularization, reward modeling) with **distributed systems co-design** (3D parallelism, async I/O, communication overlapping) into an elite, production-grade engine.
+- `topology.py` stores actor, critic, reference, and reward placements. If `torch.distributed` is already initialized, it creates one process group per placement. It does not start FSDP or tensor parallel. `validate` rejects a rank that appears in both an active placement and an inference placement.
+- `rollout.py` keeps generated tokens in a CPU list and can sample a response from a module that returns `.logits`. The background generator-thread class was removed in S0.4. Nothing tested it.
+- `comm_hooks.py` and `async_io.py` import. No test runs a hook or writes a checkpoint. S0.9 decides whether those files stay.
 
-### Key Innovations
-
-1. **Asymmetric Multi-Model Topology**
-   - Actor & Critic (active): FSDP + Tensor Parallelism, gradient updates
-   - Reference & Reward (frozen): Inference replicas, no-grad, shared memory footprint
-   - Result: 40%+ reduction in GPU memory vs. symmetric sharding
-
-2. **Decoupled Async Rollout Pipeline**
-   - Generator threads produce token sequences and pinned CPU buffers (I/O-bound)
-   - Training threads pull non-blocking device transfers and run backward passes (compute-bound)
-   - Result: No GPU stalls waiting for generation; full compute utilization
-
-3. **Overlapped Collective Communication**
-   - Custom DDP communication hooks fire `all_reduce` ops during backward computation
-   - Result: Network latency hidden by overlapping compute; InfiniBand fabric fully saturated
-
-4. **Non-Blocking Checkpoint Streaming**
-   - Async writer thread pins weights to CPU and streams to disk without training interruption
-   - Result: No training loop stalls during checkpoint save
+An older draft of this page claimed a 40% GPU-memory reduction. That number was not a measurement. It is gone.
 
 ---
 
-## Execution Paths
+### Local cluster script (`scripts/simulate_runtime.py`)
 
-### Path 1: Production Training (`train.py`)
-
-**Purpose:** Full end-to-end RLHF alignment training on multi-node GPU clusters.
-
-**Initialization Flow (5 Stages):**
-
-```
-[Stage 1: Distributed Init]
-  ├─ Read env: WORLD_SIZE, RANK, LOCAL_RANK
-  ├─ Init process group: NCCL (GPU) or Gloo (CPU)
-  ├─ Barrier synchronization
-  └─ Verify all ranks connected
-
-[Stage 2: Topology Loading & Group Creation]
-  ├─ Load YAML topology from configs/cluster_topology.yaml
-  ├─ Create asymmetric placement: Actor/Critic (active) vs. Reference/Reward (frozen)
-  ├─ Call dist.new_group() for each subgroup (actor_group, critic_group, etc.)
-  ├─ Validate no overlapping rank assignments
-  └─ Barrier at end to sync all ranks
-
-[Stage 3: Model Loading]
-  ├─ Load Actor (CausalLM) on device with fp16/bf16 precision
-  ├─ Load Critic (SequenceClassification) on device
-  ├─ Load Reference (CausalLM) frozen, fp32
-  ├─ Load Reward (SequenceClassification) frozen, fp32
-  ├─ Verify parameter counts match topology config
-  └─ Barrier after all models loaded
-
-[Stage 4: DDP Wrapping & Communication Hooks]
-  ├─ If active rank:
-  │   ├─ Wrap actor in DistributedDataParallel with actor_group
-  │   ├─ Wrap critic in DistributedDataParallel with critic_group
-  │   ├─ Register gradient bucket overlap hook
-  │   ├─ Register gradient clipping hook
-  │   └─ Register NaN detection hook
-  └─ Log placement: active vs. inference ranks
-
-[Stage 5: Pipeline & Engine Initialization]
-  ├─ Create query sampler from tokenizer
-  ├─ Create RolloutBuffer with pinned CPU memory
-  ├─ Create RolloutGenerator with policy/reference/reward models
-  ├─ Start AsyncRolloutPipeline (2 background threads)
-  ├─ Create DistributedPPOEngine
-  ├─ Create DistributedCheckpointManager (async writes)
-  ├─ Create RankAwareTelemetry
-  ├─ Final barrier before training
-  └─ Begin training loop
-```
-
-**Training Loop:**
-
-```python
-while ppo_engine.step < num_steps:
-  # Wait for async rollouts to populate buffer
-  if buffer.size() < batch_size:
-    sleep(0.2)
-    continue
-  
-  # Execute PPO step (gradient accumulation, backward, optimizer step)
-  metrics = ppo_engine.ppo_step()
-  
-  # Log metrics via telemetry (rank 0 only)
-  telemetry.log_ppo_step(...)
-  
-  # Periodic checkpointing (rank 0 only, non-blocking)
-  if step % 100 == 0:
-    checkpoint_manager.save_checkpoint(...)
-  
-  # Memory monitoring
-  telemetry.log_memory_usage(...)
-```
-
-**Usage:**
-
-```bash
-# Single-node CPU (debugging)
-python train.py --use-cpu --num-steps 10 --verbose
-
-# Multi-node GPU (production)
-torchrun --nproc_per_node=8 --nnodes=2 --node_rank=$NODE_RANK \
-  --master_addr=$MASTER_IP --master_port=29500 \
-  train.py --config configs/cluster_topology.yaml --num-steps 1000
-```
-
-**Exit Behavior:**
-- Graceful shutdown on `KeyboardInterrupt` (flushes checkpoints)
-- Error with traceback on exception
-- Final step count logged
-
----
-
-### Path 2: Local Cluster Simulation (`scripts/simulate_runtime.py`)
-
-**Purpose:** Validate distributed topology, process groups, and buffer operations without requiring multi-node GPU infrastructure.
+Pytest does not collect this script. No passing run is recorded. S0.9 decides whether it stays. The script attempts the following:
 
 **Simulation Architecture:**
 
@@ -210,34 +101,21 @@ cat /tmp/rlhf_simulate_runtime/trace_rank_0.json
 
 ---
 
-## Integration: How train.py Uses simulate_runtime.py Validation
+## What is not wired
 
-```
-Developer Workflow
-│
-├─ Step 1: Validate locally (no GPU)
-│  └─ python scripts/simulate_runtime.py
-│     ├─ Checks: topology groups, buffers, barriers
-│     └─ Output: trace logs for forensics
-│
-├─ Step 2: Debug on CPU
-│  └─ python train.py --use-cpu --verbose
-│     ├─ Runs full training loop (models are mocked/small)
-│     └─ Validates end-to-end orchestration
-│
-└─ Step 3: Deploy multi-node
-   └─ torchrun ... train.py --config configs/cluster_topology.yaml
-      ├─ Uses same topology groups verified in step 1
-      ├─ Uses same async pipeline + non-blocking buffers
-      └─ Scales to 1000s of GPUs
-```
+`python train.py` exits 2. It does not load a topology, start a rollout, or call `PPOTrainer`.
+
+`scripts/simulate_runtime.py` is a separate script. Pytest does not run it. A trace file from that script is not a recorded result unless it is committed under `benchmarks/results/`.
 
 ---
 
 ## Module Dependency Graph
 
 ```
-train.py (entrypoint)
+train.py
+  exits 2. It does not import the modules below.
+
+The modules that still exist:
   ├─ rlhf_platform.distributed.topology
   │   └─ ClusterTopology, TopologyBuilder, load_topology_from_yaml
   │       └─ torch.distributed.new_group()
@@ -251,15 +129,11 @@ train.py (entrypoint)
   │       └─ torch.distributed communication operations
   │
   ├─ rlhf_platform.alignment.rollout
-  │   ├─ RolloutBuffer (thread-safe, pinned memory)
-  │   ├─ RolloutGenerator (autoregressive generation)
-  │   └─ AsyncRolloutPipeline (multiprocessing.Thread)
-  │       └─ Background rollout generation
+  │   ├─ RolloutBuffer (CPU list, pin only if CUDA exists)
+  │   └─ RolloutGenerator (autoregressive sampling)
   │
-  ├─ rlhf_platform.alignment.ppo_engine
-  │   ├─ DistributedPPOEngine
-  │   └─ loss.py (PPO, KL, advantages, clipping)
-  │       └─ Numerical stability (clamping, normalization)
+  ├─ rlhf_platform.ppo_engine
+  │   └─ PPOTrainer (the only PPO update)
   │
   └─ rlhf_platform.utils.telemetry
       ├─ RankAwareTelemetry (structured JSON logging)
@@ -354,10 +228,9 @@ zero_optimization:
 
 ### 1. Asymmetric Topology
 ```python
-# Not: All 4 models on all 16 GPUs (wasteful)
-# Yes: Actor/Critic on 8+4 GPUs, Reference/Reward on 2+2 GPUs
-topology.actor_placement.device_list      # [0, 1, 2, 3, 4, 5, 6, 7]
-topology.reference_placement.device_list  # [4, 5]
+# Active ranks and inference ranks must be disjoint. validate() asserts that.
+topology.actor_placement.device_list      # example: [0, 1, 2, 3]
+topology.reference_placement.device_list  # example: [4, 5]
 ```
 
 ### 2. Thread-Safe Async Buffer
@@ -367,7 +240,7 @@ rollout = generator.generate_rollout(query)
 buffer.add(rollout)  # Thread-safe with lock
 
 # Consumer (training thread)
-sampled = buffer.sample_batch_to_device(batch_size, device)  # Non-blocking transfer
+sampled = buffer.sample_batch(batch_size)  # list of Rollout, still on CPU
 ```
 
 ### 3. Communication Overlapping
@@ -410,7 +283,7 @@ telemetry.log_ppo_step(
 
 4. **Deploy:**
    ```bash
-   torchrun --nproc_per_node=8 --nnodes=<N> ... train.py --num-steps 10000
+   # train.py exits 2. It is not a launch command. See S0.11.
    ```
 
 5. **Monitor:**
@@ -423,16 +296,15 @@ telemetry.log_ppo_step(
 
 | File | Purpose |
 |------|---------|
-| `train.py` | Production entrypoint with 5-stage initialization |
-| `scripts/simulate_runtime.py` | Multi-rank CPU simulator for validation |
+| `train.py` | Exits 2. Does not call `PPOTrainer` |
+| `scripts/simulate_runtime.py` | Uncollected multi-rank script. S0.9 |
 | `scripts/README.md` | Usage guide and troubleshooting |
 | `ROADMAP.md` | Work status, notes, and change log |
 | `src/rlhf_platform/distributed/topology.py` | Asymmetric topology definition and group creation |
 | `src/rlhf_platform/distributed/async_io.py` | Non-blocking checkpoint streaming |
 | `src/rlhf_platform/distributed/comm_hooks.py` | Communication overlapping and safety checks |
-| `src/rlhf_platform/alignment/rollout.py` | Async rollout pipeline with pinned buffers |
-| `src/rlhf_platform/alignment/ppo_engine.py` | Distributed PPO training executor |
-| `src/rlhf_platform/alignment/loss.py` | Numerically stable loss functions |
+| `src/rlhf_platform/alignment/rollout.py` | CPU rollout buffer and token sampler |
+| `src/rlhf_platform/ppo_engine.py` | `PPOTrainer`, the only PPO update |
 | `src/rlhf_platform/utils/telemetry.py` | Structured observability and profiling |
 | `configs/cluster_topology.yaml` | Hardware layout and model placement |
 | `configs/deepspeed_zero3.yaml` | Optional ZeRO-3 configuration |

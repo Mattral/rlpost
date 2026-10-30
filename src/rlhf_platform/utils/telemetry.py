@@ -8,15 +8,17 @@ tracing, NCCL profiling metrics, and per-rank performance tracking.
 import json
 import logging
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 
+import torch
 import torch.distributed as dist
 
 
 @dataclass
 class TelemetryEvent:
     """Single structured telemetry event."""
+
     timestamp: float
     rank: int
     event_type: str  # e.g., "ppo_step", "communication", "checkpoint"
@@ -37,12 +39,12 @@ class RankAwareTelemetry:
         self.world_size = world_size
         self.events: List[TelemetryEvent] = []
         self.log_file = log_file
-        
+
         self.logger = logging.getLogger(f"rank_{rank}_telemetry")
         if log_file and rank == 0:
             handler = logging.FileHandler(log_file)
             self.logger.addHandler(handler)
-        
+
         self.logger.setLevel(logging.INFO)
 
     def log_event(
@@ -62,7 +64,7 @@ class RankAwareTelemetry:
             error=error,
         )
         self.events.append(event)
-        
+
         # Log to file/console
         log_msg = event.to_json()
         if error:
@@ -206,7 +208,7 @@ class DistributedMetricsCollector:
     def get_local_summary(self) -> Dict[str, Dict[str, float]]:
         """Get summary of local metrics."""
         import statistics
-        
+
         summary = {}
         for name, values in self.local_metrics.items():
             if values:
@@ -224,25 +226,26 @@ class DistributedMetricsCollector:
             return [self.get_local_summary()]
 
         import pickle
+
         local_summary = self.get_local_summary()
-        
+
         # Serialize
         local_bytes = pickle.dumps(local_summary)
         local_tensor = torch.tensor(list(local_bytes), dtype=torch.uint8)
-        
+
         # Gather sizes
         size_tensor = torch.tensor(len(local_bytes), dtype=torch.long)
         sizes = [torch.tensor(0, dtype=torch.long) for _ in range(self.world_size)]
         dist.all_gather(sizes, size_tensor)
-        
+
         # Gather data
         max_size = max([s.item() for s in sizes])
         padded = torch.zeros(max_size, dtype=torch.uint8)
-        padded[:len(local_bytes)] = local_tensor
-        
+        padded[: len(local_bytes)] = local_tensor
+
         all_data = [torch.zeros(max_size, dtype=torch.uint8) for _ in range(self.world_size)]
         dist.all_gather(all_data, padded)
-        
+
         # Deserialize (rank 0 only)
         all_metrics = []
         if self.rank == 0:
@@ -251,7 +254,7 @@ class DistributedMetricsCollector:
                 try:
                     metrics_dict = pickle.loads(data[:actual_size].cpu().numpy().tobytes())
                     all_metrics.append(metrics_dict)
-                except:
+                except Exception:
                     all_metrics.append({})
-        
+
         return all_metrics

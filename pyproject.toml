@@ -113,12 +113,32 @@ disallow_untyped_defs = false
 disallow_incomplete_defs = false
 ignore_missing_imports = true
 
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests", "scripts"]
+extend-exclude = ["docs"]
+
+[tool.ruff.lint]
+# E501 is left to the formatter. UP is not in this gate: the tree still uses
+# typing.List and Optional in many files, and rewriting them is not this change.
+select = ["E", "F", "I"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# This file puts the repo root on sys.path before importing the package.
+"scripts/simulate_runtime.py" = ["E402"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--cov=rlhf_platform --cov-report=term-missing -v"
+addopts = "-q -m 'not slow and not gpu'"
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
+markers = [
+    "slow: test takes long enough to skip in the default CPU job",
+    "gpu: test requires a CUDA device",
+]
 
 [tool.coverage.run]
 branch = true

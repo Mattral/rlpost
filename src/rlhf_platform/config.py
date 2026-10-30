@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field, field_validator
 
 class BaseConfig(BaseModel):
     """Abstract base configuration with common settings.
-    
+
     All configuration subclasses inherit from this to ensure consistent
     model validation, serialization, and reproducibility.
     """
@@ -37,7 +37,7 @@ class BaseConfig(BaseModel):
 
     def to_json_str(self: "BaseConfig") -> str:
         """Serialize configuration to formatted JSON string.
-        
+
         Returns:
             str: JSON representation of configuration with 2-space indentation.
         """
@@ -45,7 +45,7 @@ class BaseConfig(BaseModel):
 
     def to_json_file(self: "BaseConfig", path: str | Path) -> None:
         """Save configuration to JSON file.
-        
+
         Args:
             path: File path where JSON configuration will be saved.
         """
@@ -56,10 +56,10 @@ class BaseConfig(BaseModel):
     @classmethod
     def from_json_str(cls: type["BaseConfig"], json_str: str) -> "BaseConfig":
         """Load configuration from JSON string.
-        
+
         Args:
             json_str: JSON string representation of configuration.
-            
+
         Returns:
             Configuration instance with parsed values.
         """
@@ -69,10 +69,10 @@ class BaseConfig(BaseModel):
     @classmethod
     def from_json_file(cls: type["BaseConfig"], path: str | Path) -> "BaseConfig":
         """Load configuration from JSON file.
-        
+
         Args:
             path: Path to JSON configuration file.
-            
+
         Returns:
             Configuration instance with loaded values.
         """
@@ -83,10 +83,10 @@ class BaseConfig(BaseModel):
 
 class ModelConfig(BaseConfig):
     """Model architecture and checkpoint paths.
-    
+
     Supports dynamic model selection from Hugging Face, with optional
     quantization and LoRA parameters.
-    
+
     Attributes:
         policy_model_id: Hugging Face model ID or local path for policy/actor model.
         policy_model_revision: Git revision (branch/tag) of policy model.
@@ -166,10 +166,10 @@ class ModelConfig(BaseConfig):
 
 class OptimizationConfig(BaseConfig):
     """Optimizer and learning rate settings.
-    
+
     Controls gradient-based optimization, learning rate scheduling,
     and mixed-precision training.
-    
+
     Attributes:
         optimizer: Type of optimizer ('adam', 'adamw', 'sgd').
         learning_rate: Peak learning rate for policy training.
@@ -234,9 +234,9 @@ class OptimizationConfig(BaseConfig):
 
 class AlignmentConfig(BaseConfig):
     """RLHF/DPO alignment hyperparameters.
-    
+
     Controls reward modeling, policy constraints, and advantage computation.
-    
+
     Attributes:
         method: Alignment method ('ppo', 'dpo').
         ppo_epsilon: PPO clipping ratio.
@@ -305,7 +305,7 @@ class AlignmentConfig(BaseConfig):
 
 class DatasetConfig(BaseConfig):
     """Dataset and data loading configuration.
-    
+
     Attributes:
         dataset_name: Hugging Face dataset name or local path.
         dataset_split: Which split to use ('train', 'validation', etc.).
@@ -379,11 +379,11 @@ class DatasetConfig(BaseConfig):
 
 class TrainingConfig(BaseConfig):
     """Complete training configuration combining all sub-configs.
-    
+
     This is the top-level configuration object that orchestrates all aspects
     of RLHF/DPO training. It aggregates model, optimization, alignment, and
     dataset configurations into a single, serializable object.
-    
+
     Attributes:
         run_name: Experiment name for logging and checkpointing.
         output_dir: Directory for checkpoints, logs, and outputs.
@@ -486,15 +486,15 @@ class TrainingConfig(BaseConfig):
     @classmethod
     def from_yaml(cls: type["TrainingConfig"], path: str | Path) -> "TrainingConfig":
         """Load configuration from YAML file.
-        
+
         YAML structure should mirror the nested configuration classes.
-        
+
         Args:
             path: Path to YAML configuration file.
-            
+
         Returns:
             TrainingConfig instance with loaded values.
-            
+
         Example:
             >>> config = TrainingConfig.from_yaml("configs/default.yaml")
         """
@@ -512,13 +512,13 @@ class TrainingConfig(BaseConfig):
 
     def to_yaml(self: "TrainingConfig", path: str | Path) -> None:
         """Save configuration to YAML file.
-        
+
         Args:
             path: File path where YAML configuration will be saved.
         """
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        
+
         data = self.model_dump()
         with open(path, "w") as f:
             yaml.dump(data, f, default_flow_style=False, sort_keys=False)
@@ -526,10 +526,10 @@ class TrainingConfig(BaseConfig):
     @classmethod
     def toy_mode(cls: type["TrainingConfig"]) -> "TrainingConfig":
         """Create a toy configuration for local testing on single GPU.
-        
+
         Toy configuration uses small models and datasets to verify pipeline
         correctness in <20 minutes on a free-tier T4 GPU.
-        
+
         Toy settings:
         - Policy: distilgpt2 (82M params)
         - Reference: distilgpt2
@@ -538,7 +538,7 @@ class TrainingConfig(BaseConfig):
         - Batch size: 8
         - Grad accumulation: 1
         - Training steps: ~100 per phase
-        
+
         Returns:
             TrainingConfig with all toy overrides applied.
         """
@@ -612,10 +612,10 @@ class TrainingConfig(BaseConfig):
     @classmethod
     def default_config(cls: type["TrainingConfig"]) -> "TrainingConfig":
         """Create a sensible default configuration for production training.
-        
+
         Default configuration uses standard models and hyperparameters suitable
         for training on modern GPUs with decent memory (e.g., A100, H100).
-        
+
         Returns:
             TrainingConfig with production-recommended defaults.
         """

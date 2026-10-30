@@ -8,22 +8,19 @@ This module provides:
 """
 
 import logging
-from typing import Optional, Tuple
+from typing import Tuple
 
 import torch
 import torch.nn.functional as F
 from peft import LoraConfig, get_peft_model
-from torch.nn import Module, Linear
+from torch.nn import Module
 from transformers import (
     AutoModelForSequenceClassification,
     AutoTokenizer,
-    TrainingArguments,
-    Trainer,
 )
 
 from rlhf_platform.config import ModelConfig, TrainingConfig
 from rlhf_platform.dataset import PreferencePairDataset, ToyDatasetLoader
-
 
 logger = logging.getLogger(__name__)
 
@@ -63,9 +60,7 @@ def load_reward_model_with_lora(config: ModelConfig) -> Module:
     model = get_peft_model(model, lora_config)
 
     # Log trainable parameters
-    trainable_params = sum(
-        p.numel() for p in model.parameters() if p.requires_grad
-    )
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total_params = sum(p.numel() for p in model.parameters())
     logger.info(
         f"Reward model trainable params: {trainable_params:,} / "
@@ -131,9 +126,7 @@ class RewardModelTrainer:
             padding="max_length",
             return_tensors="pt",
         )
-        return {
-            k: v.squeeze(0) for k, v in tokens.items()
-        }  # Remove batch dim
+        return {k: v.squeeze(0) for k, v in tokens.items()}  # Remove batch dim
 
     def compute_loss(
         self,
@@ -202,34 +195,24 @@ class RewardModelTrainer:
             self.model.train()
             for i, pair in enumerate(pairs):
                 # Tokenize
-                chosen_tokens = self._tokenize_preference_pair(
-                    pair.prompt, pair.chosen
-                )
-                rejected_tokens = self._tokenize_preference_pair(
-                    pair.prompt, pair.rejected
-                )
+                chosen_tokens = self._tokenize_preference_pair(pair.prompt, pair.chosen)
+                rejected_tokens = self._tokenize_preference_pair(pair.prompt, pair.rejected)
 
                 # Forward pass
                 chosen_output = self.model(
                     input_ids=chosen_tokens["input_ids"].unsqueeze(0),
-                    attention_mask=chosen_tokens.get(
-                        "attention_mask", None
-                    ),
+                    attention_mask=chosen_tokens.get("attention_mask", None),
                 )
                 rejected_output = self.model(
                     input_ids=rejected_tokens["input_ids"].unsqueeze(0),
-                    attention_mask=rejected_tokens.get(
-                        "attention_mask", None
-                    ),
+                    attention_mask=rejected_tokens.get("attention_mask", None),
                 )
 
                 chosen_score = chosen_output.logits.squeeze(-1)
                 rejected_score = rejected_output.logits.squeeze(-1)
 
                 # Compute loss
-                loss, accuracy = self.compute_loss(
-                    chosen_score, rejected_score
-                )
+                loss, accuracy = self.compute_loss(chosen_score, rejected_score)
 
                 # Backward pass
                 optimizer.zero_grad()
@@ -255,9 +238,7 @@ class RewardModelTrainer:
 
         avg_loss = total_loss / step
         avg_acc = total_accuracy / step
-        logger.info(
-            f"Training complete: Loss={avg_loss:.4f}, Accuracy={avg_acc:.4f}"
-        )
+        logger.info(f"Training complete: Loss={avg_loss:.4f}, Accuracy={avg_acc:.4f}")
 
         return {"loss": avg_loss, "accuracy": avg_acc}
 
@@ -284,9 +265,7 @@ class RewardModelTrainer:
         return reward
 
     @torch.no_grad()
-    def score_batch(
-        self, prompts: list[str], responses: list[str]
-    ) -> list[float]:
+    def score_batch(self, prompts: list[str], responses: list[str]) -> list[float]:
         """Score multiple responses in batch.
 
         Args:
@@ -355,12 +334,8 @@ if __name__ == "__main__":
     print(f"Training result: {result}")
 
     # Score sample responses
-    reward_chosen = trainer.score(
-        prompt="What is 2+2?", response="The answer is 4."
-    )
-    reward_rejected = trainer.score(
-        prompt="What is 2+2?", response="The answer is 5."
-    )
+    reward_chosen = trainer.score(prompt="What is 2+2?", response="The answer is 4.")
+    reward_rejected = trainer.score(prompt="What is 2+2?", response="The answer is 5.")
     print(f"Chosen reward: {reward_chosen:.4f}")
     print(f"Rejected reward: {reward_rejected:.4f}")
     print(f"Difference: {reward_chosen - reward_rejected:.4f}")

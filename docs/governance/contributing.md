@@ -52,7 +52,7 @@ The RLHF platform must remain robust under varying batch sizes, sequence lengths
 
 ### 2. Shape Invariance Rules
 
-- `RolloutBuffer.sample_batch_to_device()` must always produce tensors with a fixed batch dimension.
+- `RolloutCollator` pads queries to the longest query in the batch and responses to `max_response_length`.
 - `ppo_engine` losses must preserve the same rank ordering as the input batch.
 - `dist.all_reduce()` and `all_gather()` calls must use explicit rank lists or group locals to preserve invariant collective shapes.
 

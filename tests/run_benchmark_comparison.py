@@ -8,12 +8,13 @@ Compares:
 Generates results/benchmarks.md with comparison table.
 """
 
+import importlib.util
 import json
 import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 import torch
 
@@ -21,7 +22,6 @@ from rlhf_platform.config import TrainingConfig
 from rlhf_platform.dataset import ToyDatasetLoader
 from rlhf_platform.dpo_engine import DPOTrainer
 from rlhf_platform.ppo_engine import PPOTrainer
-
 
 logger = logging.getLogger(__name__)
 
@@ -76,10 +76,7 @@ class BenchmarkComparison:
         self.results: List[BenchmarkResult] = []
         self.config = TrainingConfig.toy_mode()
 
-        logger.info(
-            f"Benchmark harness initialized: "
-            f"num_runs={num_runs}, num_steps={num_steps}"
-        )
+        logger.info(f"Benchmark harness initialized: num_runs={num_runs}, num_steps={num_steps}")
 
     def _measure_vram(self) -> float:
         """Get current GPU VRAM usage in GB.
@@ -236,9 +233,7 @@ class BenchmarkComparison:
         """
         logger.info("Benchmarking TRL PPO (reference)...")
 
-        try:
-            from trl import PPOTrainer as TRLPPOTrainer
-        except ImportError:
+        if importlib.util.find_spec("trl") is None:
             logger.warning("TRL not installed, using dummy values for comparison")
             # Return dummy result for comparison purposes
             return BenchmarkResult(
@@ -269,9 +264,7 @@ class BenchmarkComparison:
         """
         logger.info("Benchmarking TRL DPO (reference)...")
 
-        try:
-            from trl import DPOTrainer as TRLDPOTrainer
-        except ImportError:
+        if importlib.util.find_spec("trl") is None:
             logger.warning("TRL not installed, using dummy values for comparison")
 
         # Return reference values from TRL documentation
@@ -337,18 +330,19 @@ class BenchmarkComparison:
         return {
             "throughput_mean": sum(throughputs) / len(throughputs),
             "throughput_std": (
-                (sum((x - sum(throughputs) / len(throughputs)) ** 2
-                     for x in throughputs) / len(throughputs)) ** 0.5
+                (
+                    sum((x - sum(throughputs) / len(throughputs)) ** 2 for x in throughputs)
+                    / len(throughputs)
+                )
+                ** 0.5
             ),
             "vram_mean": sum(vrams) / len(vrams),
             "vram_std": (
-                (sum((x - sum(vrams) / len(vrams)) ** 2
-                     for x in vrams) / len(vrams)) ** 0.5
+                (sum((x - sum(vrams) / len(vrams)) ** 2 for x in vrams) / len(vrams)) ** 0.5
             ),
             "reward_mean": sum(rewards) / len(rewards),
             "reward_std": (
-                (sum((x - sum(rewards) / len(rewards)) ** 2
-                     for x in rewards) / len(rewards)) ** 0.5
+                (sum((x - sum(rewards) / len(rewards)) ** 2 for x in rewards) / len(rewards)) ** 0.5
             ),
         }
 
@@ -406,12 +400,14 @@ class BenchmarkComparison:
             ) * 100
             markdown += (
                 f"| **Improvement** | +{speedup:.1f}% | "
-                f"{(1 - custom_ppo_stats['vram_mean']/trl_ppo_stats['vram_mean'])*100:.1f}% "
+                f"{(1 - custom_ppo_stats['vram_mean'] / trl_ppo_stats['vram_mean']) * 100:.1f}% "
                 f"reduction | — | — |\n"
             )
 
         markdown += "\n## DPO Comparison\n\n"
-        markdown += "| Implementation | Throughput (steps/sec) | VRAM (GB) | Final Accuracy | Notes |\n"
+        markdown += (
+            "| Implementation | Throughput (steps/sec) | VRAM (GB) | Final Accuracy | Notes |\n"
+        )
         markdown += "|---|---|---|---|---|\n"
 
         if custom_dpo_stats:
@@ -442,7 +438,7 @@ class BenchmarkComparison:
             ) * 100
             markdown += (
                 f"| **Improvement** | +{speedup:.1f}% | "
-                f"{(1 - custom_dpo_stats['vram_mean']/trl_dpo_stats['vram_mean'])*100:.1f}% "
+                f"{(1 - custom_dpo_stats['vram_mean'] / trl_dpo_stats['vram_mean']) * 100:.1f}% "
                 f"reduction | — | — |\n"
             )
 

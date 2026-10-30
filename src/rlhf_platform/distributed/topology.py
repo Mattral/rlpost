@@ -1,28 +1,26 @@
-"""
-topology.py: Asymmetric multi-model placement grid for distributed RLHF.
+"""Placement records for actor, critic, reference, and reward.
 
-Elite teams at OpenAI, Anthropic, and DeepMind recognize that running Actor, Reference,
-Critic, and Reward models with identical distributed strategies creates massive
-synchronization bottlenecks. This module implements a hybrid topology:
-
-- Actor & Critic (Active): ZeRO-3 + Tensor Parallelism across nodes
-- Reference & Reward (Frozen): Shared inference subnet with replica placement
-  and non-gradient tracking, reducing memory footprints and communication overhead.
+``load_topology_from_yaml`` reads a cluster YAML and builds a
+``ClusterTopology``. If ``torch.distributed`` is already initialized, it
+creates one process group per placement. This file does not start FSDP,
+ZeRO, or tensor parallel. ``parameter_count`` is ``num_gpus * 100_000_000``.
+That is not a parameter count read from a model.
 """
 
-import os
 import json
+import os
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence
 
-import yaml
 import torch
 import torch.distributed as dist
+import yaml
 
 
 class ModelRole(Enum):
     """Role of a model in the RLHF pipeline."""
+
     ACTOR = "actor"
     CRITIC = "critic"
     REFERENCE = "reference"
@@ -31,6 +29,7 @@ class ModelRole(Enum):
 
 class ParallelStrategy(Enum):
     """Distributed execution strategy."""
+
     FSDP_TP = "fsdp_tp"
     INFERENCE = "inference"
     STANDALONE = "standalone"
@@ -39,6 +38,7 @@ class ParallelStrategy(Enum):
 @dataclass
 class ModelPlacement:
     """Placement strategy for a single model within the cluster."""
+
     role: ModelRole
     model_name: str
     parameter_count: int
@@ -55,13 +55,15 @@ class ModelPlacement:
             assert self.tensor_parallel_size >= 1, "Tensor parallelism must be >= 1"
             assert self.data_parallel_size >= 1, "Data parallelism must be >= 1"
         if self.role in [ModelRole.REFERENCE, ModelRole.REWARD]:
-            assert self.strategy != ParallelStrategy.FSDP_TP, \
+            assert self.strategy != ParallelStrategy.FSDP_TP, (
                 "Frozen models should use INFERENCE or STANDALONE strategy"
+            )
 
 
 @dataclass
 class ClusterTopology:
     """Defines the complete asymmetric topology for a multi-node RLHF cluster."""
+
     world_size: int
     rank: int
     local_rank: int
@@ -131,13 +133,21 @@ class ClusterTopology:
                 self.reference_reward_group = dist.new_group(ranks=inference_ranks)
 
             if self.actor_placement is not None:
-                self.actor_group = dist.new_group(ranks=sorted(set(self.actor_placement.device_list)))
+                self.actor_group = dist.new_group(
+                    ranks=sorted(set(self.actor_placement.device_list))
+                )
             if self.critic_placement is not None:
-                self.critic_group = dist.new_group(ranks=sorted(set(self.critic_placement.device_list)))
+                self.critic_group = dist.new_group(
+                    ranks=sorted(set(self.critic_placement.device_list))
+                )
             if self.reference_placement is not None:
-                self.reference_group = dist.new_group(ranks=sorted(set(self.reference_placement.device_list)))
+                self.reference_group = dist.new_group(
+                    ranks=sorted(set(self.reference_placement.device_list))
+                )
             if self.reward_placement is not None:
-                self.reward_group = dist.new_group(ranks=sorted(set(self.reward_placement.device_list)))
+                self.reward_group = dist.new_group(
+                    ranks=sorted(set(self.reward_placement.device_list))
+                )
 
             # Ensure all processes reach a consistent state before proceeding.
             dist.barrier()
@@ -333,7 +343,9 @@ def load_topology_from_yaml(
         builder.add_actor(
             model_name=actor_spec["model_name"],
             param_count=int(actor_spec.get("num_gpus", 0)) * 100_000_000,
-            device_list=_resolve_global_ranks(actor_spec["devices"], actor_spec.get("node_ids", [0]), gpus_per_node),
+            device_list=_resolve_global_ranks(
+                actor_spec["devices"], actor_spec.get("node_ids", [0]), gpus_per_node
+            ),
             tensor_parallel_size=int(actor_spec.get("tp_degree", 1)),
             data_parallel_size=int(actor_spec.get("dp_degree", 1)),
             precision=actor_spec.get("precision", "bf16"),
@@ -346,7 +358,9 @@ def load_topology_from_yaml(
             strategy=actor_strategy,
             tensor_parallel_size=int(actor_spec.get("tp_degree", 1)),
             data_parallel_size=int(actor_spec.get("dp_degree", 1)),
-            device_list=_resolve_global_ranks(actor_spec["devices"], actor_spec.get("node_ids", [0]), gpus_per_node),
+            device_list=_resolve_global_ranks(
+                actor_spec["devices"], actor_spec.get("node_ids", [0]), gpus_per_node
+            ),
             precision=actor_spec.get("precision", "bf16"),
         )
 
@@ -356,7 +370,9 @@ def load_topology_from_yaml(
         builder.add_critic(
             model_name=critic_spec["model_name"],
             param_count=int(critic_spec.get("num_gpus", 0)) * 100_000_000,
-            device_list=_resolve_global_ranks(critic_spec["devices"], critic_spec.get("node_ids", [0]), gpus_per_node),
+            device_list=_resolve_global_ranks(
+                critic_spec["devices"], critic_spec.get("node_ids", [0]), gpus_per_node
+            ),
             tensor_parallel_size=int(critic_spec.get("tp_degree", 1)),
             data_parallel_size=int(critic_spec.get("dp_degree", 1)),
             precision=critic_spec.get("precision", "bf16"),
@@ -369,17 +385,23 @@ def load_topology_from_yaml(
             strategy=critic_strategy,
             tensor_parallel_size=int(critic_spec.get("tp_degree", 1)),
             data_parallel_size=int(critic_spec.get("dp_degree", 1)),
-            device_list=_resolve_global_ranks(critic_spec["devices"], critic_spec.get("node_ids", [0]), gpus_per_node),
+            device_list=_resolve_global_ranks(
+                critic_spec["devices"], critic_spec.get("node_ids", [0]), gpus_per_node
+            ),
             precision=critic_spec.get("precision", "bf16"),
         )
 
     reference_spec = models["reference"]
-    reference_strategy = _parse_parallel_strategy(reference_spec.get("parallelism_strategy", "inference"))
+    reference_strategy = _parse_parallel_strategy(
+        reference_spec.get("parallelism_strategy", "inference")
+    )
     if reference_strategy == ParallelStrategy.INFERENCE:
         builder.add_reference(
             model_name=reference_spec["model_name"],
             param_count=int(reference_spec.get("num_gpus", 0)) * 100_000_000,
-            device_list=_resolve_global_ranks(reference_spec["devices"], reference_spec.get("node_ids", [0]), gpus_per_node),
+            device_list=_resolve_global_ranks(
+                reference_spec["devices"], reference_spec.get("node_ids", [0]), gpus_per_node
+            ),
             precision=reference_spec.get("precision", "fp32"),
         )
     else:
@@ -388,7 +410,9 @@ def load_topology_from_yaml(
             model_name=reference_spec["model_name"],
             parameter_count=int(reference_spec.get("num_gpus", 0)) * 100_000_000,
             strategy=reference_strategy,
-            device_list=_resolve_global_ranks(reference_spec["devices"], reference_spec.get("node_ids", [0]), gpus_per_node),
+            device_list=_resolve_global_ranks(
+                reference_spec["devices"], reference_spec.get("node_ids", [0]), gpus_per_node
+            ),
             precision=reference_spec.get("precision", "fp32"),
         )
 
@@ -398,7 +422,9 @@ def load_topology_from_yaml(
         builder.add_reward(
             model_name=reward_spec["model_name"],
             param_count=int(reward_spec.get("num_gpus", 0)) * 100_000_000,
-            device_list=_resolve_global_ranks(reward_spec["devices"], reward_spec.get("node_ids", [0]), gpus_per_node),
+            device_list=_resolve_global_ranks(
+                reward_spec["devices"], reward_spec.get("node_ids", [0]), gpus_per_node
+            ),
             precision=reward_spec.get("precision", "fp32"),
         )
     else:
@@ -407,7 +433,9 @@ def load_topology_from_yaml(
             model_name=reward_spec["model_name"],
             parameter_count=int(reward_spec.get("num_gpus", 0)) * 100_000_000,
             strategy=reward_strategy,
-            device_list=_resolve_global_ranks(reward_spec["devices"], reward_spec.get("node_ids", [0]), gpus_per_node),
+            device_list=_resolve_global_ranks(
+                reward_spec["devices"], reward_spec.get("node_ids", [0]), gpus_per_node
+            ),
             precision=reward_spec.get("precision", "fp32"),
         )
 
@@ -418,49 +446,3 @@ def load_topology_from_yaml(
         topology.initialize_groups()
 
     return topology
-
-
-def create_default_topology(
-    world_size: int,
-    rank: int,
-    gpus_per_node: int,
-    actor_model: str = "facebook/opt-1.3b",
-    critic_model: str = "facebook/opt-1.3b",
-    reference_model: str = "facebook/opt-1.3b",
-    reward_model: str = "microsoft/deberta-v3-base",
-) -> ClusterTopology:
-    builder = TopologyBuilder(world_size, rank, gpus_per_node)
-
-    builder.add_actor(
-        model_name=actor_model,
-        param_count=1_300_000_000,
-        tensor_parallel_size=2,
-        data_parallel_size=max(1, world_size // 2),
-        device_list=list(range(world_size)),
-        precision="fp16",
-    )
-
-    builder.add_critic(
-        model_name=critic_model,
-        param_count=1_300_000_000,
-        tensor_parallel_size=2,
-        data_parallel_size=max(1, world_size // 2),
-        device_list=list(range(world_size)),
-        precision="fp16",
-    )
-
-    builder.add_reference(
-        model_name=reference_model,
-        param_count=1_300_000_000,
-        device_list=list(range(min(2 * gpus_per_node, world_size))),
-        precision="fp32",
-    )
-
-    builder.add_reward(
-        model_name=reward_model,
-        param_count=300_000_000,
-        device_list=list(range(min(2 * gpus_per_node, world_size))),
-        precision="fp32",
-    )
-
-    return builder.build()

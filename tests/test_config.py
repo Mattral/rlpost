@@ -347,9 +347,7 @@ class TestConfigYAMLLoading:
 
     def test_load_default_yaml(self) -> None:
         """Verify default.yaml can be loaded from configs directory."""
-        default_yaml_path = (
-            Path(__file__).parent.parent.parent / "configs" / "default.yaml"
-        )
+        default_yaml_path = Path(__file__).parent.parent.parent / "configs" / "default.yaml"
         if default_yaml_path.exists():
             config = TrainingConfig.from_yaml(default_yaml_path)
             assert config.use_fsdp is True
