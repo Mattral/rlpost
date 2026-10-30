@@ -347,7 +347,7 @@ Cover:
     `docs/operations/system_design.md` still describe an NCCL install. They do
     not name these classes or this YAML.
 
-### [~] S0.9c Docs truth pass
+### [x] S0.9c Docs truth pass
 - Depends on: S0.9b.
 - Branch: `docs/S0.9c-docs-truth`.
 - Remove the optional `deepspeed` extra from `pyproject.toml`.
@@ -361,10 +361,32 @@ Cover:
   that no code or result file supports, and propose delete or rewrite per file.
   Do not edit those claims in this item.
 - After this item, `git grep -i "slurm\|kubernetes\|infiniband\|multi-node\|deepspeed"`
-  matches only this file and those five docs.
+  matches only this file and `docs/core/philosophy.md`.
 - Notes:
   - 2026-10-30: `origin/main` is `96a648c` (PR #14). S0.9b is on main. This branch
     starts there.
+  - Done. `fbcc8a7` removes the optional extra. The same pin, `deepspeed==0.10.1`,
+    was in `requirements.txt`, `requirements-fine-tune.txt`, and
+    `requirements-reward.txt`. Nothing imports DeepSpeed, so those pins are gone
+    too. The project description now matches the README scope. It does not say
+    production-grade or multi-node.
+  - `3cbd7b5` deletes the two operations docs. README had no link to them.
+    `docs/index.md` drops the two table rows and nothing else.
+    `docs/governance/contributing.md` no longer names `docs/operations/setup.md`.
+    New command-line options are documented in `scripts/README.md` only.
+  - `docs/core/ARCHITECTURE.md` no longer spells the ZeRO-3 filename. The S0.9b
+    notes above still do. That keeps the grep off that page.
+  - The claim text in the five files is not rewritten. `docs/index.md` changed
+    only by the two deleted rows. `docs/DEVELOPMENT.md` still lists the deleted
+    pages in its tree. The delete/rewrite proposal is in the PR.
+  - `git grep -i "slurm\|kubernetes\|infiniband\|multi-node\|deepspeed"` returns
+    this file and `docs/core/philosophy.md` only. The other four files in the
+    claim list do not contain those strings. Their unsupported claims use other
+    words, including production, CUDA, and 100% type coverage.
+  - CPU pytest on this branch, `.venv`, torch 2.15.0+cpu, `PYTHONPATH=src`,
+    `pytest -m "not slow and not gpu"`: 79 collected, 68 passed, 11 failed, in
+    19.76s. The 11 names are the ones already listed under S0.6. No other test
+    failed. `.venv/bin/ruff check .` and `.venv/bin/ruff format --check .` pass.
 
 ### [ ] S0.10 P2000 CUDA smoke test (optional)
 - Use the cu126 wheel, fp32, a tiny model, and run 20 steps each of SFT, DPO and PPO.
@@ -470,3 +492,4 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-10-30 · S0.4b · Removed the hardcoded benchmark script, renamed the padding-label collator, and dropped the dead early-stopping callback and the constant DPO explained-variance field. The 11 known failures are unchanged. · b500b17
 - 2026-10-30 · S0.9 · Deleted the unused process-group, hook, and checkpoint modules, the multi-rank script, the cluster YAML, and docs/design.md. The 11 known failures are unchanged. Two passing tests went with the deleted module. · f8ce6d0
 - 2026-10-30 · S0.9b · Removed the unused NCCL profiler, the distributed metrics collector, the four TrainingConfig device fields, and the unread ZeRO-3 YAML. The 11 known failures are unchanged. One passing config test went with the fields. · c72ccd7
+- 2026-10-30 · S0.9c · Removed the unused DeepSpeed extra and deleted the operations docs that described SLURM, Kubernetes, and NCCL. Claim text in the five files is unchanged pending an owner decision. · 3cbd7b5
