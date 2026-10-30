@@ -389,10 +389,6 @@ class TrainingConfig(BaseConfig):
         output_dir: Directory for checkpoints, logs, and outputs.
         seed: Random seed for reproducibility.
         device: Training device ('cuda', 'cpu', 'auto').
-        num_gpus: Number of GPUs to use (0 = CPU only).
-        use_fsdp: Enable Fully Sharded Data Parallel (distributed training).
-        use_deepspeed: Enable DeepSpeed ZeRO optimizer state sharding.
-        deepspeed_config: Path to DeepSpeed configuration file (if use_deepspeed=True).
         log_to_wandb: Enable Weights & Biases logging.
         wandb_project: W&B project name.
         wandb_entity: W&B entity (team/username).
@@ -421,23 +417,6 @@ class TrainingConfig(BaseConfig):
     device: Literal["cuda", "cpu", "auto"] = Field(
         default="auto",
         description="Training device (auto = cuda if available, else cpu)",
-    )
-    num_gpus: int = Field(
-        default=1,
-        ge=0,
-        description="Number of GPUs to use (0 = CPU-only training)",
-    )
-    use_fsdp: bool = Field(
-        default=False,
-        description="Enable Fully Sharded Data Parallel for multi-GPU/multi-node",
-    )
-    use_deepspeed: bool = Field(
-        default=False,
-        description="Enable DeepSpeed ZeRO optimizer state sharding",
-    )
-    deepspeed_config: str | None = Field(
-        default=None,
-        description="Path to DeepSpeed configuration file (required if use_deepspeed=True)",
     )
     log_to_wandb: bool = Field(
         default=True,
@@ -547,9 +526,6 @@ class TrainingConfig(BaseConfig):
             output_dir="./outputs/toy_run",
             seed=42,
             device="cuda",
-            num_gpus=1,
-            use_fsdp=False,
-            use_deepspeed=False,
             log_to_wandb=True,
             wandb_project="rlhf-platform-toy",
             eval_steps=10,
@@ -624,10 +600,6 @@ class TrainingConfig(BaseConfig):
             output_dir="./outputs/production_run",
             seed=42,
             device="cuda",
-            num_gpus=8,
-            use_fsdp=True,
-            use_deepspeed=True,
-            deepspeed_config="configs/deepspeed_zero3.yaml",
             log_to_wandb=True,
             wandb_project="rlhf-platform",
             eval_steps=500,
