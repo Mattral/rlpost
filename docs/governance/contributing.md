@@ -76,14 +76,13 @@ Every pull request must run the following matrix in CI:
 | `type` | `mypy src/rlhf_platform --strict` |
 | `unit` | `pytest tests/ --maxfail=1 --disable-warnings` |
 | `security` | Static analysis for security-sensitive modules |
-| `simulation` | `python scripts/simulate_runtime.py --num-ranks 4 --iterations 10` |
 
 ### Merge Conditions
 
 - At least one review approval from a core maintainer.
 - All CI jobs in the PR matrix must pass.
 - No direct commits to `main` unless through an approved PR.
-- No merge if `scripts/simulate_runtime.py` fails to complete in the CI environment.
+- No merge if the CPU pytest job fails. The known red tests are listed under S0.6 in `ROADMAP.md`. They are not hidden with xfail.
 
 ---
 
@@ -91,7 +90,7 @@ Every pull request must run the following matrix in CI:
 
 - All architectural changes must include updates to `ARCHITECTURE.md` or the relevant `docs/` deep dive.
 - Code touching distributed execution must document process group invariants and race conditions.
-- Any new public command-line option in `train.py` or `simulate_runtime.py` must appear in `scripts/README.md` and `docs/setup.md`.
+- Any new public command-line option in `train.py` must appear in `scripts/README.md` and `docs/operations/setup.md`.
 
 ---
 
@@ -99,10 +98,9 @@ Every pull request must run the following matrix in CI:
 
 Before a new feature can be merged into `main` the contributor must verify:
 
-- `python -m py_compile train.py scripts/simulate_runtime.py` passes.
+- `python -m py_compile train.py` passes.
 - `pytest tests/ -q` passes on the target Python runtime.
 - New or modified code includes docstrings and inline comments for distributed semantics.
-- All new model topology changes have a corresponding YAML configuration and runtime validation.
 - `README.md` and the docs hub are updated if the change affects user-facing deployment or architectural assumptions.
 
 ---
@@ -142,7 +140,6 @@ Reviewers should reject changes that:
    ruff check .
    mypy src/rlhf_platform --strict
    pytest tests/ -q
-   python scripts/simulate_runtime.py --num-ranks 4 --iterations 10
    ```
 5. Open a PR and request review from a core maintainer.
 6. Address reviewer feedback and keep the branch rebased on `main`.

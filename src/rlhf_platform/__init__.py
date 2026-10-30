@@ -3,4 +3,4 @@
 __version__ = "0.1.0"
 __author__ = "RLHF Infrastructure Team"
 
-__all__ = ["alignment", "distributed", "utils"]
+__all__ = ["alignment", "utils"]

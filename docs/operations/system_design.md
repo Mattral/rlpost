@@ -1,8 +1,8 @@
-# System Design: Hardware Co-Design & Network Topology
+# System Design: Hardware Co-Design and Interconnects
 
 ## Executive Summary
 
-This document provides the micro-architectural blueprint for distributed RLHF execution. We detail hardware topology, GPU interconnect pathways (NVLink, PCIe, InfiniBand), memory hierarchy, NCCL collective communication patterns, and precise VRAM allocation profiles.
+This document provides the micro-architectural blueprint for distributed RLHF execution. We detail hardware layout, GPU interconnect pathways (NVLink, PCIe, InfiniBand), memory hierarchy, NCCL collective communication patterns, and precise VRAM allocation profiles.
 
 ---
 
@@ -78,7 +78,7 @@ Total per GPU: 12–14 GB active, leaving 66–68 GB for:
 **Design rationale:**
 - Actor/Critic use fp16 to maximize throughput (reduced memory, faster compute)
 - Reference/Reward use fp32 for numerical stability (frozen inference, low compute)
-- Asymmetric assignment: different ranks handle different models (no replication)
+- Split assignment: different ranks handle different models (no replication)
 - Pinned rollout staging happens on **CPU host memory** (not GPU), avoiding VRAM pressure
 
 ---
@@ -89,7 +89,7 @@ Total per GPU: 12–14 GB active, leaving 66–68 GB for:
 
 **H100 NVLink 7.0 Specification:**
 ```
-Topology: Full mesh (all GPUs connected to all GPUs)
+Layout: Full mesh (all GPUs connected to all GPUs)
 Bandwidth per link: 112.5 GB/s bidirectional
 Peak aggregate: 8 GPUs × 7 NVLinks each = 900 GB/s bisection bandwidth
 
@@ -126,7 +126,7 @@ Latency: ~1 μs per-packet (vs. 50 μs NVLink)
 Connection type: Point-to-point RDMA, CPU-bypassing
 
 Gradient all-reduce (16 ranks across 2 nodes):
-  Ring topology:
+  Ring:
     Rank 0 (Node 0) → Rank 8 (Node 1)  = 43 GB/s
     Rank 8 (Node 1) → Rank 9 (Node 1)  = 900 GB/s (NVLink)
     Rank 9 (Node 1) → Rank 1 (Node 0)  = 43 GB/s (IB)
@@ -302,73 +302,6 @@ Result: Stable memory footprint, predictable latency
 
 ---
 
-## Part V: Topology Configuration & Device Mapping
-
-### YAML Configuration Execution Model
-
-```yaml
-cluster:
-  name: "production-rlhf-v1"
-  num_nodes: 2
-  gpus_per_node: 8
-  fabric: "400gbps_infiniband"  # or "rocev2" or "nvlink_only"
-
-node_0:
-  actor_ranks: [0, 1, 2, 3, 4, 5, 6, 7]       # All 8 GPUs on Node 0
-  critic_ranks: [0, 1, 2, 3]                  # Ranks 0–3 (colocated with Actor)
-  reference_ranks: [4, 5]                     # Ranks 4–5 (different GPU set)
-  reward_ranks: [6, 7]                        # Ranks 6–7 (different GPU set)
-
-node_1:
-  actor_ranks: [8, 9, 10, 11, 12, 13, 14, 15] # All 8 GPUs on Node 1
-  critic_ranks: []                            # No Critic on Node 1
-  reference_ranks: [8, 9]                     # Colocated with Actor for efficiency
-  reward_ranks: []                            # No Reward on Node 1
-
-process_groups:
-  actor_group:
-    ranks: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]  # All Actor ranks
-    backend: "nccl"
-    collective_type: "ring"
-    max_bandwidth: "43 GBps"  # InterNode bottleneck
-
-  critic_group:
-    ranks: [0, 1, 2, 3]  # Only Node 0 Critic ranks
-    backend: "nccl"
-    collective_type: "ring"
-
-  reference_group:
-    ranks: [4, 5, 8, 9]  # Reference replicas (not participating in all-reduce)
-    backend: "nccl"
-    is_gradient_group: false  # No gradient communication
-
-  reward_group:
-    ranks: [6, 7]  # Reward model (isolated)
-    backend: "nccl"
-    is_gradient_group: false
-```
-
-**Execution semantics:**
-```
-Actor all_reduce (ranks 0–15):
-  ├─ Intra-node (ranks 0–7 on Node 0): NVLink 900 GB/s
-  ├─ Inter-node (ranks 8–15 on Node 1): NVLink 900 GB/s
-  ├─ Connect Node 0 ↔ Node 1: IB 43 GB/s
-  └─ Ring algorithm, 30 hops total, ~200 ms per step
-
-Critic all_reduce (ranks 0–3):
-  ├─ All colocated on Node 0
-  └─ NVLink only: 900 GB/s, ~10 ms per step
-
-Reference group (ranks 4, 5, 8, 9):
-  └─ No gradient synchronization (frozen inference only)
-
-Reward group (ranks 6, 7):
-  └─ No gradient synchronization (frozen inference only)
-```
-
----
-
 ## Part VI: Network Bandwidth Accounting
 
 ### Bandwidth Utilization During Training
@@ -442,7 +375,7 @@ except RuntimeError as e:
 
 **Mitigation:** Checksummed communication
 ```python
-# In comm_hooks.py:
+# Example of a gradient NaN check:
 def register_nan_check_hook(model):
     """Detects NaN or Inf in aggregated gradients (potential SDC)"""
     for param in model.parameters():
@@ -468,15 +401,14 @@ torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
 ---
 
-## Conclusion: Topology Design Principles
+## Conclusion: Design principles
 
-1. **Asymmetric allocation** saves 40% VRAM + 25% communication
-2. **Explicit process groups** avoid deadlocks via clear rank boundaries
-3. **Pinned memory** reduces host-to-GPU transfer overhead 4–5×
-4. **Overlapped communication** hides network latency during compute
-5. **Non-blocking collectives** allow training to proceed during all-reduce
-6. **Ring algorithms** minimize per-hop latency vs. tree algorithms
-7. **RDMA bypasses CPU**, achieving peak InfiniBand utilization
+1. **Explicit process groups** avoid deadlocks via clear rank boundaries
+2. **Pinned memory** reduces host-to-GPU transfer overhead 4–5×
+3. **Overlapped communication** hides network latency during compute
+4. **Non-blocking collectives** allow training to proceed during all-reduce
+5. **Ring algorithms** minimize per-hop latency vs. tree algorithms
+6. **RDMA bypasses CPU**, achieving peak InfiniBand utilization
 
 This design enables **sustained 90%+ GPU utilization** across multi-node clusters with predictable, deadlock-free distributed training.
 

@@ -48,11 +48,6 @@ src/rlhf_platform/
 ├── alignment/
 │   ├── __init__.py
 │   └── rollout.py
-├── distributed/
-│   ├── __init__.py
-│   ├── async_io.py
-│   ├── comm_hooks.py
-│   └── topology.py
 └── utils/
     ├── __init__.py
     └── telemetry.py
@@ -61,13 +56,11 @@ tests/
 ├── test_config.py
 ├── test_dpo_engine.py
 ├── test_ppo_engine.py
-├── test_rollout.py
-└── test_topology.py
+└── test_rollout.py
 
 docs/
 ├── index.md               # Short index of the docs that remain
 ├── DEVELOPMENT.md         # This file
-├── design.md              # Design targets, not measurements
 ├── core/
 │   ├── ARCHITECTURE.md
 │   └── philosophy.md
