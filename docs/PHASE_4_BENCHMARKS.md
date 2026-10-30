@@ -731,7 +731,7 @@ The harness in `tests/run_benchmark_comparison.py` (494 lines):
 7. **Update Project Summary**
    - Create/update `PHASE_1_4_SUMMARY.md`
    - Add Phase 4 achievements to README
-   - Update roadmap.md
+   - Update ROADMAP.md
    - Est: 30 mins
 
 ---
