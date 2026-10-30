@@ -50,7 +50,11 @@ class RolloutBuffer:
         def _pin(t: torch.Tensor) -> torch.Tensor:
             if not isinstance(t, torch.Tensor):
                 return t
-            return t.detach().cpu().pin_memory()
+            out = t.detach().cpu()
+            # pin_memory needs a CUDA driver. CPU-only torch raises if it is called.
+            if torch.cuda.is_available():
+                return out.pin_memory()
+            return out
 
         pinned = Rollout(
             query_tokens=_pin(rollout.query_tokens),
@@ -234,7 +238,7 @@ class RolloutGenerator:
                 top_p=self.top_p,
             )
             response_tokens_list.append(next_token)
-            current_tokens = torch.cat([current_tokens, next_token.unsqueeze(1)], dim=1)
+            current_tokens = torch.cat([current_tokens, next_token], dim=1)
 
         response_tokens = torch.cat(response_tokens_list, dim=1)
         logits_policy = torch.stack(logits_policy_list, dim=1)
@@ -279,7 +283,7 @@ class RolloutGenerator:
         temperature: float = 1.0,
         top_p: float = 0.9,
     ) -> torch.Tensor:
-        """Sample next token using temperature + top-p (nucleus) sampling."""
+        """Sample the next token. Returns ids of shape [batch, 1]."""
         scaled_logits = logits / temperature
         if top_p < 1.0:
             probs = F.softmax(scaled_logits, dim=-1)
@@ -293,7 +297,7 @@ class RolloutGenerator:
             scaled_logits = scaled_logits.masked_fill(remove_mask, float("-inf"))
 
         token = torch.multinomial(F.softmax(scaled_logits, dim=-1), num_samples=1)
-        return token.squeeze(-1)
+        return token
 
 
 class AsyncRolloutPipeline:

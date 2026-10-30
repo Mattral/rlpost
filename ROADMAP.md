@@ -44,6 +44,9 @@ The exit criteria for Stage 0:
       result file or by the tests currently in `tests/`.
     - Propose rewrite into `docs/CODE_MAP.md` during S0.4, or delete: `docs/PHASE_1_CONFIG.md`,
       `docs/PHASE_2_PPO.md`, `docs/PHASE_3_CLI.md`, `docs/PHASE_4_BENCHMARKS.md`.
+  - 2026-10-30, owner decision: delete all eight. They are deleted. `docs/CODE_MAP.md` will be
+    written from the code in S0.4, not from those files. `ROADMAP.md` is a tracked file.
+    `agent.md` is the only local instruction file, and it is gitignored.
   - Verification on this machine (CPU torch 2.15.0, Python 3.12): `ruff check` and
     `ruff format --check` already fail across the tree. There is no ruff config yet.
     `pytest` cannot collect `tests/test_topology.py` or `tests/test_rollout.py` because
@@ -89,8 +92,9 @@ The exit criteria for Stage 0:
   - `pyproject.toml` still pins the old training stack. CI does not install it.
   - Ruff is configured for E, F, and I, with E501 ignored because the formatter owns line length.
     `ruff check` and `ruff format --check` pass locally.
-  - Pytest does not pass. After the import fix below, the same command collects 82 tests:
-    69 passed, 13 failed. The GitHub job is expected to fail on those 13 until S0.6 and S0.9.
+  - Pytest does not pass. After the import fix below, the same command collected 82 tests:
+    69 passed, 13 failed. Two of those were later fixed as plain bugs (see S0.9). 11 remain.
+    The job stays red. No xfail and no skip was added to hide them.
   - `comm_hooks.py` imported `ddp_comm_hook`, which torch 2.15 does not export, and nothing
     in the file used that name. The import was removed so the package imports and the two
     previously uncollected modules run. `telemetry.py` used `torch` without importing it.
@@ -105,6 +109,10 @@ The exit criteria for Stage 0:
   outputs with tensor shapes, and which tests cover it. The owner reads this before Stage 0.6.
 - Flag any code from external contributors that the agent cannot explain clearly.
 - Notes:
+  - Owner: start this only after PRs 6, 7, and 8 are on main, and branch from main.
+  - Choose the surviving PPO engine by correctness, including the `train_step` gather bug
+    in `src/rlhf_platform/ppo_engine.py`, not by which file is longer. Document the choice
+    in the PR. Write `docs/CODE_MAP.md` from the code, not from the deleted phase docs.
 
 ### [ ] S0.5 Package rename `rlhf_platform` → `rlpost`
 - Depends on: the owner renaming the GitHub repo first.
@@ -124,15 +132,43 @@ on a tiny model on CPU, with an explicit tolerance:
 
 Split into S0.6a–e if needed. Record any discrepancy found in Notes. A bug found here is a result.
 - Notes:
-  - 2026-10-30, found while checking the tree on CPU torch 2.15, not yet fixed:
-    `PPOTrainer.train_step` gathers log-probs with `log_probs_new.gather(1, input_ids.unsqueeze(-1))`.
-    That raises `Index tensor must have the same number of dimensions as input tensor`
-    (`test_train_step_updates_weights`, `test_train_step_returns_metrics`).
-    `compute_policy_loss` and `compute_value_loss` return tensors that do not require grad.
-    DPO: `test_margin_computation` gets a margin of about 1.10 against an expected value under 0.01.
-    `test_beta_affects_loss` finds equal losses at two betas. `AlignmentConfig` has no `dpo_beta`
-    field, so `test_custom_beta_from_config` fails validation. Two DPO init tests build `AdamW`
-    on an empty parameter list, which torch 2.15 rejects.
+  - 2026-10-30 judgments on the 11 failures still red after the rollout fixes. Neither side
+    was edited to make the other pass. DPO margin, DPO beta, and the PPO logprob gather
+    stay open until the TRL parity tests in this item.
+  - `test_init_creates_trainer`, `test_reference_model_frozen`, `test_config_integration`:
+    the mock policy's `parameters()` returns `[]`, and torch 2.15 `AdamW` rejects an empty
+    list. The test is wrong. A real module has parameters. The same file's gradient test,
+    which passes a real `Parameter`, gets past this line.
+  - `test_margin_computation`: the test expects the mean of `(policy_chosen - policy_rejected)`
+    only, which is 1.5 on its fixture. The code sets
+    `margin = (policy_chosen - policy_rejected) - (ref_chosen - ref_rejected)`, which is 0.4
+    here. The test drops the reference term. The code's margin also does not multiply by
+    beta. Which definition matches TRL is S0.6b. Not changed.
+  - `test_beta_affects_loss`: on this fixture `policy_diff - ref_diff` is 0, so
+    `beta * 0` is 0 at every beta and the loss is `-logsigmoid(0)` for both. The test is
+    wrong: the fixture has no preference margin over the reference, and "a larger beta
+    always raises the loss" is not what the formula says. The code does multiply by
+    `self.beta`. Whether that formula matches TRL is S0.6b. Not changed.
+  - `test_metrics_batch_aggregation`: the test expects accuracy 1.0 because every policy
+    chosen score is above the policy rejected score. The code's accuracy is
+    `(policy_diff - ref_diff) > 0`, and the first row is a tie after the reference is
+    subtracted, so accuracy is 0.75. Same open question as the margin test. Not changed.
+  - `test_custom_beta_from_config`: the test assigns `alignment.dpo_beta = 0.5`.
+    `AlignmentConfig` has no such field, so Pydantic rejects the assignment.
+    `DPOTrainer` reads `dpo_beta` with a fallback of 0.1, while the config's nearby
+    coefficient is `kl_coefficient`. Both sides name beta differently. S0.6b picks the
+    name. Not changed.
+  - `test_policy_loss_computation` and `test_value_loss_computation`: the tests pass
+    `torch.randn` tensors that do not require grad, then assert `loss.requires_grad`.
+    The loss functions do not detach. A function of constant tensors does not require
+    grad. The tests are wrong. Not changed.
+  - `test_train_step_updates_weights` and `test_train_step_returns_metrics`: the code
+    does `log_softmax(policy_logits, dim=-1).gather(1, input_ids.unsqueeze(-1))`.
+    For token log-probs the gather is on the vocab axis of shifted logits, not dim 1
+    of an unshifted tensor. That line is wrong. The test's `DummyModel` also mean-pools
+    the sequence and returns `[batch, vocab]`, so it is not a per-token model either.
+    Both sides are wrong. S0.6a settles the gather against a known log-prob. Not changed
+    here. S0.4 should treat this as a reason not to keep `ppo_engine.py` unchanged.
 
 ### [ ] S0.7 Classic RLHF edge-case tests
 Cover:
@@ -152,6 +188,14 @@ Cover:
 - This is required before any Colab run.
 - Notes:
 
+### [ ] S0.11 CLI actually runs SFT/RM/DPO/PPO end-to-end on a tiny model on CPU
+- Depends on: S0.8, because a resumable run is what the CLI should be able to finish.
+- An end-to-end CPU test on a tiny model for all four commands.
+- Today `run-dpo` prints a placeholder and exits 0. `run-ppo` writes the config YAML and
+  returns. `train-sft` and `train-reward` call their trainers, and neither has a CPU
+  end-to-end test.
+- Notes:
+
 ### [ ] S0.9 Distributed claims: test or delete
 - Test the actor/critic vs reference/reward process-group split with `torch.distributed`
   (gloo backend) on 2–4 CPU ranks.
@@ -160,10 +204,12 @@ Cover:
 - Notes:
   - 2026-10-30: `comm_hooks.py` imported `ddp_comm_hook`, which torch 2.15 does not export.
     S0.3 removed that unused import. The module still has no test that runs a real hook.
-  - 2026-10-30, once collection worked: `RolloutBuffer.add` calls `pin_memory()` and raises
-    `Cannot access accelerator device when none is available` on CPU.
-    `RolloutGenerator.generate_rollout` then fails with `IndexError` on `torch.cat(..., dim=1)`
-    because the sampled token is 1-D. `tests/test_topology.py` passed.
+  - 2026-10-30, once collection worked: `RolloutBuffer.add` called `pin_memory()` and raised
+    `Cannot access accelerator device when none is available` on CPU torch.
+    `RolloutGenerator._sample_token` returned `squeeze(-1)`, so each token was 1-D and
+    `torch.cat(..., dim=1)` raised `IndexError`. Both are code bugs. Fixed: pin only when
+    `torch.cuda.is_available()`, and keep sampled tokens shaped `[batch, 1]`.
+    `tests/test_rollout.py` then passed (3 tests). `tests/test_topology.py` passed.
 
 ### [ ] S0.10 P2000 CUDA smoke test (optional)
 - Use the cu126 wheel, fp32, a tiny model, and run 20 steps each of SFT, DPO and PPO.
@@ -263,3 +309,4 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-10-30 · S0.1 · Gitignore, untracked caches and egg-info, ROADMAP.md replaces the old roadmap. Phase-completion docs kept pending an owner decision. · 33bed64
 - 2026-10-30 · S0.2 · README states the CPU test result and drops unmeasured numbers. The GPU-count table moved to docs/design.md as a design target. The fake telemetry JSON was deleted. · 5f288b9
 - 2026-10-30 · S0.3 · CI is one CPU job: pinned torch, ruff, and pytest, with no swallowed failures. Ruff passes. Pytest is 69 passed, 13 failed, and the job is expected to be red until those failures are fixed. · 42c71a9
+- 2026-10-30 · owner · Deleted the eight unverified docs. Judged each of the 13 failures and left the 11 algorithm disagreements red. Fixed the CPU pin_memory crash and the 1-D rollout cat. Added S0.11. · pending-sha

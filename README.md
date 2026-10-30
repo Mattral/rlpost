@@ -13,8 +13,8 @@ Unit-tested on CPU. No GPU benchmark yet.
 
 Check on 2026-10-30, Python 3.12, torch 2.15.0+cpu, `PYTHONPATH=src`:
 
-- `pytest -q -m "not slow and not gpu"` collects 82 tests: 69 passed, 13 failed.
-- The failures are in DPO metrics, PPO `train_step`, and two rollout tests. Notes are in [ROADMAP.md](ROADMAP.md) under S0.6 and S0.9.
+- `pytest -q -m "not slow and not gpu"` collects 82 tests: 71 passed, 11 failed.
+- The 11 failures are DPO and PPO tests. A judgment on each one is in [ROADMAP.md](ROADMAP.md) under S0.6. They are not marked xfail.
 - `ruff check .` and `ruff format --check .` pass under the config in `pyproject.toml`.
 
 Recount after you change tests:

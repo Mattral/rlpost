@@ -67,12 +67,9 @@ tests/
 └── run_benchmark_comparison.py  # Benchmarks (Phase 4)
 
 docs/
-├── index.md               # Documentation hub
+├── index.md               # Short index of the docs that remain
 ├── DEVELOPMENT.md         # This file
-├── PHASE_1_CONFIG.md      # Config guide
-├── PHASE_2_PPO.md         # PPO guide
-├── PHASE_3_CLI.md         # CLI guide
-├── PHASE_4_BENCHMARKS.md  # Benchmarking guide
+├── design.md              # Design targets, not measurements
 ├── core/
 │   ├── ARCHITECTURE.md
 │   └── philosophy.md
@@ -86,9 +83,6 @@ docs/
 configs/
 ├── toy.yaml               # Small model config
 └── default.yaml           # Production config
-
-results/
-└── benchmarks.md          # Benchmark results table
 
 ```
 
@@ -270,7 +264,7 @@ $$D_{\text{KL}}(P \parallel Q) = \sum_x P(x) \log \frac{P(x)}{Q(x)}$$
 3. Include help text for all arguments
 4. Add validation before execution
 5. Test with `python -m rlhf_platform.cli <command> --help`
-6. Document in [PHASE_3_CLI.md](PHASE_3_CLI.md)
+6. Document the command in the README if the behavior is real
 
 ### Adding Tests
 
@@ -296,7 +290,7 @@ class TestNewFeature:
 3. Update type hints and docstrings
 4. Add validation if needed
 5. Test with unit tests
-6. Document in [PHASE_1_CONFIG.md](PHASE_1_CONFIG.md)
+6. Cover the new field with a test in `tests/test_config.py`
 
 ---
 
