@@ -1,5 +1,5 @@
-run_name: rlhf_production_run
-output_dir: ./outputs/production_run
+run_name: rlhf_default_run
+output_dir: ./outputs/default_run
 seed: 42
 device: cuda
 log_to_wandb: true

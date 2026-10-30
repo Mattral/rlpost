@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This document defines the contribution and merge governance rules for the RLHF infrastructure framework. It is designed for core contributors and engineering teams operating under strict production constraints: deterministic tensor shapes, invariant regression checks, and fully auditable continuous integration.
+This document defines the contribution and merge governance rules for the RLHF infrastructure framework. It is designed for core contributors and engineering teams operating under strict constraints: deterministic tensor shapes, invariant regression checks, and fully auditable continuous integration.
 
 ---
 
@@ -90,7 +90,7 @@ Every pull request must run the following matrix in CI:
 
 - All architectural changes must include updates to `ARCHITECTURE.md` or the relevant `docs/` deep dive.
 - Code touching distributed execution must document process group invariants and race conditions.
-- Any new public command-line option in `train.py` must appear in `scripts/README.md` and `docs/operations/setup.md`.
+- Any new public command-line option in `train.py` must appear in `scripts/README.md`.
 
 ---
 
