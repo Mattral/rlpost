@@ -17,10 +17,8 @@ import typer
 from rich.console import Console
 
 from rlhf_platform.config import TrainingConfig
-from rlhf_platform.sft_engine import SFTTrainer
 from rlhf_platform.reward_engine import RewardModelTrainer
-from rlhf_platform.ppo_engine import PPOTrainer
-
+from rlhf_platform.sft_engine import SFTTrainer
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -94,9 +92,7 @@ def train_sft(
                 console.print("[green]✓[/green] Using toy config")
             else:
                 train_config = TrainingConfig.from_yaml("configs/default.yaml")
-                console.print(
-                    "[green]✓[/green] Using default config"
-                )
+                console.print("[green]✓[/green] Using default config")
 
         # Validate config
         if train_config.optimization.learning_rate <= 0:
@@ -120,9 +116,7 @@ def train_sft(
         output_path.mkdir(parents=True, exist_ok=True)
 
         # Train
-        console.print(
-            f"\n[bold cyan]Starting SFT training...[/bold cyan]"
-        )
+        console.print("\n[bold cyan]Starting SFT training...[/bold cyan]")
         trainer = SFTTrainer(train_config, use_toy=toy)
         result = trainer.train(
             output_dir=str(output_path),
@@ -208,9 +202,7 @@ def train_reward(
         output_path.mkdir(parents=True, exist_ok=True)
 
         # Train
-        console.print(
-            f"\n[bold cyan]Starting reward model training...[/bold cyan]"
-        )
+        console.print("\n[bold cyan]Starting reward model training...[/bold cyan]")
         trainer = RewardModelTrainer(train_config, use_toy=toy)
         result = trainer.train(
             output_dir=str(output_path),
@@ -284,8 +276,7 @@ def run_ppo(
         # Validate alignment config
         if train_config.alignment.method != "ppo":
             raise ValueError(
-                f"Alignment method must be 'ppo', got "
-                f"'{train_config.alignment.method}'"
+                f"Alignment method must be 'ppo', got '{train_config.alignment.method}'"
             )
 
         console.print(
@@ -304,12 +295,8 @@ def run_ppo(
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
 
-        console.print(
-            f"\n[bold cyan]Starting PPO training...[/bold cyan]"
-        )
-        console.print(
-            f"[dim]This requires pre-trained SFT and reward models.[/dim]"
-        )
+        console.print("\n[bold cyan]Starting PPO training...[/bold cyan]")
+        console.print("[dim]This requires pre-trained SFT and reward models.[/dim]")
 
         # NOTE: Full PPO training requires:
         # 1. Pre-trained SFT model
@@ -319,11 +306,11 @@ def run_ppo(
         # For now, just validate config and show setup instructions
 
         console.print(
-            f"\n[yellow]⚠ PPO training requires:[/yellow]\n"
-            f"  1. Pre-trained SFT model from 'train-sft'\n"
-            f"  2. Trained reward model from 'train-reward'\n"
-            f"  3. Inference pipeline for trajectory generation\n"
-            f"\n[dim]Full integration coming in Phase 3.5[/dim]"
+            "\n[yellow]⚠ PPO training requires:[/yellow]\n"
+            "  1. Pre-trained SFT model from 'train-sft'\n"
+            "  2. Trained reward model from 'train-reward'\n"
+            "  3. Inference pipeline for trajectory generation\n"
+            "\n[dim]Full integration coming in Phase 3.5[/dim]"
         )
 
         # Save config for reference
@@ -368,12 +355,8 @@ def run_dpo(
     """
     setup_logging(verbose)
 
-    console.print(
-        f"[yellow]ℹ DPO implementation coming in Phase 4[/yellow]"
-    )
-    console.print(
-        f"[dim]Use 'run-ppo' for preference optimization in Phase 3[/dim]"
-    )
+    console.print("[yellow]ℹ DPO implementation coming in Phase 4[/yellow]")
+    console.print("[dim]Use 'run-ppo' for preference optimization in Phase 3[/dim]")
 
     raise typer.Exit(0)
 

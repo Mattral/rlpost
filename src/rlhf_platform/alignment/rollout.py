@@ -10,7 +10,7 @@ buffer without waiting for generation phases to complete.
 import logging
 import threading
 from dataclasses import dataclass
-from typing import Callable, Iterator, List, Optional, Sequence
+from typing import Callable, List, Optional
 
 import torch
 import torch.nn.functional as F
@@ -25,6 +25,7 @@ QuerySampler = Callable[[], torch.Tensor]
 @dataclass
 class Rollout:
     """Single PPO rollout trajectory."""
+
     query_tokens: torch.Tensor
     response_tokens: torch.Tensor
     reward: torch.Tensor
@@ -44,6 +45,7 @@ class RolloutBuffer:
 
     def add(self, rollout: Rollout) -> None:
         """Add a rollout to the buffer (overwrites oldest if full)."""
+
         # Convert tensors to pinned CPU memory to enable non-blocking device copies
         def _pin(t: torch.Tensor) -> torch.Tensor:
             if not isinstance(t, torch.Tensor):
@@ -69,8 +71,9 @@ class RolloutBuffer:
         """Sample a random batch of rollouts."""
         if len(self.buffer) == 0:
             raise RuntimeError("Cannot sample from empty rollout buffer.")
-        
+
         import random
+
         with self._lock:
             return random.sample(self.buffer, min(batch_size, len(self.buffer)))
 
@@ -129,28 +132,28 @@ class RolloutCollator:
 
     def __call__(self, rollouts: list) -> dict:
         """Collate a list of Rollout objects."""
-        batch_size = len(rollouts)
-        
         # Pad response tokens
         response_tokens_list = [r.response_tokens for r in rollouts]
         padded_responses = self._pad_sequence(response_tokens_list, self.max_response_length)
-        
+
         # Pad logits
         logits_policy_list = [r.logits_policy for r in rollouts]
         logits_reference_list = [r.logits_reference for r in rollouts]
-        
+
         padded_logits_policy = self._pad_logits(logits_policy_list, self.max_response_length)
         padded_logits_reference = self._pad_logits(logits_reference_list, self.max_response_length)
-        
+
         # Rewards
         rewards = torch.stack([r.reward for r in rollouts])
-        
+
         query_tokens_list = [r.query_tokens for r in rollouts]
         max_query_length = max(token.shape[0] for token in query_tokens_list)
         padded_queries = self._pad_sequence(query_tokens_list, max_query_length)
         query_lengths = torch.tensor([t.shape[0] for t in query_tokens_list], dtype=torch.long)
 
-        response_lengths = torch.tensor([r.response_tokens.shape[0] for r in rollouts], dtype=torch.long)
+        response_lengths = torch.tensor(
+            [r.response_tokens.shape[0] for r in rollouts], dtype=torch.long
+        )
 
         return {
             "query_tokens": padded_queries,
@@ -206,9 +209,6 @@ class RolloutGenerator:
     @torch.no_grad()
     def generate_rollout(self, query_tokens: torch.Tensor) -> Rollout:
         """Generate a single rollout trajectory."""
-        batch_size = query_tokens.shape[0]
-        device = query_tokens.device
-        
         # Generate response tokens autoregressively
         response_tokens_list = []
         logits_policy_list = []
@@ -299,7 +299,7 @@ class RolloutGenerator:
 class AsyncRolloutPipeline:
     """
     Asynchronous rollout pipeline: decouples generation from optimization.
-    
+
     Generator threads continuously produce rollouts and feed them into
     a shared RolloutBuffer. Optimization threads pull from the buffer
     without blocking on generation latency.
@@ -324,6 +324,7 @@ class AsyncRolloutPipeline:
     def start_generators(self) -> None:
         """Start background generator threads."""
         import threading
+
         self.generator_threads = []
         for i in range(self.num_generator_threads):
             thread = threading.Thread(target=self._generator_loop, args=(i,), daemon=True)
@@ -344,6 +345,7 @@ class AsyncRolloutPipeline:
                 if query_batch is None:
                     logger.debug("Query sampler returned no input; sleeping briefly.")
                     import time
+
                     time.sleep(0.5)
                     continue
 
@@ -368,6 +370,7 @@ class AsyncRolloutPipeline:
 
                 if self.buffer.is_full():
                     import time
+
                     time.sleep(0.1)
             except Exception as e:
                 logger.error(f"Generator thread {thread_id} error: {e}", exc_info=True)

@@ -15,10 +15,10 @@ with the following features:
 Mathematical References:
     Clipped Surrogate Objective:
         L^CLIP(θ) = Ê_t [ min(r_t(θ)Â_t, clip(r_t(θ), 1-ε, 1+ε)Â_t) ]
-    
+
     KL Divergence (for adaptive penalty):
         D_KL(P || Q) = Σ_x P(x) log(P(x)/Q(x))
-    
+
     Generalized Advantage Estimation:
         Â_t^GAE(γ,λ) = Σ_{l=0}^∞ (γλ)^l δ_t+l^V
         where δ_t^V = r_t + γV(s_{t+1}) - V(s_t)
@@ -32,9 +32,8 @@ Example:
 """
 
 import logging
-import math
 from dataclasses import dataclass
-from typing import Any, Optional, Tuple
+from typing import Tuple
 
 import torch
 import torch.nn as nn
@@ -54,7 +53,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class PPOMetrics:
     """Container for PPO training metrics (single step).
-    
+
     Attributes:
         policy_loss: Clipped surrogate objective loss.
         value_loss: Critic network loss.
@@ -79,20 +78,20 @@ class PPOMetrics:
 
 class GeneralizedAdvantageEstimation:
     """Generalized Advantage Estimation (GAE) for trajectory advantage computation.
-    
+
     GAE provides a trade-off between bias (low lambda) and variance (high lambda)
     in advantage estimation using the parameter lambda in [0, 1].
-    
+
     Reference: Schulman et al., 2016 - High-Dimensional Continuous Control Using
     Generalized Advantage Estimation
     """
 
     def __init__(self: "GeneralizedAdvantageEstimation", gamma: float, lam: float) -> None:
         """Initialize GAE calculator.
-        
+
         Args:
             gamma: Discount factor (typically 0.99).
-            lam: GAE smoothing parameter lambda (typically 0.95). 
+            lam: GAE smoothing parameter lambda (typically 0.95).
                  0.0 = low variance (bootstrap), 1.0 = high variance (MC).
         """
         if not 0.0 <= gamma <= 1.0:
@@ -111,13 +110,13 @@ class GeneralizedAdvantageEstimation:
         dones: Tensor,
     ) -> Tuple[Tensor, Tensor]:
         """Compute advantages and returns using GAE.
-        
+
         Args:
             rewards: Shape (batch_size, seq_len) or (batch_size,)
             values: Critic estimates at current timesteps, shape (batch_size, seq_len)
             next_values: Critic estimates at next timesteps, shape (batch_size, seq_len)
             dones: Episode termination flags, shape (batch_size, seq_len)
-        
+
         Returns:
             advantages: GAE-computed advantages, shape (batch_size, seq_len)
             returns: Bootstrapped returns, shape (batch_size, seq_len)
@@ -148,7 +147,7 @@ class GeneralizedAdvantageEstimation:
 
 class PPOTrainer:
     """Production-grade PPO trainer with adaptive KL control and W&B logging.
-    
+
     This trainer orchestrates policy gradient updates, value function training,
     and KL-based adaptive penalty coefficient adjustment. All hyperparameters
     are loaded from TrainingConfig for reproducibility.
@@ -163,7 +162,7 @@ class PPOTrainer:
         optimizer: torch.optim.Optimizer,
     ) -> None:
         """Initialize PPO trainer.
-        
+
         Args:
             config: Complete training configuration (TrainingConfig object).
             policy_model: Actor/policy network (differentiable).
@@ -219,15 +218,15 @@ class PPOTrainer:
         advantages: Tensor,
     ) -> Tuple[Tensor, Tensor]:
         """Compute PPO clipped surrogate objective loss.
-        
+
         Clipped objective:
             L^CLIP(θ) = Ê_t [ min(r_t(θ)Â_t, clip(r_t(θ), 1-ε, 1+ε)Â_t) ]
-        
+
         Args:
             log_probs_new: Log probabilities from policy, shape (batch_size,)
             log_probs_old: Log probabilities from old policy, shape (batch_size,)
             advantages: GAE advantages, shape (batch_size,)
-        
+
         Returns:
             loss: Clipped PPO loss (scalar, to minimize)
             ratio: Probability ratios for diagnostic
@@ -237,11 +236,14 @@ class PPOTrainer:
 
         # Clipped surrogate objective
         surr1 = ratio * advantages
-        surr2 = torch.clamp(
-            ratio,
-            1.0 - self.alignment_config.ppo_epsilon,
-            1.0 + self.alignment_config.ppo_epsilon,
-        ) * advantages
+        surr2 = (
+            torch.clamp(
+                ratio,
+                1.0 - self.alignment_config.ppo_epsilon,
+                1.0 + self.alignment_config.ppo_epsilon,
+            )
+            * advantages
+        )
 
         # Take minimum: discourages large changes
         policy_loss = -torch.min(surr1, surr2).mean()
@@ -254,13 +256,13 @@ class PPOTrainer:
         returns: Tensor,
     ) -> Tensor:
         """Compute critic (value function) loss with optional clipping.
-        
+
         Standard MSE loss on predicted values vs. bootstrapped returns.
-        
+
         Args:
             value_pred: Predicted values from critic, shape (batch_size,)
             returns: Bootstrapped returns (targets), shape (batch_size,)
-        
+
         Returns:
             loss: Value function loss (scalar, to minimize)
         """
@@ -269,13 +271,13 @@ class PPOTrainer:
 
     def compute_entropy_bonus(self: "PPOTrainer", logits: Tensor) -> Tensor:
         """Compute entropy regularization bonus to prevent policy collapse.
-        
+
         Entropy = -Σ p(a) log p(a), summed over action space.
         Higher entropy = more exploratory policy.
-        
+
         Args:
             logits: Action logits from policy model, shape (batch_size, num_actions)
-        
+
         Returns:
             entropy: Mean entropy across batch (scalar)
         """
@@ -290,14 +292,14 @@ class PPOTrainer:
         logits_old: Tensor,
     ) -> Tensor:
         """Compute KL divergence between new and old policy distributions.
-        
+
         For Categorical distributions:
             D_KL(p || q) = Σ_a p(a) * (log p(a) - log q(a))
-        
+
         Args:
             logits_new: Logits from current policy, shape (batch_size, num_actions)
             logits_old: Logits from reference policy, shape (batch_size, num_actions)
-        
+
         Returns:
             kl_div: Mean KL divergence across batch (scalar)
         """
@@ -316,15 +318,15 @@ class PPOTrainer:
         returns: Tensor,
     ) -> float:
         """Compute fraction of variance in returns explained by value function.
-        
+
         EV = 1 - Var(returns - values) / Var(returns)
-        
+
         Range: (-∞, 1], where 1 = perfect fit, 0 = mean baseline, <0 = worse than mean
-        
+
         Args:
             value_pred: Predicted values, shape (batch_size,)
             returns: Returns (targets), shape (batch_size,)
-        
+
         Returns:
             explained_variance: Scalar in (-∞, 1]
         """
@@ -339,13 +341,13 @@ class PPOTrainer:
 
     def adaptive_kl_penalty(self: "PPOTrainer", kl_div: float) -> None:
         """Adaptively adjust KL penalty coefficient based on KL divergence.
-        
+
         If KL > target, increase beta (more penalty).
         If KL < target / 1.5, decrease beta (less penalty).
         Otherwise, keep beta constant.
-        
+
         This ensures KL divergence stays close to target without manual tuning.
-        
+
         Args:
             kl_div: Mean KL divergence in current batch.
         """
@@ -365,14 +367,14 @@ class PPOTrainer:
         old_log_probs: Tensor,
     ) -> PPOMetrics:
         """Perform single PPO training step.
-        
+
         This function computes:
         1. Policy loss (clipped surrogate objective)
         2. Value loss (critic training)
         3. Entropy bonus (exploration)
         4. KL penalty (policy constraint)
         5. Combined loss = policy_loss + value_loss - entropy - kl_penalty
-        
+
         Args:
             batch: Dict with keys:
                 - "input_ids": Tokenized prompts/responses, shape (batch_size, seq_len)
@@ -381,7 +383,7 @@ class PPOTrainer:
                 - "next_values": Next-step values, shape (batch_size,)
                 - "dones": Episode termination flags, shape (batch_size,)
             old_log_probs: Log probs from reference policy, shape (batch_size,)
-        
+
         Returns:
             metrics: PPOMetrics container with all training metrics
         """
@@ -447,9 +449,7 @@ class PPOTrainer:
         torch.nn.utils.clip_grad_norm_(
             self.policy_model.parameters(), self.opt_config.max_grad_norm
         )
-        torch.nn.utils.clip_grad_norm_(
-            self.value_model.parameters(), self.opt_config.max_grad_norm
-        )
+        torch.nn.utils.clip_grad_norm_(self.value_model.parameters(), self.opt_config.max_grad_norm)
         self.optimizer.step()
 
         # Compute metrics

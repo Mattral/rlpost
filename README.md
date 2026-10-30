@@ -13,8 +13,9 @@ Unit-tested on CPU. No GPU benchmark yet.
 
 Check on 2026-10-30, Python 3.12, torch 2.15.0+cpu, `PYTHONPATH=src`:
 
-- `tests/test_topology.py` and `tests/test_rollout.py` do not collect. Importing the package loads `comm_hooks.py`, and that file imports `ddp_comm_hook`, which torch 2.15 does not export.
-- The other three test modules collect 77 tests: 66 passed, 11 failed. The failures are listed in [ROADMAP.md](ROADMAP.md) under S0.6 and S0.9.
+- `pytest -q -m "not slow and not gpu"` collects 82 tests: 69 passed, 13 failed.
+- The failures are in DPO metrics, PPO `train_step`, and two rollout tests. Notes are in [ROADMAP.md](ROADMAP.md) under S0.6 and S0.9.
+- `ruff check .` and `ruff format --check .` pass under the config in `pyproject.toml`.
 
 Recount after you change tests:
 
@@ -37,7 +38,7 @@ There is no coverage number in this README. A green coverage run has not been re
 | `src/rlhf_platform/reward_engine.py` | Preference reward-model trainer. |
 | `src/rlhf_platform/dataset.py` | Preference-pair loading. Toy mode slices Anthropic HH-RLHF to 1,000 rows when it builds the cache. |
 | `src/rlhf_platform/cli.py` | Four Typer commands. Two of them do not train. See below. |
-| `src/rlhf_platform/distributed/` | Topology, communication hooks, and async checkpoints. The package does not import on torch 2.15. |
+| `src/rlhf_platform/distributed/` | Topology, communication hooks, and async checkpoints. The package imports on torch 2.15. The hooks are not covered by a passing test. |
 | `train.py` | Distributed training entrypoint. It has not been run on a cluster in this repo. |
 | `configs/` | YAML for a toy run, a default run, a cluster topology, and a DeepSpeed ZeRO-3 config. |
 

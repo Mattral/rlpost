@@ -14,4 +14,4 @@ The old README printed a telemetry JSON sample with a VRAM total and a tokens-pe
 | **Gradient Overlap Bucket** | 25MB | 50MB | 128MB |
 | **Target Context Length** | 4,096 | 16,384 | 65,536 |
 
-`configs/cluster_topology.yaml` and `src/rlhf_platform/distributed/topology.py` are the code that corresponds to the asymmetric actor/critic and reference/reward split. Importing that package fails on torch 2.15 because `comm_hooks.py` imports a missing name. A CPU process-group test is item S0.9 in `ROADMAP.md`.
+`configs/cluster_topology.yaml` and `src/rlhf_platform/distributed/topology.py` are the code that corresponds to the asymmetric actor/critic and reference/reward split. A CPU process-group test is item S0.9 in `ROADMAP.md`.

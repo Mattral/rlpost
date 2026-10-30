@@ -75,12 +75,29 @@ The exit criteria for Stage 0:
   - `pip install -e .` was not run. The measured-scope check used CPU torch 2.15 with
     `PYTHONPATH=src`.
 
-### [ ] S0.3 CI that tells the truth
+### [x] S0.3 CI that tells the truth
 - Remove jobs pointing at non-existent `tests/integration/` and `tests/benchmarks/`.
 - Remove `|| true` from the CI steps.
 - Make the default job: CPU torch, `ruff`, `pytest -q` (skipping `slow` and `gpu` markers).
 - Pin versions.
 - Notes:
+  - Replaced `.github/workflows/ci_perf.yml` with `.github/workflows/ci.yml`. One job:
+    Python 3.11, `requirements-cpu.txt` (torch 2.15.0+cpu and pinned pytest, ruff,
+    pydantic, PyYAML, numpy, transformers, datasets, accelerate), `pip install -e . --no-deps`,
+    then `ruff check`, `ruff format --check`, and `pytest -q -m "not slow and not gpu"`.
+    No `|| true`. Integration, benchmark, bandit, mypy, and codecov jobs are gone.
+  - `pyproject.toml` still pins the old training stack. CI does not install it.
+  - Ruff is configured for E, F, and I, with E501 ignored because the formatter owns line length.
+    `ruff check` and `ruff format --check` pass locally.
+  - Pytest does not pass. After the import fix below, the same command collects 82 tests:
+    69 passed, 13 failed. The GitHub job is expected to fail on those 13 until S0.6 and S0.9.
+  - `comm_hooks.py` imported `ddp_comm_hook`, which torch 2.15 does not export, and nothing
+    in the file used that name. The import was removed so the package imports and the two
+    previously uncollected modules run. `telemetry.py` used `torch` without importing it.
+    That import was added.
+  - `tests/run_benchmark_comparison.py` still returns hardcoded throughput and VRAM figures
+    (for example 1.9 steps/s and 3.5 GB) whether or not TRL imports. Pytest does not collect
+    it (`python_files = test_*.py`). It is not a result.
 
 ### [ ] S0.4 Code ownership pass
 - Merge `ppo_engine.py` and `alignment/ppo_engine.py` into one implementation. Delete dead code.
@@ -141,10 +158,12 @@ Cover:
 - Test `comm_hooks.py` and `async_io.py` for real, or remove them.
 - Delete `scripts/simulate_runtime.py` if it is replaced by real tests.
 - Notes:
-  - 2026-10-30: `comm_hooks.py` line 15 is `from torch.distributed.algorithms.ddp_comm_hooks import ddp_comm_hook`.
-    On torch 2.15 that module has `default_hooks` and `register_ddp_comm_hook`, not `ddp_comm_hook`.
-    Importing `rlhf_platform.distributed` or `rlhf_platform.alignment` therefore fails, and
-    `tests/test_topology.py` and `tests/test_rollout.py` do not collect.
+  - 2026-10-30: `comm_hooks.py` imported `ddp_comm_hook`, which torch 2.15 does not export.
+    S0.3 removed that unused import. The module still has no test that runs a real hook.
+  - 2026-10-30, once collection worked: `RolloutBuffer.add` calls `pin_memory()` and raises
+    `Cannot access accelerator device when none is available` on CPU.
+    `RolloutGenerator.generate_rollout` then fails with `IndexError` on `torch.cat(..., dim=1)`
+    because the sampled token is 1-D. `tests/test_topology.py` passed.
 
 ### [ ] S0.10 P2000 CUDA smoke test (optional)
 - Use the cu126 wheel, fp32, a tiny model, and run 20 steps each of SFT, DPO and PPO.
@@ -243,3 +262,4 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-10-30 · — · Roadmap created; replaces the old `roadmap.md` (whose phase "completion" statuses were not backed by measurements) · —
 - 2026-10-30 · S0.1 · Gitignore, untracked caches and egg-info, ROADMAP.md replaces the old roadmap. Phase-completion docs kept pending an owner decision. · 33bed64
 - 2026-10-30 · S0.2 · README states the CPU test result and drops unmeasured numbers. The GPU-count table moved to docs/design.md as a design target. The fake telemetry JSON was deleted. · 5f288b9
+- 2026-10-30 · S0.3 · CI is one CPU job: pinned torch, ruff, and pytest, with no swallowed failures. Ruff passes. Pytest is 69 passed, 13 failed, and the job is expected to be red until those failures are fixed. · pending-sha

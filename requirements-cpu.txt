@@ -1,0 +1,15 @@
+# Pinned CPU test environment used by CI.
+# This is not the dependency list in pyproject.toml. That list still pins an
+# older stack (transformers==4.32.0, trl==0.5.0, triton, bitsandbytes) which
+# this job does not install.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+torch==2.15.0+cpu
+pytest==9.2.0
+ruff==0.17.3
+pydantic==2.14.2
+PyYAML==6.0.3
+numpy==2.5.4
+transformers==5.22.0
+datasets==5.1.0
+accelerate==1.15.0

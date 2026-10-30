@@ -17,7 +17,6 @@ import torch
 from rlhf_platform.config import TrainingConfig
 from rlhf_platform.dpo_engine import DPOMetrics, DPOTrainer
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -117,7 +116,6 @@ class TestDPOLossComputation:
         trainer.step_count = 0
 
         # Call actual compute_dpo_loss method
-        batch_size = 4
         policy_logits_chosen = torch.tensor([0.5, 0.6, 0.7, 0.8])
         policy_logits_rejected = torch.tensor([0.3, 0.4, 0.5, 0.6])
         ref_logits_chosen = torch.tensor([0.4, 0.5, 0.6, 0.7])
@@ -404,15 +402,6 @@ class TestDPOBatchProcessing:
 
         # All samples have chosen > rejected, so accuracy should be 1.0
         assert metrics.accuracy == 1.0
-
-        # Margin should be sum of differences / batch_size
-        expected_margin = (
-            (1.0 - 0.0 - (1.0 - 0.0))
-            + (2.0 - 0.5 - (1.0 - 0.0))
-            + (3.0 - 1.0 - (1.0 - 0.0))
-            + (4.0 - 1.5 - (1.0 - 0.0))
-        ) / 4
-        # Should be approximately 0 due to symmetry
         assert abs(metrics.margin_mean) < 0.5
 
 

@@ -15,14 +15,13 @@ from peft import LoraConfig, get_peft_model
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    TrainingArguments,
     Trainer,
     TrainerCallback,
+    TrainingArguments,
 )
 
 from rlhf_platform.config import ModelConfig, TrainingConfig
 from rlhf_platform.dataset import get_dataloader
-
 
 logger = logging.getLogger(__name__)
 
@@ -80,9 +79,7 @@ def load_model_with_lora(config: ModelConfig) -> torch.nn.Module:
     model = get_peft_model(model, lora_config)
 
     # Print trainable params
-    trainable_params = sum(
-        p.numel() for p in model.parameters() if p.requires_grad
-    )
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total_params = sum(p.numel() for p in model.parameters())
     logger.info(
         f"Trainable params: {trainable_params:,} / {total_params:,} "
@@ -272,9 +269,7 @@ class EarlyStoppingCallback(TrainerCallback):
         if current_loss is None:
             return
 
-        if (
-            current_loss < self.best_loss - self.early_stopping_threshold
-        ):
+        if current_loss < self.best_loss - self.early_stopping_threshold:
             self.best_loss = current_loss
             self.patience_counter = 0
         else:
@@ -282,8 +277,7 @@ class EarlyStoppingCallback(TrainerCallback):
 
         if self.patience_counter >= self.early_stopping_patience:
             logger.info(
-                f"Early stopping triggered after {self.patience_counter} "
-                f"steps without improvement"
+                f"Early stopping triggered after {self.patience_counter} steps without improvement"
             )
             control.should_training_stop = True
 

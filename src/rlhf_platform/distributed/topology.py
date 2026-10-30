@@ -10,19 +10,20 @@ synchronization bottlenecks. This module implements a hybrid topology:
   and non-gradient tracking, reducing memory footprints and communication overhead.
 """
 
-import os
 import json
+import os
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence
 
-import yaml
 import torch
 import torch.distributed as dist
+import yaml
 
 
 class ModelRole(Enum):
     """Role of a model in the RLHF pipeline."""
+
     ACTOR = "actor"
     CRITIC = "critic"
     REFERENCE = "reference"
@@ -31,6 +32,7 @@ class ModelRole(Enum):
 
 class ParallelStrategy(Enum):
     """Distributed execution strategy."""
+
     FSDP_TP = "fsdp_tp"
     INFERENCE = "inference"
     STANDALONE = "standalone"
@@ -39,6 +41,7 @@ class ParallelStrategy(Enum):
 @dataclass
 class ModelPlacement:
     """Placement strategy for a single model within the cluster."""
+
     role: ModelRole
     model_name: str
     parameter_count: int
@@ -55,13 +58,15 @@ class ModelPlacement:
             assert self.tensor_parallel_size >= 1, "Tensor parallelism must be >= 1"
             assert self.data_parallel_size >= 1, "Data parallelism must be >= 1"
         if self.role in [ModelRole.REFERENCE, ModelRole.REWARD]:
-            assert self.strategy != ParallelStrategy.FSDP_TP, \
+            assert self.strategy != ParallelStrategy.FSDP_TP, (
                 "Frozen models should use INFERENCE or STANDALONE strategy"
+            )
 
 
 @dataclass
 class ClusterTopology:
     """Defines the complete asymmetric topology for a multi-node RLHF cluster."""
+
     world_size: int
     rank: int
     local_rank: int
@@ -131,13 +136,21 @@ class ClusterTopology:
                 self.reference_reward_group = dist.new_group(ranks=inference_ranks)
 
             if self.actor_placement is not None:
-                self.actor_group = dist.new_group(ranks=sorted(set(self.actor_placement.device_list)))
+                self.actor_group = dist.new_group(
+                    ranks=sorted(set(self.actor_placement.device_list))
+                )
             if self.critic_placement is not None:
-                self.critic_group = dist.new_group(ranks=sorted(set(self.critic_placement.device_list)))
+                self.critic_group = dist.new_group(
+                    ranks=sorted(set(self.critic_placement.device_list))
+                )
             if self.reference_placement is not None:
-                self.reference_group = dist.new_group(ranks=sorted(set(self.reference_placement.device_list)))
+                self.reference_group = dist.new_group(
+                    ranks=sorted(set(self.reference_placement.device_list))
+                )
             if self.reward_placement is not None:
-                self.reward_group = dist.new_group(ranks=sorted(set(self.reward_placement.device_list)))
+                self.reward_group = dist.new_group(
+                    ranks=sorted(set(self.reward_placement.device_list))
+                )
 
             # Ensure all processes reach a consistent state before proceeding.
             dist.barrier()
@@ -333,7 +346,9 @@ def load_topology_from_yaml(
         builder.add_actor(
             model_name=actor_spec["model_name"],
             param_count=int(actor_spec.get("num_gpus", 0)) * 100_000_000,
-            device_list=_resolve_global_ranks(actor_spec["devices"], actor_spec.get("node_ids", [0]), gpus_per_node),
+            device_list=_resolve_global_ranks(
+                actor_spec["devices"], actor_spec.get("node_ids", [0]), gpus_per_node
+            ),
             tensor_parallel_size=int(actor_spec.get("tp_degree", 1)),
             data_parallel_size=int(actor_spec.get("dp_degree", 1)),
             precision=actor_spec.get("precision", "bf16"),
@@ -346,7 +361,9 @@ def load_topology_from_yaml(
             strategy=actor_strategy,
             tensor_parallel_size=int(actor_spec.get("tp_degree", 1)),
             data_parallel_size=int(actor_spec.get("dp_degree", 1)),
-            device_list=_resolve_global_ranks(actor_spec["devices"], actor_spec.get("node_ids", [0]), gpus_per_node),
+            device_list=_resolve_global_ranks(
+                actor_spec["devices"], actor_spec.get("node_ids", [0]), gpus_per_node
+            ),
             precision=actor_spec.get("precision", "bf16"),
         )
 
@@ -356,7 +373,9 @@ def load_topology_from_yaml(
         builder.add_critic(
             model_name=critic_spec["model_name"],
             param_count=int(critic_spec.get("num_gpus", 0)) * 100_000_000,
-            device_list=_resolve_global_ranks(critic_spec["devices"], critic_spec.get("node_ids", [0]), gpus_per_node),
+            device_list=_resolve_global_ranks(
+                critic_spec["devices"], critic_spec.get("node_ids", [0]), gpus_per_node
+            ),
             tensor_parallel_size=int(critic_spec.get("tp_degree", 1)),
             data_parallel_size=int(critic_spec.get("dp_degree", 1)),
             precision=critic_spec.get("precision", "bf16"),
@@ -369,17 +388,23 @@ def load_topology_from_yaml(
             strategy=critic_strategy,
             tensor_parallel_size=int(critic_spec.get("tp_degree", 1)),
             data_parallel_size=int(critic_spec.get("dp_degree", 1)),
-            device_list=_resolve_global_ranks(critic_spec["devices"], critic_spec.get("node_ids", [0]), gpus_per_node),
+            device_list=_resolve_global_ranks(
+                critic_spec["devices"], critic_spec.get("node_ids", [0]), gpus_per_node
+            ),
             precision=critic_spec.get("precision", "bf16"),
         )
 
     reference_spec = models["reference"]
-    reference_strategy = _parse_parallel_strategy(reference_spec.get("parallelism_strategy", "inference"))
+    reference_strategy = _parse_parallel_strategy(
+        reference_spec.get("parallelism_strategy", "inference")
+    )
     if reference_strategy == ParallelStrategy.INFERENCE:
         builder.add_reference(
             model_name=reference_spec["model_name"],
             param_count=int(reference_spec.get("num_gpus", 0)) * 100_000_000,
-            device_list=_resolve_global_ranks(reference_spec["devices"], reference_spec.get("node_ids", [0]), gpus_per_node),
+            device_list=_resolve_global_ranks(
+                reference_spec["devices"], reference_spec.get("node_ids", [0]), gpus_per_node
+            ),
             precision=reference_spec.get("precision", "fp32"),
         )
     else:
@@ -388,7 +413,9 @@ def load_topology_from_yaml(
             model_name=reference_spec["model_name"],
             parameter_count=int(reference_spec.get("num_gpus", 0)) * 100_000_000,
             strategy=reference_strategy,
-            device_list=_resolve_global_ranks(reference_spec["devices"], reference_spec.get("node_ids", [0]), gpus_per_node),
+            device_list=_resolve_global_ranks(
+                reference_spec["devices"], reference_spec.get("node_ids", [0]), gpus_per_node
+            ),
             precision=reference_spec.get("precision", "fp32"),
         )
 
@@ -398,7 +425,9 @@ def load_topology_from_yaml(
         builder.add_reward(
             model_name=reward_spec["model_name"],
             param_count=int(reward_spec.get("num_gpus", 0)) * 100_000_000,
-            device_list=_resolve_global_ranks(reward_spec["devices"], reward_spec.get("node_ids", [0]), gpus_per_node),
+            device_list=_resolve_global_ranks(
+                reward_spec["devices"], reward_spec.get("node_ids", [0]), gpus_per_node
+            ),
             precision=reward_spec.get("precision", "fp32"),
         )
     else:
@@ -407,7 +436,9 @@ def load_topology_from_yaml(
             model_name=reward_spec["model_name"],
             parameter_count=int(reward_spec.get("num_gpus", 0)) * 100_000_000,
             strategy=reward_strategy,
-            device_list=_resolve_global_ranks(reward_spec["devices"], reward_spec.get("node_ids", [0]), gpus_per_node),
+            device_list=_resolve_global_ranks(
+                reward_spec["devices"], reward_spec.get("node_ids", [0]), gpus_per_node
+            ),
             precision=reward_spec.get("precision", "fp32"),
         )
 

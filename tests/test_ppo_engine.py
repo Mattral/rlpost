@@ -11,13 +11,13 @@ Tests validate:
 - W&B logging integration
 """
 
+import math
+
 import pytest
 import torch
 import torch.nn as nn
 
 from rlhf_platform.config import (
-    AlignmentConfig,
-    OptimizationConfig,
     TrainingConfig,
 )
 from rlhf_platform.ppo_engine import (
@@ -173,9 +173,7 @@ class TestPPOLosses:
         policy = DummyModel()
         value = DummyValueModel()
         reference = DummyModel()
-        optimizer = torch.optim.Adam(
-            list(policy.parameters()) + list(value.parameters())
-        )
+        optimizer = torch.optim.Adam(list(policy.parameters()) + list(value.parameters()))
 
         trainer = PPOTrainer(config, policy, value, reference, optimizer)
 
@@ -196,9 +194,7 @@ class TestPPOLosses:
         policy = DummyModel()
         value = DummyValueModel()
         reference = DummyModel()
-        optimizer = torch.optim.Adam(
-            list(policy.parameters()) + list(value.parameters())
-        )
+        optimizer = torch.optim.Adam(list(policy.parameters()) + list(value.parameters()))
 
         trainer = PPOTrainer(config, policy, value, reference, optimizer)
 
@@ -217,9 +213,7 @@ class TestPPOLosses:
         policy = DummyModel()
         value = DummyValueModel()
         reference = DummyModel()
-        optimizer = torch.optim.Adam(
-            list(policy.parameters()) + list(value.parameters())
-        )
+        optimizer = torch.optim.Adam(list(policy.parameters()) + list(value.parameters()))
 
         trainer = PPOTrainer(config, policy, value, reference, optimizer)
 
@@ -238,9 +232,7 @@ class TestPPOLosses:
         policy = DummyModel()
         value = DummyValueModel()
         reference = DummyModel()
-        optimizer = torch.optim.Adam(
-            list(policy.parameters()) + list(value.parameters())
-        )
+        optimizer = torch.optim.Adam(list(policy.parameters()) + list(value.parameters()))
 
         trainer = PPOTrainer(config, policy, value, reference, optimizer)
 
@@ -259,9 +251,7 @@ class TestPPOLosses:
         policy = DummyModel()
         value = DummyValueModel()
         reference = DummyModel()
-        optimizer = torch.optim.Adam(
-            list(policy.parameters()) + list(value.parameters())
-        )
+        optimizer = torch.optim.Adam(list(policy.parameters()) + list(value.parameters()))
 
         trainer = PPOTrainer(config, policy, value, reference, optimizer)
 
@@ -282,9 +272,7 @@ class TestAdaptiveKL:
         policy = DummyModel()
         value = DummyValueModel()
         reference = DummyModel()
-        optimizer = torch.optim.Adam(
-            list(policy.parameters()) + list(value.parameters())
-        )
+        optimizer = torch.optim.Adam(list(policy.parameters()) + list(value.parameters()))
 
         trainer = PPOTrainer(config, policy, value, reference, optimizer)
         initial_coeff = trainer.kl_coefficient
@@ -301,9 +289,7 @@ class TestAdaptiveKL:
         policy = DummyModel()
         value = DummyValueModel()
         reference = DummyModel()
-        optimizer = torch.optim.Adam(
-            list(policy.parameters()) + list(value.parameters())
-        )
+        optimizer = torch.optim.Adam(list(policy.parameters()) + list(value.parameters()))
 
         trainer = PPOTrainer(config, policy, value, reference, optimizer)
         initial_coeff = trainer.kl_coefficient
@@ -320,9 +306,7 @@ class TestAdaptiveKL:
         policy = DummyModel()
         value = DummyValueModel()
         reference = DummyModel()
-        optimizer = torch.optim.Adam(
-            list(policy.parameters()) + list(value.parameters())
-        )
+        optimizer = torch.optim.Adam(list(policy.parameters()) + list(value.parameters()))
 
         trainer = PPOTrainer(config, policy, value, reference, optimizer)
 
@@ -342,9 +326,7 @@ class TestMetricsComputation:
         policy = DummyModel()
         value = DummyValueModel()
         reference = DummyModel()
-        optimizer = torch.optim.Adam(
-            list(policy.parameters()) + list(value.parameters())
-        )
+        optimizer = torch.optim.Adam(list(policy.parameters()) + list(value.parameters()))
 
         trainer = PPOTrainer(config, policy, value, reference, optimizer)
 
@@ -362,9 +344,7 @@ class TestMetricsComputation:
         policy = DummyModel()
         value = DummyValueModel()
         reference = DummyModel()
-        optimizer = torch.optim.Adam(
-            list(policy.parameters()) + list(value.parameters())
-        )
+        optimizer = torch.optim.Adam(list(policy.parameters()) + list(value.parameters()))
 
         trainer = PPOTrainer(config, policy, value, reference, optimizer)
 
@@ -439,9 +419,7 @@ class TestTrainStep:
         policy = DummyModel()
         value = DummyValueModel()
         reference = DummyModel()
-        optimizer = torch.optim.Adam(
-            list(policy.parameters()) + list(value.parameters())
-        )
+        optimizer = torch.optim.Adam(list(policy.parameters()) + list(value.parameters()))
 
         trainer = PPOTrainer(config, policy, value, reference, optimizer)
 
@@ -464,8 +442,6 @@ class TestTrainStep:
         assert metrics.kl_divergence >= 0
         assert -1 <= metrics.explained_variance <= 1
 
-
-import math
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

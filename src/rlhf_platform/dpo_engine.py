@@ -8,7 +8,7 @@ This module provides:
 """
 
 import logging
-from typing import Dict, Optional, Tuple
+from typing import Tuple
 
 import torch
 import torch.nn.functional as F
@@ -17,8 +17,7 @@ from torch.optim import AdamW
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from rlhf_platform.config import TrainingConfig
-from rlhf_platform.dataset import PreferencePairDataset, ToyDatasetLoader
-
+from rlhf_platform.dataset import ToyDatasetLoader
 
 logger = logging.getLogger(__name__)
 
@@ -68,12 +67,12 @@ class DPOTrainer:
 
     Mathematical objective:
 
-        L_DPO = -E[(x,y_c,y_r) in D] [log σ(β(log π(y_c|x)/π_ref(y_c|x) - 
+        L_DPO = -E[(x,y_c,y_r) in D] [log σ(β(log π(y_c|x)/π_ref(y_c|x) -
                                                    log π(y_r|x)/π_ref(y_r|x)))]
 
     Where:
     - π(y|x) = trained policy
-    - π_ref(y|x) = reference policy  
+    - π_ref(y|x) = reference policy
     - β = temperature parameter (default: 0.1)
     - σ = sigmoid function
 
@@ -131,13 +130,10 @@ class DPOTrainer:
         self.step_count = 0
 
         logger.info(
-            f"DPO Trainer initialized: policy={config.model.policy_model_id}, "
-            f"beta={self.beta}"
+            f"DPO Trainer initialized: policy={config.model.policy_model_id}, beta={self.beta}"
         )
 
-    def _tokenize_for_loss(
-        self, prompt: str, response: str
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _tokenize_for_loss(self, prompt: str, response: str) -> Tuple[torch.Tensor, torch.Tensor]:
         """Tokenize prompt and response for loss computation.
 
         Args:
@@ -229,7 +225,6 @@ class DPOTrainer:
 
         # Compute log probs for non-padding tokens
         logits = outputs.logits
-        log_probs = F.log_softmax(logits, dim=-1)
 
         # Get log prob of actual next token
         shift_logits = logits[..., :-1, :].contiguous()
@@ -237,18 +232,14 @@ class DPOTrainer:
         shift_log_probs = log_softmax(shift_logits, dim=-1)
 
         # Gather log probs for actual tokens
-        token_log_probs = torch.gather(
-            shift_log_probs, 2, shift_labels.unsqueeze(-1)
-        ).squeeze(-1)
+        token_log_probs = torch.gather(shift_log_probs, 2, shift_labels.unsqueeze(-1)).squeeze(-1)
 
         # Mask out padding tokens
         shift_mask = attention_mask[..., 1:].contiguous()
         token_log_probs = token_log_probs * shift_mask
 
         # Average over non-padding tokens
-        sequence_log_probs = (
-            token_log_probs.sum(dim=1) / shift_mask.sum(dim=1).clamp(min=1)
-        )
+        sequence_log_probs = token_log_probs.sum(dim=1) / shift_mask.sum(dim=1).clamp(min=1)
 
         return sequence_log_probs
 
@@ -269,12 +260,8 @@ class DPOTrainer:
 
         # Tokenize preference pair
         prompt = batch["prompt"]
-        chosen_input_ids, chosen_mask = self._tokenize_for_loss(
-            prompt, batch["chosen"]
-        )
-        rejected_input_ids, rejected_mask = self._tokenize_for_loss(
-            prompt, batch["rejected"]
-        )
+        chosen_input_ids, chosen_mask = self._tokenize_for_loss(prompt, batch["chosen"])
+        rejected_input_ids, rejected_mask = self._tokenize_for_loss(prompt, batch["rejected"])
 
         # Compute log probs under policy
         policy_chosen_log_probs = self.compute_log_probs(
@@ -373,10 +360,7 @@ if __name__ == "__main__":
             "rejected": pair.rejected,
         }
         metrics = trainer.train_step(batch)
-        print(
-            f"Step {i+1}: DPO Loss={metrics.dpo_loss:.4f}, "
-            f"Accuracy={metrics.accuracy:.4f}"
-        )
+        print(f"Step {i + 1}: DPO Loss={metrics.dpo_loss:.4f}, Accuracy={metrics.accuracy:.4f}")
 
     # Save model
     trainer.save_model("output/dpo_toy_checkpoint")

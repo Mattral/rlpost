@@ -8,11 +8,10 @@ and prevent Silent Data Corruption (SDC).
 """
 
 import logging
-from typing import Any, Callable, List, Optional
+from typing import List
 
 import torch
 import torch.distributed as dist
-from torch.distributed.algorithms.ddp_comm_hooks import ddp_comm_hook
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +24,7 @@ class CommunicationHooks:
         """
         Register a hook to overlap all_reduce with backward computation.
         Requires DDP-style distributed setup.
-        
+
         This hook registers a communication function that batches gradients
         into buckets and fires off all_reduce ops as soon as a bucket is ready,
         rather than waiting for all gradients to be computed.
@@ -53,15 +52,16 @@ class CommunicationHooks:
     ) -> None:
         """
         Register a backward hook to check KL divergence between policy and reference.
-        
+
         This is a numerical safeguard: if KL exceeds a threshold, log a warning
         and clip gradients to prevent policy collapse.
-        
+
         Args:
             model: Policy model (Actor)
             reference_model: Reference model (frozen baseline)
             max_kl: Maximum allowed KL divergence before clipping
         """
+
         def kl_check_hook(grad: torch.Tensor) -> torch.Tensor:
             """Hook to check gradient magnitude as a proxy for KL drift."""
             grad_norm = torch.norm(grad)
@@ -85,9 +85,10 @@ class CommunicationHooks:
     ) -> None:
         """
         Register a backward hook to clip gradients per-parameter.
-        
+
         Helps prevent numerical instability and gradient explosion.
         """
+
         def clipping_hook(grad: torch.Tensor) -> torch.Tensor:
             """Clip gradient to max_grad_norm."""
             return torch.clamp(grad, -max_grad_norm, max_grad_norm)
@@ -95,16 +96,19 @@ class CommunicationHooks:
         for param in model.parameters():
             if param.requires_grad:
                 param.register_hook(clipping_hook)
-        
-        logger.info(f"Registered gradient clipping hook (max_norm={max_grad_norm}) on all parameters.")
+
+        logger.info(
+            f"Registered gradient clipping hook (max_norm={max_grad_norm}) on all parameters."
+        )
 
     @staticmethod
     def register_nan_check_hook(model: torch.nn.Module) -> None:
         """
         Register a backward hook to detect NaN/Inf gradients.
-        
+
         Useful for detecting SDC or numerical overflow.
         """
+
         def nan_check_hook(grad: torch.Tensor) -> torch.Tensor:
             """Check for NaN or Inf and raise if found."""
             if torch.isnan(grad).any():
@@ -116,7 +120,7 @@ class CommunicationHooks:
         for param in model.parameters():
             if param.requires_grad:
                 param.register_hook(nan_check_hook)
-        
+
         logger.info("Registered NaN/Inf detection hook on all parameters.")
 
 
@@ -131,7 +135,7 @@ class AsynchronousReduceScatter:
     def async_reduce_scatter(self, tensor: torch.Tensor) -> torch.futures.Future:
         """
         Fire off a non-blocking reduce_scatter.
-        
+
         Returns a Future that will complete when the scatter is done.
         """
         future = dist.reduce_scatter_multigpu(
@@ -168,7 +172,7 @@ class CollectiveProfiler:
     def summary(self) -> dict:
         """Return summary statistics."""
         import statistics
-        
+
         def safe_stats(times: List[float]) -> dict:
             if not times:
                 return {"count": 0, "mean_ms": 0.0, "max_ms": 0.0}

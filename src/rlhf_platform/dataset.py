@@ -11,17 +11,14 @@ This module provides:
 import asyncio
 import json
 import logging
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import AsyncIterator, Iterator, Optional
 
-import torch
 from datasets import Dataset, load_dataset
 from torch.utils.data import DataLoader, IterableDataset
 
-from rlhf_platform.config import DatasetConfig, TrainingConfig
-
+from rlhf_platform.config import DatasetConfig
 
 logger = logging.getLogger(__name__)
 
@@ -73,9 +70,7 @@ class PreferencePairDataset(IterableDataset):
             ValueError: If dataset not found or format invalid
         """
         self.config = config
-        self.cache_dir = Path(
-            cache_dir or f"data/{config.dataset_name}"
-        ).expanduser()
+        self.cache_dir = Path(cache_dir or f"data/{config.dataset_name}").expanduser()
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
         self._dataset: Optional[Dataset] = None
@@ -105,9 +100,7 @@ class PreferencePairDataset(IterableDataset):
                             rejected_reward=data.get("rejected_reward"),
                         )
                     )
-            logger.info(
-                f"Loaded {len(pairs)} pairs from cache: {cache_file}"
-            )
+            logger.info(f"Loaded {len(pairs)} pairs from cache: {cache_file}")
             return pairs
         except (json.JSONDecodeError, KeyError) as e:
             logger.warning(f"Cache corrupted: {e}, will reload from source")
@@ -143,10 +136,7 @@ class PreferencePairDataset(IterableDataset):
         Raises:
             ValueError: If dataset format incompatible
         """
-        logger.info(
-            f"Loading {self.config.dataset_name} "
-            f"(split: {self.config.dataset_split})"
-        )
+        logger.info(f"Loading {self.config.dataset_name} (split: {self.config.dataset_split})")
         dataset = load_dataset(
             self.config.dataset_name,
             split=self.config.dataset_split,
@@ -163,9 +153,7 @@ class PreferencePairDataset(IterableDataset):
         else:
             return dataset
 
-    def _convert_to_preference_pairs(
-        self, dataset: Dataset
-    ) -> list[PreferencePair]:
+    def _convert_to_preference_pairs(self, dataset: Dataset) -> list[PreferencePair]:
         """Convert HF Dataset to PreferencePair objects.
 
         Args:
@@ -180,8 +168,7 @@ class PreferencePairDataset(IterableDataset):
         required_cols = {"prompt", "chosen", "rejected"}
         if not required_cols.issubset(set(dataset.column_names)):
             raise ValueError(
-                f"Dataset missing required columns {required_cols}. "
-                f"Found: {dataset.column_names}"
+                f"Dataset missing required columns {required_cols}. Found: {dataset.column_names}"
             )
 
         pairs = []
@@ -314,10 +301,7 @@ class ToyDatasetLoader:
                 }
                 f.write(json.dumps(obj) + "\n")
 
-        logger.info(
-            f"Toy dataset cached to {ToyDatasetLoader.TOY_JSONL} "
-            f"({len(dataset)} samples)"
-        )
+        logger.info(f"Toy dataset cached to {ToyDatasetLoader.TOY_JSONL} ({len(dataset)} samples)")
 
     @staticmethod
     def load() -> list[PreferencePair]:

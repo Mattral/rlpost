@@ -1,8 +1,14 @@
-import torch
-import torch.nn as nn
 from types import SimpleNamespace
 
-from rlhf_platform.alignment.rollout import Rollout, RolloutBuffer, RolloutCollator, RolloutGenerator
+import torch
+import torch.nn as nn
+
+from rlhf_platform.alignment.rollout import (
+    Rollout,
+    RolloutBuffer,
+    RolloutCollator,
+    RolloutGenerator,
+)
 
 
 class DummyCausalLM(nn.Module):
