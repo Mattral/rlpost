@@ -1,5 +1,5 @@
-"""Alignment algorithms: PPO, loss functions, and rollout generation."""
+"""Rollout storage and sampling. PPO updates live in ``rlhf_platform.ppo_engine``."""
 
-from . import loss, ppo_engine, rollout
+from . import rollout
 
-__all__ = ["ppo_engine", "loss", "rollout"]
+__all__ = ["rollout"]

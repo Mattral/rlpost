@@ -4,62 +4,14 @@ This directory contains utilities for running and validating the distributed RLH
 
 ## Files
 
-### `train.py` (Root)
-**Main training entrypoint for production distributed RLHF alignment.**
+### `train.py` (repository root)
 
-Located at the repository root, `train.py` orchestrates the complete training pipeline:
-
-- **Distributed initialization** with NCCL (GPU) or Gloo (CPU) backend
-- **Asymmetric topology loading** from `configs/cluster_topology.yaml`
-- **Multi-model coordination** (Actor, Critic, Reference, Reward)
-- **Async rollout pipeline** with thread-safe pinned CPU buffers
-- **PPO optimization loop** with gradient accumulation
-- **Non-blocking checkpointing** and structured telemetry
-
-#### Usage
-
-**Single-node (debugging):**
-```bash
-python train.py \
-  --config configs/cluster_topology.yaml \
-  --num-steps 100 \
-  --batch-size 2 \
-  --use-cpu \
-  --verbose
-```
-
-**Multi-node (distributed):**
-```bash
-torchrun \
-  --nproc_per_node=8 \
-  --nnodes=2 \
-  --node_rank=0 \
-  --master_addr=<MASTER_IP> \
-  --master_port=29500 \
-  train.py \
-  --config configs/cluster_topology.yaml \
-  --num-steps 1000 \
-  --checkpoint-dir /shared/checkpoints
-```
-
-#### Arguments
-
-- `--config`: Path to topology YAML config (default: `configs/cluster_topology.yaml`)
-- `--num-steps`: Number of PPO update steps (default: 200)
-- `--batch-size`: Batch size for rollout generation (default: 1)
-- `--max-response-length`: Max token length per rollout (default: 64)
-- `--checkpoint-dir`: Directory for async checkpoints (default: `checkpoints`)
-- `--prompts`: Custom prompt list (optional)
-- `--use-cpu`: Force CPU execution (useful for debugging)
-- `--verbose`: Enable debug logging
-- `--seed`: Random seed for reproducibility (default: 42)
+`train.py` exits with status 2. S0.4 removed `DistributedPPOEngine`, and this script does not call `PPOTrainer`. The PPO update is `rlhf_platform.ppo_engine.PPOTrainer`. Connecting a run is S0.11 in `ROADMAP.md`.
 
 ---
 
 ### `simulate_runtime.py` (Scripts)
-**Local cluster emulation suite for distributed topology validation.**
-
-Simulates a 4-rank distributed cluster on a single machine using `torch.multiprocessing.spawn`. Validates:
+**Local cluster emulation script.** Pytest does not collect it. No passing run is recorded in this repo. S0.9 decides whether it stays. The script tries to:
 
 - Asymmetric process group creation without deadlocks
 - Thread-safe rollout buffer operations with pinned CPU memory
@@ -96,7 +48,7 @@ Generates JSON trace files for each rank (e.g., `trace_rank_0.json`, `trace_rank
 - Timestamped trace entries for each operation (barrier, buffer ops, tensor transfers)
 - Any errors or deadlock indicators
 
-**Example trace:**
+**Trace shape** (illustration of the JSON fields, not a recorded run):
 ```json
 {
   "rank": 0,
@@ -121,57 +73,8 @@ Generates JSON trace files for each rank (e.g., `trace_rank_0.json`, `trace_rank
 
 ---
 
-## Workflow
+## What is not a run
 
-### Development & Debugging
+`python train.py` prints a message and exits 2. It does not train.
 
-1. **Validate topology and comm locally** (no GPU required):
-   ```bash
-   python scripts/simulate_runtime.py --num-ranks 4 --iterations 20
-   ```
-
-2. **Test on single GPU** (CPU-compatible):
-   ```bash
-   python train.py --use-cpu --num-steps 10 --verbose
-   ```
-
-3. **Test on single node with multiple GPUs**:
-   ```bash
-   torchrun --nproc_per_node=4 train.py --num-steps 10
-   ```
-
-### Production Deployment
-
-1. Prepare multi-node cluster with synchronized NTP and InfiniBand fabric.
-2. Configure `configs/cluster_topology.yaml` with actual hardware layout.
-3. Validate NCCL connectivity: `python scripts/simulate_runtime.py --num-ranks <world_size>`
-4. Launch full training with `torchrun` (see multi-node example above).
-
----
-
-## Troubleshooting
-
-### Deadlock During Simulation
-- Check trace logs: `cat /tmp/rlhf_traces/trace_rank_*.json`
-- Verify barrier ordering in topology module
-- Ensure all ranks reach `dist.barrier()` calls consistently
-
-### OOM During Training
-- Reduce `--batch-size`
-- Lower `--max-response-length`
-- Use `--use-cpu` to estimate memory without GPU overhead
-- Check `memory_usage` entries in telemetry logs
-
-### NCCL Timeout (Multi-node)
-- Verify network connectivity and low-level RDMA fabric
-- Increase NCCL timeout: `export NCCL_COMM_TIMEOUT_MS=600000`
-- Check firewall rules on port ranges 29500–29600
-
----
-
-## Architecture Notes
-
-- **Async Rollout Pipeline**: Generator threads populate a pinned-memory CPU ring buffer; training ranks pull non-blocking transfers to GPU.
-- **Asymmetric Topology**: Actor/Critic (active) occupy a distinct process group from Reference/Reward (frozen inference).
-- **Communication Hooks**: Gradient bucket overlapping fires `all_reduce` ops concurrently with backward computation to hide network latency.
-- **Non-blocking Checkpoints**: Async writer thread pins state to CPU memory and streams to disk without blocking the main training loop.
+`scripts/simulate_runtime.py` is not part of `pytest`. S0.9 is the item that tests the process-group split, the communication hooks, and the checkpoint writer, or removes them.

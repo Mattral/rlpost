@@ -30,16 +30,14 @@ There is no coverage number in this README. A green coverage run has not been re
 | Path | What it is |
 | --- | --- |
 | `src/rlhf_platform/config.py` | Pydantic configs. `TrainingConfig.toy_mode()` and `from_yaml`. Tested in `tests/test_config.py`. |
-| `src/rlhf_platform/ppo_engine.py` | `PPOTrainer`: GAE, a clipped policy loss, a value loss, entropy, and a KL term. Some of its tests fail. See S0.6. |
-| `src/rlhf_platform/alignment/ppo_engine.py` | A second PPO implementation, `DistributedPPOEngine`. S0.4 merges the two. |
-| `src/rlhf_platform/alignment/loss.py` | Categorical KL from full logits, GAE, and a clipped PPO loss. Not parity-tested against TRL yet. |
+| `src/rlhf_platform/ppo_engine.py` | The only PPO implementation: `PPOTrainer`. GAE, a clipped policy loss, an unclipped value loss, entropy, and a KL term. `train_step` still gathers log-probabilities on the wrong axis. See S0.6. |
 | `src/rlhf_platform/dpo_engine.py` | `DPOTrainer`. The CLI does not call it. |
 | `src/rlhf_platform/sft_engine.py` | LoRA SFT through the Hugging Face `Trainer`. |
 | `src/rlhf_platform/reward_engine.py` | Preference reward-model trainer. |
 | `src/rlhf_platform/dataset.py` | Preference-pair loading. Toy mode slices Anthropic HH-RLHF to 1,000 rows when it builds the cache. |
 | `src/rlhf_platform/cli.py` | Four Typer commands. Two of them do not train. See below. |
 | `src/rlhf_platform/distributed/` | Topology, communication hooks, and async checkpoints. The package imports on torch 2.15. The hooks are not covered by a passing test. |
-| `train.py` | Distributed training entrypoint. It has not been run on a cluster in this repo. |
+| `train.py` | Exits with status 2. It does not call `PPOTrainer`. |
 | `configs/` | YAML for a toy run, a default run, a cluster topology, and a DeepSpeed ZeRO-3 config. |
 
 Work still open is tracked in [ROADMAP.md](ROADMAP.md).
@@ -61,9 +59,9 @@ That is the DPO objective at sequence level. Parity with TRL, including the log-
 
 ## PPO
 
-`PPOTrainer` in `ppo_engine.py` is the implementation the current unit tests call. The intended step is GAE, then a clipped probability ratio, a value loss, an entropy bonus, and a KL penalty. `train_step` currently gathers log-probabilities with the wrong tensor rank, so the step test raises. Details are in the S0.6 notes.
+`PPOTrainer` in `ppo_engine.py` is the only PPO implementation. The step is GAE, then a clipped probability ratio, an unclipped value loss, an entropy bonus, and a KL penalty. `compute_kl_divergence(policy_logits, ref_logits)` evaluates the full-vocabulary KL(reference || policy), `sum_a p_ref(a) (log p_ref(a) - log p_policy(a))`. The sampled-token estimators usually called k1, k2, and k3 are not implemented. Naming that estimator is S0.6e.
 
-`alignment/loss.py` computes KL as the full-vocabulary categorical KL, `sum_i p_i (log p_i - log q_i)`, and clamps it to `[0, 1000]`. The sampled-token estimators usually called k1, k2, and k3 are not implemented here. Naming and testing that estimator is S0.6e.
+`train_step` gathers log-probabilities with `gather` on dimension 1 and does not shift for the causal offset, so the step test raises. That bug is S0.6a. It lives in this one function.
 
 ## Command line
 

@@ -1,19 +1,15 @@
-"""Async-first dataset pipeline for RLHF training with preference pairs and caching.
+"""Preference-pair loading for SFT, the reward model, and DPO.
 
-This module provides:
-- Preference pair loader with local caching
-- Toy dataset support (1K samples) with pre-cached JSONL
-- LoRA token masking for efficient training
-- Asyncio-based data loading for multi-worker pipelines
-- Hugging Face integration (Datasets library)
+Pairs are ``prompt``, ``chosen``, and ``rejected`` strings. Toy mode tries
+to cache 1,000 HH-RLHF rows. The real HH-RLHF split does not have a
+``prompt`` column, so that path raises. Nothing in ``tests/`` loads it.
 """
 
-import asyncio
 import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncIterator, Iterator, Optional
+from typing import Iterator, Optional
 
 from datasets import Dataset, load_dataset
 from torch.utils.data import DataLoader, IterableDataset
@@ -32,17 +28,6 @@ class PreferencePair:
     rejected: str
     chosen_reward: Optional[float] = None  # For reward data
     rejected_reward: Optional[float] = None
-
-
-@dataclass
-class PPOSample:
-    """PPO training sample with prompt, action, and metadata."""
-
-    prompt: str
-    action: str  # Generated continuation
-    log_prob: float  # Log probability under policy
-    reward: float  # Scalar reward from reward model
-    value: float  # Value estimate
 
 
 class PreferencePairDataset(IterableDataset):
@@ -331,12 +316,10 @@ class ToyDatasetLoader:
 
 
 class LoRAMaskingCollator:
-    """Collate function that masks non-LoRA tokens for efficient training.
+    """Pad a batch and set ``labels`` to -100 on padding tokens.
 
-    For LoRA-based training, only LoRA parameters contribute to gradients,
-    so non-LoRA tokens can be masked to reduce computation.
-
-    Note: Requires model.modules() to identify LoRA layers first.
+    The name says LoRA masking. The body does not look at LoRA modules.
+    It copies ``input_ids`` into ``labels`` and ignores pad positions.
     """
 
     def __init__(self, tokenizer, max_length: int = 512):
@@ -372,31 +355,6 @@ class LoRAMaskingCollator:
         padded["labels"][padded["attention_mask"] == 0] = -100
 
         return padded
-
-
-async def async_load_dataset(
-    config: DatasetConfig,
-) -> AsyncIterator[PreferencePair]:
-    """Async dataset loader for multi-worker pipelines.
-
-    Loads preference pairs asynchronously, enabling concurrent
-    preprocessing and GPU training.
-
-    Args:
-        config: DatasetConfig with dataset settings
-
-    Yields:
-        PreferencePair objects asynchronously
-    """
-    dataset = PreferencePairDataset(config)
-    dataset.load()
-
-    # Wrap iterator in async task
-    loop = asyncio.get_event_loop()
-    for pair in dataset:
-        yield pair
-        # Yield control to event loop for other tasks
-        await loop.create_task(asyncio.sleep(0))
 
 
 def get_dataloader(

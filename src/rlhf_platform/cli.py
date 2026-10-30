@@ -25,7 +25,7 @@ console = Console()
 
 app = typer.Typer(
     name="rlhf-platform",
-    help="Production-grade RLHF training platform with PPO and DPO support",
+    help="SFT, reward-model, PPO, and DPO commands. run-ppo and run-dpo do not train.",
 )
 
 
@@ -369,7 +369,7 @@ def main(
         help="Show version",
     ),
 ) -> None:
-    """RLHF Platform - Production-grade alignment training.
+    """SFT, a reward model, PPO, and DPO.
 
     For detailed help on any command:
         python -m rlhf_platform.cli COMMAND --help

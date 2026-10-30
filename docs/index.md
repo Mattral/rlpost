@@ -16,4 +16,4 @@ Start with the [README](../README.md) and [ROADMAP.md](../ROADMAP.md).
 | [governance/contributing.md](governance/contributing.md) | Contribution notes |
 | [governance/security.md](governance/security.md) | Security notes |
 
-`docs/CODE_MAP.md` does not exist yet. S0.4 writes it from the code.
+[CODE_MAP.md](CODE_MAP.md) is the module-by-module map, written from the code.
