@@ -161,6 +161,24 @@ The exit criteria for Stage 0:
     The 11 names are the ones already listed under S0.6. No other test failed.
     `.venv/bin/ruff check .` and `.venv/bin/ruff format --check .` pass.
 
+### [~] S0.4b Remove fabricated and unexplainable code
+- Depends on: S0.4.
+- Branch: `refactor/S0.4b-remove-unexplainable`.
+- Delete `tests/run_benchmark_comparison.py`. Its throughput and VRAM numbers are literals.
+- Rename `LoRAMaskingCollator`. The body only sets padding labels to -100.
+- Remove `EarlyStoppingCallback`. `SFTTrainer.train` passes `eval_dataset=None`, so
+  `on_evaluate` never runs.
+- Remove `DPOMetrics.explained_variance`. DPO has no value head, and the field is the
+  constant `0.0`.
+- Notes:
+  - 2026-10-30 owner decision on the CODE_MAP list of code that cannot be explained.
+    These four are this item. Undeclared config fields are S0.11. The KL direction is
+    S0.6e. The rank-3 reward average is S0.7. The distributed files are S0.9, re-scoped
+    to deletion.
+  - GitHub `main` is still `764079a` (PR #6). This branch starts at the stack tip
+    `03f74a1` (merge of PR #10). A branch from GitHub `main` would not contain S0.4 or
+    `docs/CODE_MAP.md`.
+
 ### [ ] S0.5 Package rename `rlhf_platform` → `rlpost`
 - Depends on: the owner renaming the GitHub repo first.
 - Update imports, `pyproject.toml`, the CLI entry point and docs. Keep a note in the README
@@ -208,6 +226,8 @@ Split into S0.6a–e if needed. Record any discrepancy found in Notes. A bug fou
     (`DummyModel` mean-pools the sequence to `[batch, vocab]`). The `train_step` gather
     in `ppo_engine.py` is still a code bug for S0.6a. S0.4 should treat that gather as a
     reason not to keep that engine unchanged.
+  - S0.6e: the current penalty is full-vocabulary KL(ref || policy); the expected target
+    is KL(policy || ref) on sampled tokens with a named estimator.
 
 ### [ ] S0.7 Classic RLHF edge-case tests
 Cover:
@@ -220,6 +240,8 @@ Cover:
 - tokens the KL is computed over
 - advantage normalisation with padding
 - Notes:
+  - `RolloutGenerator._decode_reward` averages a rank-3 tensor; the reward position test
+    must settle what it should be.
 
 ### [ ] S0.8 Determinism and resumable checkpoints
 - Seeding gives identical losses on CPU for 2 runs.
@@ -234,13 +256,25 @@ Cover:
   returns. `train-sft` and `train-reward` call their trainers, and neither has a CPU
   end-to-end test.
 - Notes:
+  - SFT and the reward model read undeclared config fields (`lora_target_modules`,
+    `dataset_size`). Declare and validate them as part of S0.11.
 
-### [ ] S0.9 Distributed claims: test or delete
-- Test the actor/critic vs reference/reward process-group split with `torch.distributed`
-  (gloo backend) on 2–4 CPU ranks.
-- Test `comm_hooks.py` and `async_io.py` for real, or remove them.
-- Delete `scripts/simulate_runtime.py` if it is replaced by real tests.
+### [ ] S0.9 Delete the orphaned distributed scaffolding
+- Nothing calls this code after S0.4. Stage 2 will build rollout and weight-sync
+  distribution from scratch.
+- Delete `src/rlhf_platform/distributed/topology.py`, `comm_hooks.py`, `async_io.py`,
+  `scripts/simulate_runtime.py`, `configs/cluster_topology.yaml`, and `docs/design.md`.
+- Remove the mock-topology sections of `docs/core/ARCHITECTURE.md` and `scripts/README.md`.
+- Remove the README line that points at `docs/design.md`.
+- Remove tests that only exist for the deleted code.
+- Remove topology fields from config if nothing else reads them.
+- After this item, `git grep -i "asymmetric\|topology\|10,000\|petascale"` returns only
+  this file.
 - Notes:
+  - Previously scoped as "test or delete": a gloo process-group split on 2–4 CPU ranks,
+    or remove `comm_hooks.py` and `async_io.py`, and delete `scripts/simulate_runtime.py`
+    if real tests replaced it. 2026-10-30 owner decision: delete. Do not add a CPU
+    process-group test for this scaffolding.
   - 2026-10-30: `comm_hooks.py` imported `ddp_comm_hook`, which torch 2.15 does not export.
     S0.3 removed that unused import. The module still has no test that runs a real hook.
   - 2026-10-30, once collection worked: `RolloutBuffer.add` called `pin_memory()` and raised
