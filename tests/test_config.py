@@ -242,14 +242,11 @@ class TestTrainingConfig:
         assert config.model.reward_model_id == "prajjwal1/bert-tiny"
         assert config.dataset.batch_size == 8
         assert config.optimization.gradient_accumulation_steps == 1
-        assert config.num_gpus == 1
 
     def test_default_config(self) -> None:
         """Verify production default configuration."""
         config = TrainingConfig.default_config()
-        assert config.use_fsdp is True
-        assert config.use_deepspeed is True
-        assert config.num_gpus == 8
+        assert config.model.policy_model_id == "meta-llama/Llama-2-7b"
         assert config.optimization.mixed_precision == "bf16"
 
     def test_config_yaml_loading(self) -> None:
@@ -325,21 +322,13 @@ class TestTrainingConfig:
         config = TrainingConfig(save_total_limit=None)
         assert config.save_total_limit is None
 
-    def test_deepspeed_config_requirement(self) -> None:
-        """Verify deepspeed_config can be set when use_deepspeed=True."""
-        config = TrainingConfig(
-            use_deepspeed=True,
-            deepspeed_config="configs/deepspeed_zero3.yaml",
-        )
-        assert config.deepspeed_config == "configs/deepspeed_zero3.yaml"
-
 
 class TestConfigYAMLLoading:
     """Integration tests for YAML configuration loading."""
 
     def test_load_toy_yaml(self) -> None:
         """Verify toy.yaml can be loaded from configs directory."""
-        toy_yaml_path = Path(__file__).parent.parent.parent / "configs" / "toy.yaml"
+        toy_yaml_path = Path(__file__).parent.parent / "configs" / "toy.yaml"
         if toy_yaml_path.exists():
             config = TrainingConfig.from_yaml(toy_yaml_path)
             assert config.model.policy_model_id == "distilgpt2"
@@ -347,11 +336,11 @@ class TestConfigYAMLLoading:
 
     def test_load_default_yaml(self) -> None:
         """Verify default.yaml can be loaded from configs directory."""
-        default_yaml_path = Path(__file__).parent.parent.parent / "configs" / "default.yaml"
+        default_yaml_path = Path(__file__).parent.parent / "configs" / "default.yaml"
         if default_yaml_path.exists():
             config = TrainingConfig.from_yaml(default_yaml_path)
-            assert config.use_fsdp is True
-            assert config.num_gpus == 8
+            assert config.model.policy_model_id == "meta-llama/Llama-2-7b"
+            assert config.optimization.mixed_precision == "bf16"
 
 
 class TestConfigConsistency:

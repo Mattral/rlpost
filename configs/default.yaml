@@ -2,10 +2,6 @@ run_name: rlhf_production_run
 output_dir: ./outputs/production_run
 seed: 42
 device: cuda
-num_gpus: 8
-use_fsdp: true
-use_deepspeed: true
-deepspeed_config: configs/deepspeed_zero3.yaml
 log_to_wandb: true
 wandb_project: rlhf-platform
 wandb_entity: null

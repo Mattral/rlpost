@@ -37,7 +37,7 @@ There is no coverage number in this README. A green coverage run has not been re
 | `src/rlhf_platform/dataset.py` | Preference-pair loading. Toy mode slices Anthropic HH-RLHF to 1,000 rows when it builds the cache. |
 | `src/rlhf_platform/cli.py` | Four Typer commands. Two of them do not train. See below. |
 | `train.py` | Exits with status 2. It does not call `PPOTrainer`. |
-| `configs/` | YAML for a toy run, a default run, and a DeepSpeed ZeRO-3 config. |
+| `configs/` | YAML for a toy run and a default run. |
 
 Work still open is tracked in [ROADMAP.md](ROADMAP.md).
 
@@ -89,7 +89,7 @@ That check used a virtualenv with the CPU wheel of torch 2.15.0 and current `pyd
 
 ```
 src/rlhf_platform/     package (import name until S0.5)
-configs/               toy, default, and DeepSpeed YAML
+configs/               toy and default YAML
 tests/                 CPU unit tests; the full run is not green
 docs/                  notes and older write-ups
 train.py               exits 2; does not call PPOTrainer

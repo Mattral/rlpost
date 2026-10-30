@@ -304,6 +304,7 @@ Cover:
     constructors set them. The cluster YAML was the only topology config.
   - `NCCLProfiler` and `DistributedMetricsCollector` remain in `utils/telemetry.py`.
     Nothing calls them. They were not in the delete list. Stage 2 does not extend them.
+  - S0.9b removes those two classes, the four fields, and `configs/deepspeed_zero3.yaml`.
   - The two deleted tests were passing:
     `test_load_topology_from_yaml_loads_model_placements` and
     `test_topology_validate_rejects_conflicting_assignments`. The 11 failures under
@@ -312,6 +313,39 @@ Cover:
     `pytest -m "not slow and not gpu"`: 80 collected, 69 passed, 11 failed, in 18.20s.
     `.venv/bin/ruff check .` and `.venv/bin/ruff format --check .` pass.
   - `git grep -i "asymmetric\|topology\|10,000\|petascale"` returns only this file.
+
+### [x] S0.9b Remove unused distributed config and telemetry
+- Depends on: S0.9.
+- Branch: `chore/S0.9b-drop-unused-distributed`.
+- Remove `NCCLProfiler` and `DistributedMetricsCollector` from `utils/telemetry.py`.
+- Remove `TrainingConfig` fields `num_gpus`, `use_fsdp`, `use_deepspeed`, and `deepspeed_config`.
+- Delete `configs/deepspeed_zero3.yaml`.
+- Notes:
+  - 2026-10-30 caller check on `main` (`c6dd07d`) before deletion. Nothing outside
+    `tests/test_config.py` reads the four fields. `TrainingConfig.toy_mode`,
+    `TrainingConfig.default_config`, `configs/toy.yaml`, and `configs/default.yaml`
+    set them. No trainer, CLI command, or engine reads the attributes.
+    `NCCLProfiler` and `DistributedMetricsCollector` have no callers. Nothing opens
+    `configs/deepspeed_zero3.yaml`. `default_config()` and `configs/default.yaml`
+    only store that path.
+  - Done. Removed the two classes and the `torch` and `torch.distributed` imports
+    that only they used. `RankAwareTelemetry` stays. Removed the four fields,
+    the same arguments in `toy_mode()` and `default_config()`, and the same keys
+    in `configs/toy.yaml` and `configs/default.yaml`. Deleted
+    `configs/deepspeed_zero3.yaml`.
+  - `test_deepspeed_config_requirement` only asserted those fields, so it is
+    gone. The YAML load tests pointed at `parent.parent.parent`
+    (`/home/min/configs/`) and never opened the repo files. They now open
+    `configs/toy.yaml` and `configs/default.yaml`.
+  - CPU pytest on this branch, `.venv`, torch 2.15.0+cpu, `PYTHONPATH=src`,
+    `pytest -m "not slow and not gpu"`: 79 collected, 68 passed, 11 failed, in
+    21.00s. The 11 names are the ones already listed under S0.6. The passing
+    test that left with the fields is `test_deepspeed_config_requirement`.
+    `.venv/bin/ruff check .` and `.venv/bin/ruff format --check .` pass.
+  - The optional `deepspeed` extra in `pyproject.toml` is unchanged. Nothing
+    imports DeepSpeed. `docs/operations/setup.md` and
+    `docs/operations/system_design.md` still describe an NCCL install. They do
+    not name these classes or this YAML.
 
 ### [ ] S0.10 P2000 CUDA smoke test (optional)
 - Use the cu126 wheel, fp32, a tiny model, and run 20 steps each of SFT, DPO and PPO.
@@ -416,3 +450,4 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-10-30 · S0.4 · One PPO trainer (`PPOTrainer`). The second engine and its loss module are gone. The logprob gather is unchanged and lives in `train_step` only. `docs/CODE_MAP.md` is written from the code. · 9bfc8a5
 - 2026-10-30 · S0.4b · Removed the hardcoded benchmark script, renamed the padding-label collator, and dropped the dead early-stopping callback and the constant DPO explained-variance field. The 11 known failures are unchanged. · b500b17
 - 2026-10-30 · S0.9 · Deleted the unused process-group, hook, and checkpoint modules, the multi-rank script, the cluster YAML, and docs/design.md. The 11 known failures are unchanged. Two passing tests went with the deleted module. · f8ce6d0
+- 2026-10-30 · S0.9b · Removed the unused NCCL profiler, the distributed metrics collector, the four TrainingConfig device fields, and the unread ZeRO-3 YAML. The 11 known failures are unchanged. One passing config test went with the fields. · c72ccd7

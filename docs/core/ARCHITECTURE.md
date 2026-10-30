@@ -11,7 +11,7 @@ What the remaining code does:
 
 An older draft of this page claimed a 40% GPU-memory reduction. That number was not a measurement. It is gone.
 
-S0.9 removed the process-group module, the communication hooks, the async checkpoint writer, the multi-rank script, the cluster-layout YAML, and `docs/design.md`. Stage 2 builds rollout and weight-sync distribution from scratch.
+S0.9 removed the process-group module, the communication hooks, the async checkpoint writer, the multi-rank script, the cluster-layout YAML, and `docs/design.md`. S0.9b removed `NCCLProfiler`, `DistributedMetricsCollector`, the unused `TrainingConfig` device fields, and `configs/deepspeed_zero3.yaml`. Stage 2 builds rollout and weight-sync distribution from scratch.
 
 ## What is not wired
 
@@ -32,35 +32,7 @@ The modules that still exist:
   │   └─ PPOTrainer (the only PPO update)
   │
   └─ rlhf_platform.utils.telemetry
-      ├─ RankAwareTelemetry (structured JSON logging)
-      ├─ NCCLProfiler (no caller)
-      └─ DistributedMetricsCollector (no caller)
-```
-
-## Configuration files
-
-### `configs/deepspeed_zero3.yaml`
-
-ZeRO-3 optimizer configuration. No trainer reads this file today.
-
-```yaml
-train_batch_size: 32
-train_micro_batch_size_per_gpu: 1
-
-optimizer:
-  type: "AdamW"
-  params:
-    lr: 1e-5
-    betas: [0.9, 0.999]
-    eps: 1e-8
-    weight_decay: 0.01
-
-zero_optimization:
-  stage: 3
-  offload_optimizer:
-    device: "cpu"
-  offload_param:
-    device: "cpu"
+      └─ RankAwareTelemetry (structured JSON logging)
 ```
 
 ## Files
@@ -73,4 +45,3 @@ zero_optimization:
 | `src/rlhf_platform/alignment/rollout.py` | CPU rollout buffer and token sampler |
 | `src/rlhf_platform/ppo_engine.py` | `PPOTrainer`, the only PPO update |
 | `src/rlhf_platform/utils/telemetry.py` | JSON logging. No test calls it |
-| `configs/deepspeed_zero3.yaml` | Optional ZeRO-3 configuration. No trainer reads it |

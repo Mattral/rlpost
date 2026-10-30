@@ -2,9 +2,6 @@ run_name: rlhf_toy_run
 output_dir: ./outputs/toy_run
 seed: 42
 device: cuda
-num_gpus: 1
-use_fsdp: false
-use_deepspeed: false
 log_to_wandb: true
 wandb_project: rlhf-platform-toy
 wandb_entity: null

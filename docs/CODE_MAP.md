@@ -171,7 +171,7 @@ Tests: `tests/test_rollout.py` (3 tests, passing).
 
 `RankAwareTelemetry.log_event` appends a `TelemetryEvent` and logs one JSON line. `log_ppo_step`, `log_communication`, `log_checkpoint`, and `log_memory_usage` are thin wrappers. `log_communication` sets `throughput_gbps = (data_size_mb * 8) / (duration_ms / 1000) / 1000`. No test checks that conversion. Nothing in `tests/` or `scripts/` constructs `RankAwareTelemetry`.
 
-`NCCLProfiler` and `DistributedMetricsCollector` have no callers. `allgather_metrics` pickles a summary into a `uint8` tensor and `all_gather`s it. Only rank 0 deserializes. Untested. S0.9 did not delete this file. Stage 2 builds distribution from scratch.
+`NCCLProfiler` and `DistributedMetricsCollector` were removed in [S0.9b](../ROADMAP.md#s09b-remove-unused-distributed-config-and-telemetry). Nothing called them. Stage 2 builds distribution from scratch.
 
 Status: untested.
 
