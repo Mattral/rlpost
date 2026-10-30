@@ -313,6 +313,21 @@ Cover:
     `.venv/bin/ruff check .` and `.venv/bin/ruff format --check .` pass.
   - `git grep -i "asymmetric\|topology\|10,000\|petascale"` returns only this file.
 
+### [~] S0.9b Remove unused distributed config and telemetry
+- Depends on: S0.9.
+- Branch: `chore/S0.9b-drop-unused-distributed`.
+- Remove `NCCLProfiler` and `DistributedMetricsCollector` from `utils/telemetry.py`.
+- Remove `TrainingConfig` fields `num_gpus`, `use_fsdp`, `use_deepspeed`, and `deepspeed_config`.
+- Delete `configs/deepspeed_zero3.yaml`.
+- Notes:
+  - 2026-10-30 caller check on `main` (`c6dd07d`) before deletion. Nothing outside
+    `tests/test_config.py` reads the four fields. `TrainingConfig.toy_mode`,
+    `TrainingConfig.default_config`, `configs/toy.yaml`, and `configs/default.yaml`
+    set them. No trainer, CLI command, or engine reads the attributes.
+    `NCCLProfiler` and `DistributedMetricsCollector` have no callers. Nothing opens
+    `configs/deepspeed_zero3.yaml`. `default_config()` and `configs/default.yaml`
+    only store that path.
+
 ### [ ] S0.10 P2000 CUDA smoke test (optional)
 - Use the cu126 wheel, fp32, a tiny model, and run 20 steps each of SFT, DPO and PPO.
 - This catches device and dtype bugs only. **It is not a benchmark.**
