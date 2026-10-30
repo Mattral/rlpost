@@ -195,49 +195,6 @@ Savings: 15% per PPO step, compounded over 10k steps → massive throughput gain
 
 ## Part III: Architectural Decisions & Tradeoffs
 
-### Asymmetric Topology: The $O(n)$ vs. $O(n^2)$ Argument
-
-**Traditional Symmetric DDP:**
-```
-All 4 models → All 16 GPUs
-Each GPU has full parameters for Actor, Critic, Reference, Reward
-All-reduce collective includes all gradients from all models
-Communication: O(world_size) per rank per step
-```
-
-**Our Asymmetric Design:**
-```
-Actor (8 GPUs) + Critic (4 GPUs) → Active group (12 total)
-  - Only these ranks compute gradients
-  - All-reduce only includes 12 ranks
-  - Communication: O(12) per rank per step
-
-Reference (2 GPUs) + Reward (2 GPUs) → Inference group (4 total)
-  - Zero-grad inference only
-  - No all-reduce participation
-  - Communication: 0 per rank per step
-```
-
-**GPU Memory Savings:**
-```
-Symmetric: 4 × (1.3B params) × 4 bytes = 20.8 GB per GPU (A100: 80GB)
-           → Only 3–4 models per A100 before OOM
-
-Asymmetric: 
-  Active ranks: 1.3B + 1.3B = 2.6B params → 10.4 GB per rank (fits A100 @fp32)
-  Inference ranks: 1.3B params → 5.2 GB per rank (maps to smaller GPUs or batching)
-  
-Net: 40% memory reduction per active rank, enables larger batch sizes or longer sequences
-```
-
-**Communication Cost:**
-```
-Symmetric (16 ranks): all_reduce(loss) → Ring collective = 2×(n-1) hops = 30 hops
-Asymmetric active (12 ranks): all_reduce(loss) → Ring collective = 22 hops → 27% faster
-
-Plus: Reference/Reward groups communicate 0 gradients → 0 network overhead
-```
-
 ### Thread-Safe Pinned Memory: Why It Matters
 
 Modern GPU-host transfer bottleneck analysis:

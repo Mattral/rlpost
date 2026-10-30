@@ -6,7 +6,7 @@ Written from the code on this branch. Shapes below are what the functions use, n
 
 ## `src/rlhf_platform/__init__.py`
 
-Package marker. Exports the names `alignment`, `distributed`, and `utils`. No tensors.
+Package marker. Lists `alignment` and `utils` in `__all__`. It does not import them. No tensors.
 
 Status: untested. The version string is `"0.1.0"`.
 
@@ -167,71 +167,29 @@ Status: buffer, collator, and generator are tested on CPU with stand-in modules.
 
 Tests: `tests/test_rollout.py` (3 tests, passing).
 
-## `src/rlhf_platform/distributed/topology.py`
-
-`ModelPlacement` is a record: role, model name, `parameter_count`, strategy, parallel sizes, `device_list`, precision. `parameter_count` written by `load_topology_from_yaml` is `num_gpus * 100_000_000`. That is not a count of parameters in a checkpoint.
-
-`ClusterTopology.validate` puts actor and critic devices in one set and reference and reward devices in another. A rank in both sets raises. `ModelPlacement` also rejects `FSDP_TP` when the role is reference or reward. `initialize_groups` calls `dist.new_group` for the active set, the inference set, and each placement. It requires `dist` to be initialized. `device` is `cuda:{local_rank}` even when the process is on CPU.
-
-`load_topology_from_yaml(path, rank, local_rank) -> ClusterTopology` reads `cluster` and `models.{actor,critic,reference,reward}`. Global rank is `node_id * gpus_per_node + local_device`. Groups are created only when `dist.is_initialized()`.
-
-Status: YAML load and the overlap check are tested. Group creation is untested. See [S0.9](../ROADMAP.md#s09-delete-the-orphaned-distributed-scaffolding).
-
-Tests: `tests/test_topology.py` (2 tests, passing). They do not init a process group.
-
-## `src/rlhf_platform/distributed/comm_hooks.py`
-
-`CommunicationHooks.register_overlap_hook` returns immediately unless the module has `.module` (a DDP wrapper). The hook calls `dist.all_reduce_coalesced` on the bucket buffer with `async_op=True`. A DDP comm hook has to return a future whose result is the bucket. This one returns whatever that coalesced call returns. No test registers it.
-
-`register_gradient_clipping_hook` clamps each gradient element to `[-max_grad_norm, max_grad_norm]`. That is not an L2 clip of the global norm.
-
-`register_nan_check_hook` raises if any gradient element is NaN or Inf.
-
-`register_kl_divergence_check` is not a KL. If the L2 norm of one gradient tensor exceeds `max_kl`, it clamps that tensor's elements to `[-max_kl, max_kl]`. Nothing calls it.
-
-`AsynchronousReduceScatter.async_reduce_scatter` calls `dist.reduce_scatter_multigpu`. Nothing calls the class. `CollectiveProfiler` stores timings a caller would pass in. Nothing calls it.
-
-Status: untested. See [S0.9](../ROADMAP.md#s09-delete-the-orphaned-distributed-scaffolding). S0.4 left this file in place because that item is the one that tests it or removes it.
-
-Tests: none. Importing the package used to fail on a name torch 2.15 does not export. That unused import is already gone.
-
-## `src/rlhf_platform/distributed/async_io.py`
-
-`CheckpointBuffer` is a `queue.Queue`. `AsyncCheckpointWriter` starts a daemon-less thread in `__init__` and writes `torch.save` payloads from the queue. `DistributedCheckpointManager.save_checkpoint` enqueues only on rank 0 and also writes `checkpoint-step-{step}-metadata.json` on the calling thread. `CheckpointMetadata.load` does `cls(**json)`. The JSON includes `timestamp`, and `__init__` does not take `timestamp`, so a load of a file this class wrote raises `TypeError`. Nothing in `tests/` constructs these objects.
-
-Status: untested, and the metadata load path is known-broken. See [S0.9](../ROADMAP.md#s09-delete-the-orphaned-distributed-scaffolding).
-
-Tests: none.
-
 ## `src/rlhf_platform/utils/telemetry.py`
 
-`RankAwareTelemetry.log_event` appends a `TelemetryEvent` and logs one JSON line. `log_ppo_step`, `log_communication`, `log_checkpoint`, and `log_memory_usage` are thin wrappers. `log_communication` sets `throughput_gbps = (data_size_mb * 8) / (duration_ms / 1000) / 1000`. No test checks that conversion. `simulate_runtime.py` constructs `RankAwareTelemetry`. Pytest does not.
+`RankAwareTelemetry.log_event` appends a `TelemetryEvent` and logs one JSON line. `log_ppo_step`, `log_communication`, `log_checkpoint`, and `log_memory_usage` are thin wrappers. `log_communication` sets `throughput_gbps = (data_size_mb * 8) / (duration_ms / 1000) / 1000`. No test checks that conversion. Nothing in `tests/` or `scripts/` constructs `RankAwareTelemetry`.
 
-`NCCLProfiler` and `DistributedMetricsCollector` have no callers. `allgather_metrics` pickles a summary into a `uint8` tensor and `all_gather`s it. Only rank 0 deserializes. Untested.
+`NCCLProfiler` and `DistributedMetricsCollector` have no callers. `allgather_metrics` pickles a summary into a `uint8` tensor and `all_gather`s it. Only rank 0 deserializes. Untested. S0.9 did not delete this file. Stage 2 builds distribution from scratch.
 
-Status: untested. See [S0.9](../ROADMAP.md#s09-delete-the-orphaned-distributed-scaffolding).
+Status: untested.
 
 Tests: none.
 
-## `src/rlhf_platform/distributed/__init__.py` and `utils/__init__.py`
+## `src/rlhf_platform/utils/__init__.py`
 
-Re-export the submodules. Importing `distributed` imports `comm_hooks`, which imports on torch 2.15.
+Re-exports `telemetry`.
 
-Status: untested except that the package import is what lets `tests/test_topology.py` and `tests/test_rollout.py` collect.
+Status: untested. `tests/test_rollout.py` imports `alignment.rollout` directly.
 
 ## `train.py`
 
-Prints one line to stderr and exits 2. It does not import a model, a topology, or `PPOTrainer`. The previous body only existed to call `DistributedPPOEngine`.
+Prints one line to stderr and exits 2. It does not import a model or `PPOTrainer`. The previous body only existed to call `DistributedPPOEngine`.
 
 Status: not a trainer. See [S0.4](../ROADMAP.md#s04-code-ownership-pass) and [S0.11](../ROADMAP.md#s011-cli-actually-runs-sftrmdpoppo-end-to-end-on-a-tiny-model-on-cpu).
 
 Tests: none.
-
-## `scripts/simulate_runtime.py`
-
-Spawns ranks with `torch.multiprocessing`, builds a topology with `TopologyBuilder`, pushes `Rollout` objects through `RolloutBuffer`, and logs with `RankAwareTelemetry`. Pytest does not collect it (`python_files = test_*.py`). S0.9 owns this script.
-
-Status: untested. See [S0.9](../ROADMAP.md#s09-delete-the-orphaned-distributed-scaffolding).
 
 ## Code I cannot explain confidently
 
@@ -247,11 +205,8 @@ From thitsarhmwe-commits:
 
 - The seven failing DPO tests are explained in the S0.6 notes (margin, beta, accuracy, and empty stand-in modules). I am not adding a second theory here.
 
-Also in the tree, current history attributes these to the owner, and I still will not defend them as written:
+S0.9 deleted the process-group module, the communication hooks, the async checkpoint writer, and the multi-rank script. Those entries are gone with the files.
 
-- `load_topology_from_yaml` sets `parameter_count = num_gpus * 100_000_000`.
-- `register_kl_divergence_check` clamps a gradient. It does not compute a KL.
-- `register_overlap_hook` returns the future from `all_reduce_coalesced`. I am not sure that future's result is the grad bucket DDP expects.
-- `AsynchronousReduceScatter.async_reduce_scatter` calls `dist.reduce_scatter_multigpu` with a nested list I cannot match to a working example. Nothing calls it.
-- `RolloutGenerator._decode_reward` averages a rank-3 logit tensor over the last two axes. I cannot say which reward head that shape is for.
-- `CheckpointMetadata.load` feeds `timestamp` back into a constructor that does not accept it.
+Still in the tree:
+
+- `RolloutGenerator._decode_reward` averages a rank-3 logit tensor over the last two axes. I cannot say which reward head that shape is for. S0.7's reward-position test settles it.

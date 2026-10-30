@@ -13,7 +13,7 @@ Unit-tested on CPU. No GPU benchmark yet.
 
 Check on 2026-10-30, Python 3.12, torch 2.15.0+cpu, `PYTHONPATH=src`:
 
-- `pytest -q -m "not slow and not gpu"` collects 82 tests: 71 passed, 11 failed.
+- `pytest -q -m "not slow and not gpu"` collects 80 tests: 69 passed, 11 failed.
 - The 11 failures are DPO and PPO tests. A judgment on each one is in [ROADMAP.md](ROADMAP.md) under S0.6. They are not marked xfail.
 - `ruff check .` and `ruff format --check .` pass under the config in `pyproject.toml`.
 
@@ -36,9 +36,8 @@ There is no coverage number in this README. A green coverage run has not been re
 | `src/rlhf_platform/reward_engine.py` | Preference reward-model trainer. |
 | `src/rlhf_platform/dataset.py` | Preference-pair loading. Toy mode slices Anthropic HH-RLHF to 1,000 rows when it builds the cache. |
 | `src/rlhf_platform/cli.py` | Four Typer commands. Two of them do not train. See below. |
-| `src/rlhf_platform/distributed/` | Topology, communication hooks, and async checkpoints. The package imports on torch 2.15. The hooks are not covered by a passing test. |
 | `train.py` | Exits with status 2. It does not call `PPOTrainer`. |
-| `configs/` | YAML for a toy run, a default run, a cluster topology, and a DeepSpeed ZeRO-3 config. |
+| `configs/` | YAML for a toy run, a default run, and a DeepSpeed ZeRO-3 config. |
 
 Work still open is tracked in [ROADMAP.md](ROADMAP.md).
 
@@ -86,18 +85,14 @@ python -m rlhf_platform.cli run-dpo --toy
 
 That check used a virtualenv with the CPU wheel of torch 2.15.0 and current `pydantic`, `pytest`, `pyyaml`, `transformers`, and `datasets`, imported via `PYTHONPATH=src`.
 
-## Distributed design
-
-Process-group layout, bucket sizes, and context lengths for 8, 512, and 10,000 GPUs are written down as design targets in [docs/design.md](docs/design.md). They are not measurements. No run in this repo has produced a throughput, memory, or latency number.
-
 ## Layout
 
 ```
 src/rlhf_platform/     package (import name until S0.5)
-configs/               toy, default, topology, and DeepSpeed YAML
+configs/               toy, default, and DeepSpeed YAML
 tests/                 CPU unit tests; the full run is not green
-docs/                  design notes and older write-ups
-train.py               distributed entrypoint
+docs/                  notes and older write-ups
+train.py               exits 2; does not call PPOTrainer
 ROADMAP.md             status of the work
 ```
 

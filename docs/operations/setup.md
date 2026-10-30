@@ -140,7 +140,7 @@ export NCCL_BUFFSIZE=33554432             # 32 MB buffer (default for 8 GPUs)
 export CUDA_DEVICE_MAX_CONNECTIONS=1      # Prevent oversubscription
 
 # Optional: CPU affinity (bind processes to NUMA nodes)
-export NCCL_TOPO_FILE=/opt/nccl_topo.xml  # Custom topology (if needed)
+export NCCL_TOPO_FILE=/opt/nccl_topo.xml  # Optional NCCL fabric map (if needed)
 
 # For RoCE (if using RoCE instead of InfiniBand):
 # export NCCL_IB_DISABLE=0
@@ -241,7 +241,7 @@ echo "RANK: $RANK"
 
 # Execute training with srun
 srun python -u /path/to/train.py \
-    --config configs/cluster_topology.yaml \
+    --config configs/default.yaml \
     --num-steps 10000 \
     --batch-size 2 \
     --checkpoint-dir /shared/checkpoints \
@@ -284,7 +284,7 @@ spec:
             image: pytorch/pytorch:2.0-cuda12.1-cudnn8-devel
             imagePullPolicy: IfNotPresent
             args: ["python", "-u", "/app/train.py",
-                   "--config", "/app/configs/cluster_topology.yaml",
+                   "--config", "/app/configs/default.yaml",
                    "--num-steps", "10000",
                    "--checkpoint-dir", "/checkpoints"]
             resources:
@@ -330,7 +330,7 @@ spec:
             image: pytorch/pytorch:2.0-cuda12.1-cudnn8-devel
             imagePullPolicy: IfNotPresent
             args: ["python", "-u", "/app/train.py",
-                   "--config", "/app/configs/cluster_topology.yaml",
+                   "--config", "/app/configs/default.yaml",
                    "--num-steps", "10000",
                    "--checkpoint-dir", "/checkpoints"]
             resources:
@@ -430,7 +430,7 @@ docker push myregistry/rlhf:latest
 #!/bin/bash
 # File: run_distributed_train.sh
 
-# Set cluster topology
+# Set the run config
 export MASTER_ADDR="node0.example.com"  # Master node IP/hostname
 export MASTER_PORT=29500
 export WORLD_SIZE=16  # 2 nodes × 8 GPUs
@@ -446,7 +446,7 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 
 # Run training
 python -u train.py \
-    --config configs/cluster_topology.yaml \
+    --config configs/default.yaml \
     --num-steps 10000 \
     --checkpoint-dir /shared/checkpoints \
     --verbose
@@ -478,7 +478,7 @@ torchrun \
   --master_addr=node0.example.com \
   --master_port=29500 \
   train.py \
-  --config configs/cluster_topology.yaml \
+  --config configs/default.yaml \
   --num-steps 10000
 
 # Run on Node 1 (with node_rank=1)
@@ -489,7 +489,7 @@ torchrun \
   --master_addr=node0.example.com \
   --master_port=29500 \
   train.py \
-  --config configs/cluster_topology.yaml \
+  --config configs/default.yaml \
   --num-steps 10000
 ```
 
@@ -527,7 +527,7 @@ export NCCL_DEBUG=TRACE  # Maximum verbosity
 export NCCL_DEBUG_SUBSYS=INIT,COLL  # Specific subsystems
 
 # Run training with maximum debug output
-python train.py --verbose --config configs/cluster_topology.yaml
+python train.py --verbose --config configs/default.yaml
 
 # Check for common issues:
 # - "unreach" → Network unreachable (firewall/MTU issue)
@@ -537,23 +537,7 @@ python train.py --verbose --config configs/cluster_topology.yaml
 
 ### Performance Benchmarking
 
-```bash
-#!/bin/bash
-# Measure actual training throughput
-
-python scripts/simulate_runtime.py \
-    --num-ranks 4 \
-    --iterations 50
-
-# For real training, measure PPO steps/second:
-# grep "PPO step" rlhf_<job_id>.log | wc -l
-# (Divide by elapsed time to get steps/sec)
-
-# Expected performance (16 GPUs, H100):
-# - 10–20 PPO steps per minute (depending on batch size, sequence length)
-# - GPU utilization: 85–95%
-# - Network utilization: 40–60% during all-reduce phases
-```
+No script in this repo measures training throughput. `train.py` exits 2. A measured number belongs in `benchmarks/results/`. None is recorded here.
 
 ### Emergency Diagnostics
 
