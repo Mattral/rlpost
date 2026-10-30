@@ -1,13 +1,10 @@
-"""
-topology.py: Asymmetric multi-model placement grid for distributed RLHF.
+"""Placement records for actor, critic, reference, and reward.
 
-Elite teams at OpenAI, Anthropic, and DeepMind recognize that running Actor, Reference,
-Critic, and Reward models with identical distributed strategies creates massive
-synchronization bottlenecks. This module implements a hybrid topology:
-
-- Actor & Critic (Active): ZeRO-3 + Tensor Parallelism across nodes
-- Reference & Reward (Frozen): Shared inference subnet with replica placement
-  and non-gradient tracking, reducing memory footprints and communication overhead.
+``load_topology_from_yaml`` reads a cluster YAML and builds a
+``ClusterTopology``. If ``torch.distributed`` is already initialized, it
+creates one process group per placement. This file does not start FSDP,
+ZeRO, or tensor parallel. ``parameter_count`` is ``num_gpus * 100_000_000``.
+That is not a parameter count read from a model.
 """
 
 import json
@@ -449,49 +446,3 @@ def load_topology_from_yaml(
         topology.initialize_groups()
 
     return topology
-
-
-def create_default_topology(
-    world_size: int,
-    rank: int,
-    gpus_per_node: int,
-    actor_model: str = "facebook/opt-1.3b",
-    critic_model: str = "facebook/opt-1.3b",
-    reference_model: str = "facebook/opt-1.3b",
-    reward_model: str = "microsoft/deberta-v3-base",
-) -> ClusterTopology:
-    builder = TopologyBuilder(world_size, rank, gpus_per_node)
-
-    builder.add_actor(
-        model_name=actor_model,
-        param_count=1_300_000_000,
-        tensor_parallel_size=2,
-        data_parallel_size=max(1, world_size // 2),
-        device_list=list(range(world_size)),
-        precision="fp16",
-    )
-
-    builder.add_critic(
-        model_name=critic_model,
-        param_count=1_300_000_000,
-        tensor_parallel_size=2,
-        data_parallel_size=max(1, world_size // 2),
-        device_list=list(range(world_size)),
-        precision="fp16",
-    )
-
-    builder.add_reference(
-        model_name=reference_model,
-        param_count=1_300_000_000,
-        device_list=list(range(min(2 * gpus_per_node, world_size))),
-        precision="fp32",
-    )
-
-    builder.add_reward(
-        model_name=reward_model,
-        param_count=300_000_000,
-        device_list=list(range(min(2 * gpus_per_node, world_size))),
-        precision="fp32",
-    )
-
-    return builder.build()

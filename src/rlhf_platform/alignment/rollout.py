@@ -1,25 +1,20 @@
-"""
-rollout.py: Parallelized rollout generator with shared-memory ring buffers.
+"""CPU rollout buffer and a token-at-a-time sampler.
 
-Enables decoupled generation and optimization: a subset of worker nodes
-continuously generate rollout sequences and stream them into an async
-shared-memory CPU ring buffer, while core training nodes pull from this
-buffer without waiting for generation phases to complete.
+``RolloutBuffer`` keeps completed rollouts in a Python list. Tensors are
+moved to CPU. They are pinned only when CUDA is available.
+``RolloutGenerator`` samples response tokens from a causal LM that returns
+``.logits``. The async generator-thread class was removed in S0.4. Nothing
+called it except ``train.py``, and it had no test.
 """
 
 import logging
 import threading
 from dataclasses import dataclass
-from typing import Callable, List, Optional
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import Dataset
 
 logger = logging.getLogger(__name__)
-
-
-QuerySampler = Callable[[], torch.Tensor]
 
 
 @dataclass
@@ -81,26 +76,6 @@ class RolloutBuffer:
         with self._lock:
             return random.sample(self.buffer, min(batch_size, len(self.buffer)))
 
-    def sample_batch_to_device(self, batch_size: int, device: torch.device) -> list:
-        """Sample a batch and move tensors to `device` using non-blocking transfers.
-
-        Returns a list of Rollout objects resident on `device`.
-        """
-        sampled = self.sample_batch(batch_size)
-
-        moved = []
-        for r in sampled:
-            moved.append(
-                Rollout(
-                    query_tokens=r.query_tokens.to(device, non_blocking=True),
-                    response_tokens=r.response_tokens.to(device, non_blocking=True),
-                    reward=r.reward.to(device, non_blocking=True),
-                    logits_policy=r.logits_policy.to(device, non_blocking=True),
-                    logits_reference=r.logits_reference.to(device, non_blocking=True),
-                )
-            )
-        return moved
-
     def clear(self) -> None:
         """Clear the buffer."""
         self.buffer.clear()
@@ -109,23 +84,6 @@ class RolloutBuffer:
     def size(self) -> int:
         """Current number of rollouts in buffer."""
         return len(self.buffer)
-
-    def is_full(self) -> bool:
-        """Check if buffer is at capacity."""
-        return len(self.buffer) >= self.capacity
-
-
-class RolloutDataset(Dataset):
-    """PyTorch Dataset wrapper for rollout buffer."""
-
-    def __init__(self, buffer: RolloutBuffer):
-        self.buffer = buffer
-
-    def __len__(self) -> int:
-        return self.buffer.size()
-
-    def __getitem__(self, idx: int) -> Rollout:
-        return self.buffer.buffer[idx]
 
 
 class RolloutCollator:
@@ -211,8 +169,8 @@ class RolloutGenerator:
         self.top_p = top_p
 
     @torch.no_grad()
-    def generate_rollout(self, query_tokens: torch.Tensor) -> Rollout:
-        """Generate a single rollout trajectory."""
+    def generate_rollout(self, query_tokens: torch.Tensor) -> list[Rollout]:
+        """Generate one rollout per row of ``query_tokens`` ([B, T_query])."""
         # Generate response tokens autoregressively
         response_tokens_list = []
         logits_policy_list = []
@@ -298,90 +256,3 @@ class RolloutGenerator:
 
         token = torch.multinomial(F.softmax(scaled_logits, dim=-1), num_samples=1)
         return token
-
-
-class AsyncRolloutPipeline:
-    """
-    Asynchronous rollout pipeline: decouples generation from optimization.
-
-    Generator threads continuously produce rollouts and feed them into
-    a shared RolloutBuffer. Optimization threads pull from the buffer
-    without blocking on generation latency.
-    """
-
-    def __init__(
-        self,
-        generator: RolloutGenerator,
-        buffer: RolloutBuffer,
-        query_sampler: Optional[QuerySampler] = None,
-        batch_size: int = 1,
-        num_generator_threads: int = 2,
-    ):
-        self.generator = generator
-        self.buffer = buffer
-        self.query_sampler = query_sampler
-        self.batch_size = batch_size
-        self.num_generator_threads = num_generator_threads
-        self.stop_event = threading.Event()
-        self.generator_threads: List[threading.Thread] = []
-
-    def start_generators(self) -> None:
-        """Start background generator threads."""
-        import threading
-
-        self.generator_threads = []
-        for i in range(self.num_generator_threads):
-            thread = threading.Thread(target=self._generator_loop, args=(i,), daemon=True)
-            thread.start()
-            self.generator_threads.append(thread)
-        logger.info(f"Started {self.num_generator_threads} generator threads.")
-
-    def _generator_loop(self, thread_id: int) -> None:
-        """Run generation loop in background thread."""
-        logger.info(f"Generator thread {thread_id} started.")
-        while not self.stop_event.is_set():
-            try:
-                if self.query_sampler is None:
-                    logger.warning("No query sampler configured for AsyncRolloutPipeline.")
-                    break
-
-                query_batch = self.query_sampler()
-                if query_batch is None:
-                    logger.debug("Query sampler returned no input; sleeping briefly.")
-                    import time
-
-                    time.sleep(0.5)
-                    continue
-
-                # Move queries to generator device for fast generation
-                gen_device = next(self.generator.policy_model.parameters()).device
-                query_batch = query_batch.to(gen_device)
-
-                # Generate rollouts on model device
-                rollouts = self.generator.generate_rollout(query_batch)
-
-                # Pin rollouts and enqueue without blocking training threads
-                for rollout in rollouts:
-                    # Ensure each rollout's tensors are pinned CPU before enqueue
-                    pinned = Rollout(
-                        query_tokens=rollout.query_tokens.detach().cpu().pin_memory(),
-                        response_tokens=rollout.response_tokens.detach().cpu().pin_memory(),
-                        reward=rollout.reward.detach().cpu().pin_memory(),
-                        logits_policy=rollout.logits_policy.detach().cpu().pin_memory(),
-                        logits_reference=rollout.logits_reference.detach().cpu().pin_memory(),
-                    )
-                    self.buffer.add(pinned)
-
-                if self.buffer.is_full():
-                    import time
-
-                    time.sleep(0.1)
-            except Exception as e:
-                logger.error(f"Generator thread {thread_id} error: {e}", exc_info=True)
-
-    def stop_generators(self) -> None:
-        """Stop all generator threads."""
-        self.stop_event.set()
-        for thread in self.generator_threads:
-            thread.join(timeout=5.0)
-        logger.info("Generator threads stopped.")
