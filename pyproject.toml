@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "rlhf-platform"
 version = "0.1.0"
-description = "Production-grade distributed RLHF platform for scaling alignment across multi-node GPU clusters"
+description = "Language-model post-training: supervised fine-tuning, a reward model, PPO, and DPO"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "Apache-2.0"}
@@ -56,9 +56,6 @@ eval = [
     "lm-eval>=0.3.0",
     "rouge-score>=0.1.2",
     "bert-score>=0.3.13",
-]
-deepspeed = [
-    "deepspeed>=0.12.0",
 ]
 docs = [
     "sphinx>=6.0",
