@@ -102,6 +102,9 @@ The exit criteria for Stage 0:
   - `tests/run_benchmark_comparison.py` still returns hardcoded throughput and VRAM figures
     (for example 1.9 steps/s and 3.5 GB) whether or not TRL imports. Pytest does not collect
     it (`python_files = test_*.py`). It is not a result.
+  - 2026-10-30: the job never got past install. `numpy==2.5.4` requires Python >=3.12,
+    and the workflow used 3.11. The workflow now uses 3.12, the same interpreter as the
+    local 71 passed / 11 failed count. The 11 failures still fail the job. No xfail.
 
 ### [x] S0.4 Code ownership pass
 - Merge `ppo_engine.py` and `alignment/ppo_engine.py` into one implementation. Delete dead code.
