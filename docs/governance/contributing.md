@@ -90,7 +90,7 @@ Every pull request must run the following matrix in CI:
 
 - All architectural changes must include updates to `ARCHITECTURE.md` or the relevant `docs/` deep dive.
 - Code touching distributed execution must document process group invariants and race conditions.
-- Any new public command-line option in `train.py` must appear in `scripts/README.md` and `docs/operations/setup.md`.
+- Any new public command-line option in `train.py` must appear in `scripts/README.md`.
 
 ---
 

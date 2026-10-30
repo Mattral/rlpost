@@ -10,8 +10,6 @@ Start with the [README](../README.md) and [ROADMAP.md](../ROADMAP.md).
 | [educational_deepdive.md](educational_deepdive.md) | The original walkthrough |
 | [core/ARCHITECTURE.md](core/ARCHITECTURE.md) | What the training code still calls |
 | [core/philosophy.md](core/philosophy.md) | Design tradeoffs |
-| [operations/setup.md](operations/setup.md) | Setup notes |
-| [operations/system_design.md](operations/system_design.md) | Hardware notes |
 | [governance/contributing.md](governance/contributing.md) | Contribution notes |
 | [governance/security.md](governance/security.md) | Security notes |
 
