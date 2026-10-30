@@ -3,7 +3,7 @@
 This module provides:
 - LoRA-based SFT training using Hugging Face Trainer
 - Automatic model quantization (4-bit/8-bit)
-- Early stopping and learning rate scheduling
+- Learning rate scheduling
 - Weights & Biases integration for experiment tracking
 """
 
@@ -16,7 +16,6 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     Trainer,
-    TrainerCallback,
     TrainingArguments,
 )
 
@@ -185,12 +184,6 @@ class SFTTrainer:
             train_dataset=train_dataloader.dataset,
             eval_dataset=None,  # Use validation split if available
             tokenizer=self.tokenizer,
-            callbacks=[
-                EarlyStoppingCallback(
-                    early_stopping_patience=3,
-                    early_stopping_threshold=0.001,
-                ),
-            ],
         )
 
         # Run training
@@ -229,57 +222,6 @@ class SFTTrainer:
         )
         model = PeftModel.from_pretrained(base_model, model_dir)
         return model
-
-
-class EarlyStoppingCallback(TrainerCallback):
-    """Early stopping callback for Hugging Face Trainer.
-
-    Stops training if evaluation loss doesn't improve after N steps.
-    """
-
-    def __init__(
-        self,
-        early_stopping_patience: int = 3,
-        early_stopping_threshold: float = 0.001,
-    ):
-        """Initialize early stopping.
-
-        Args:
-            early_stopping_patience: Steps without improvement to stop
-            early_stopping_threshold: Min improvement to count as progress
-        """
-        self.early_stopping_patience = early_stopping_patience
-        self.early_stopping_threshold = early_stopping_threshold
-        self.best_loss = float("inf")
-        self.patience_counter = 0
-
-    def on_evaluate(self, args, state, control, metrics=None, **kwargs):
-        """Check for early stopping after evaluation.
-
-        Args:
-            args: TrainingArguments
-            state: TrainerState
-            control: TrainerControl (can be modified to stop training)
-            metrics: Dict of evaluation metrics
-        """
-        if metrics is None:
-            return
-
-        current_loss = metrics.get("eval_loss")
-        if current_loss is None:
-            return
-
-        if current_loss < self.best_loss - self.early_stopping_threshold:
-            self.best_loss = current_loss
-            self.patience_counter = 0
-        else:
-            self.patience_counter += 1
-
-        if self.patience_counter >= self.early_stopping_patience:
-            logger.info(
-                f"Early stopping triggered after {self.patience_counter} steps without improvement"
-            )
-            control.should_training_stop = True
 
 
 if __name__ == "__main__":
