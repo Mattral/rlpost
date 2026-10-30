@@ -133,42 +133,34 @@ on a tiny model on CPU, with an explicit tolerance:
 Split into S0.6a–e if needed. Record any discrepancy found in Notes. A bug found here is a result.
 - Notes:
   - 2026-10-30 judgments on the 11 failures still red after the rollout fixes. Neither side
-    was edited to make the other pass. DPO margin, DPO beta, and the PPO logprob gather
-    stay open until the TRL parity tests in this item.
-  - `test_init_creates_trainer`, `test_reference_model_frozen`, `test_config_integration`:
-    the mock policy's `parameters()` returns `[]`, and torch 2.15 `AdamW` rejects an empty
-    list. The test is wrong. A real module has parameters. The same file's gradient test,
-    which passes a real `Parameter`, gets past this line.
-  - `test_margin_computation`: the test expects the mean of `(policy_chosen - policy_rejected)`
-    only, which is 1.5 on its fixture. The code sets
-    `margin = (policy_chosen - policy_rejected) - (ref_chosen - ref_rejected)`, which is 0.4
-    here. The test drops the reference term. The code's margin also does not multiply by
-    beta. Which definition matches TRL is S0.6b. Not changed.
-  - `test_beta_affects_loss`: on this fixture `policy_diff - ref_diff` is 0, so
-    `beta * 0` is 0 at every beta and the loss is `-logsigmoid(0)` for both. The test is
-    wrong: the fixture has no preference margin over the reference, and "a larger beta
-    always raises the loss" is not what the formula says. The code does multiply by
-    `self.beta`. Whether that formula matches TRL is S0.6b. Not changed.
-  - `test_metrics_batch_aggregation`: the test expects accuracy 1.0 because every policy
-    chosen score is above the policy rejected score. The code's accuracy is
-    `(policy_diff - ref_diff) > 0`, and the first row is a tie after the reference is
-    subtracted, so accuracy is 0.75. Same open question as the margin test. Not changed.
-  - `test_custom_beta_from_config`: the test assigns `alignment.dpo_beta = 0.5`.
-    `AlignmentConfig` has no such field, so Pydantic rejects the assignment.
-    `DPOTrainer` reads `dpo_beta` with a fallback of 0.1, while the config's nearby
-    coefficient is `kl_coefficient`. Both sides name beta differently. S0.6b picks the
-    name. Not changed.
-  - `test_policy_loss_computation` and `test_value_loss_computation`: the tests pass
-    `torch.randn` tensors that do not require grad, then assert `loss.requires_grad`.
-    The loss functions do not detach. A function of constant tensors does not require
-    grad. The tests are wrong. Not changed.
-  - `test_train_step_updates_weights` and `test_train_step_returns_metrics`: the code
-    does `log_softmax(policy_logits, dim=-1).gather(1, input_ids.unsqueeze(-1))`.
-    For token log-probs the gather is on the vocab axis of shifted logits, not dim 1
-    of an unshifted tensor. That line is wrong. The test's `DummyModel` also mean-pools
-    the sequence and returns `[batch, vocab]`, so it is not a per-token model either.
-    Both sides are wrong. S0.6a settles the gather against a known log-prob. Not changed
-    here. S0.4 should treat this as a reason not to keep `ppo_engine.py` unchanged.
+    was edited to make the other pass.
+  - 2026-10-30 owner triage, accepted and still to be confirmed by the S0.6b parity test
+    against TRL. Do not implement these before that test:
+    1. `test_margin_computation`: per TRL, implicit reward =
+       `beta * (logp_policy - logp_ref)` per response, and
+       `margin = chosen_reward - rejected_reward`. The margin includes the reference and
+       is scaled by beta. The test uses the policy gap only (1.5 on its fixture). The code
+       subtracts the reference gap but does not multiply by beta (0.4 on that fixture).
+       Both are wrong. Fix both in S0.6b.
+    2. `test_metrics_batch_aggregation`: accuracy is `chosen_reward > rejected_reward`
+       after the reference adjustment. The code's 0.75 is the right convention. The test
+       is wrong. It expects 1.0 from the policy scores alone.
+    3. `dpo_beta`: add it as an explicit field on `AlignmentConfig`, with validation.
+       Remove the silent `getattr(..., "dpo_beta", 0.1)` fallback in `DPOTrainer`.
+       Do not reuse `kl_coefficient`. That coefficient belongs to PPO.
+  - `test_beta_affects_loss`: on this fixture `policy_diff - ref_diff` is 0, so every beta
+    gives `-logsigmoid(0)`. The fixture has no preference margin over the reference.
+    Not changed. S0.6b covers the beta scaling.
+  - Six test-side failures, not to be edited before S0.6 / S0.7. Rewrite them there with
+    a tiny real `nn.Module` or a tiny random-init causal LM, not mocks:
+    `test_init_creates_trainer`, `test_reference_model_frozen`, and
+    `test_config_integration` (empty `parameters()` mocks);
+    `test_policy_loss_computation` and `test_value_loss_computation` (`torch.randn`
+    inputs that do not require grad);
+    `test_train_step_updates_weights` and `test_train_step_returns_metrics`
+    (`DummyModel` mean-pools the sequence to `[batch, vocab]`). The `train_step` gather
+    in `ppo_engine.py` is still a code bug for S0.6a. S0.4 should treat that gather as a
+    reason not to keep that engine unchanged.
 
 ### [ ] S0.7 Classic RLHF edge-case tests
 Cover:
@@ -310,3 +302,4 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-10-30 · S0.2 · README states the CPU test result and drops unmeasured numbers. The GPU-count table moved to docs/design.md as a design target. The fake telemetry JSON was deleted. · 5f288b9
 - 2026-10-30 · S0.3 · CI is one CPU job: pinned torch, ruff, and pytest, with no swallowed failures. Ruff passes. Pytest is 69 passed, 13 failed, and the job is expected to be red until those failures are fixed. · 42c71a9
 - 2026-10-30 · owner · Deleted the eight unverified docs. Judged each of the 13 failures and left the 11 algorithm disagreements red. Fixed the CPU pin_memory crash and the 1-D rollout cat. Added S0.11. · a8db00d
+- 2026-10-30 · S0.6 · Triage recorded, not implemented. Margin is beta-scaled and reference-adjusted (both test and code wrong). Accuracy uses that reward (code's 0.75 stands). `dpo_beta` becomes its own config field. S0.6b confirms against TRL. · pending-sha
