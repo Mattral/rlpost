@@ -30,13 +30,11 @@ class TestDPOMetrics:
             policy_diff_mean=0.1,
             margin_mean=0.2,
             accuracy=0.85,
-            explained_variance=0.7,
         )
         assert metrics.dpo_loss == 0.5
         assert metrics.policy_diff_mean == 0.1
         assert metrics.margin_mean == 0.2
         assert metrics.accuracy == 0.85
-        assert metrics.explained_variance == 0.7
 
     def test_to_dict(self):
         """Test conversion to dictionary."""
@@ -45,13 +43,13 @@ class TestDPOMetrics:
             policy_diff_mean=0.1,
             margin_mean=0.2,
             accuracy=0.85,
-            explained_variance=0.7,
         )
         d = metrics.to_dict()
         assert isinstance(d, dict)
         assert d["dpo_loss"] == 0.5
         assert d["accuracy"] == 0.85
-        assert len(d) == 5
+        assert "explained_variance" not in d
+        assert len(d) == 4
 
 
 class TestDPOTrainerInit:

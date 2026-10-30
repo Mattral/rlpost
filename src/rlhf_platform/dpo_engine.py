@@ -30,7 +30,6 @@ class DPOMetrics:
         policy_diff_mean: Mean difference in policy log probs
         margin_mean: Mean preference margin (chosen - rejected)
         accuracy: Fraction where chosen > rejected
-        explained_variance: How well value network explains returns
     """
 
     def __init__(
@@ -39,13 +38,11 @@ class DPOMetrics:
         policy_diff_mean: float,
         margin_mean: float,
         accuracy: float,
-        explained_variance: float,
     ):
         self.dpo_loss = dpo_loss
         self.policy_diff_mean = policy_diff_mean
         self.margin_mean = margin_mean
         self.accuracy = accuracy
-        self.explained_variance = explained_variance
 
     def to_dict(self) -> dict:
         """Convert to dictionary for logging."""
@@ -54,7 +51,6 @@ class DPOMetrics:
             "policy_diff_mean": self.policy_diff_mean,
             "margin_mean": self.margin_mean,
             "accuracy": self.accuracy,
-            "explained_variance": self.explained_variance,
         }
 
 
@@ -187,15 +183,11 @@ class DPOTrainer:
         accuracy = (margin > 0).float().mean().item()
         margin_mean = margin.mean().item()
 
-        # Explained variance (dummy for now)
-        explained_variance = 0.0
-
         metrics = DPOMetrics(
             dpo_loss=dpo_loss.item(),
             policy_diff_mean=policy_diff.detach().mean().item(),
             margin_mean=margin_mean,
             accuracy=accuracy,
-            explained_variance=explained_variance,
         )
 
         return dpo_loss, metrics
