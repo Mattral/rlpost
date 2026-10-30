@@ -1,321 +1,118 @@
-# RLHF Platform — PPO + DPO for LLM Alignment
+# rlpost
 
-> A modular RLHF training framework implementing PPO and DPO from scratch. Validated end-to-end on a single T4 GPU in under 20 minutes. Designed with a distributed execution architecture that scales to multi-node clusters.
+Code for language-model post-training: supervised fine-tuning, a reward model, PPO, and DPO.
+
+The GitHub repository was renamed from [Improving-LLM-Models-with-RLHF-PPO-DPO](https://github.com/Mattral/Improving-LLM-Models-with-RLHF-PPO-DPO). The Python package is still `rlhf_platform`. Renaming the package is item S0.5 in [ROADMAP.md](ROADMAP.md).
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Python 3.11+](https://img.shields.io/badge/Python-3.11+-blue.svg)](#requirements)
-[![Tests 110+](https://img.shields.io/badge/Tests-110%2B-brightgreen.svg)](tests/)
-[![Type Coverage 100%](https://img.shields.io/badge/Type%20Coverage-100%25-brightgreen.svg)](#code-quality)
-[![CI](https://github.com/Mattral/Improving-LLM-Models-with-RLHF-PPO-DPO/actions/workflows/ci_perf.yml/badge.svg)](https://github.com/Mattral/Improving-LLM-Models-with-RLHF-PPO-DPO/actions)
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11+-blue.svg)](pyproject.toml)
 
----
+## Measured scope
 
-## What this is
+Unit-tested on CPU. No GPU benchmark yet.
 
-This repo implements the full RLHF alignment pipeline — SFT → Reward Model → PPO and/or DPO — with production-engineering discipline:
+Check on 2026-10-30, Python 3.12, torch 2.15.0+cpu, `PYTHONPATH=src`:
 
-- **PPO engine** with Generalized Advantage Estimation, clipped surrogate objective, and adaptive KL penalty
-- **DPO engine** implementing reference-free preference optimization without a reward model
-- **Pydantic v2 config system** with strict validation, YAML/JSON serialization, and factory methods
-- **Typer CLI** with four commands covering every training stage
-- **Async dataset pipeline** with JSONL caching and toy mode (1K HH-RLHF samples, <20 min on T4)
-- **110+ tests** (40+ PPO, 35+ DPO, 35+ config), 100% type-annotated, fully verified
+- `tests/test_topology.py` and `tests/test_rollout.py` do not collect. Importing the package loads `comm_hooks.py`, and that file imports `ddp_comm_hook`, which torch 2.15 does not export.
+- The other three test modules collect 77 tests: 66 passed, 11 failed. The failures are listed in [ROADMAP.md](ROADMAP.md) under S0.6 and S0.9.
 
-The distributed architecture is designed for multi-node scale: asymmetric process groups separating the active training mesh (Actor + Critic, ZeRO-3) from the frozen inference ring (Reference + Reward), with async checkpointing and NCCL bucket overlapping.
-
----
-
-## What's validated vs. what's designed
-
-| Component | Status | Verified on |
-|---|---|---|
-| Pydantic v2 config system | ✅ Complete + tested | CPU (all hardware) |
-| PPO engine (GAE + clip + KL) | ✅ Complete + 40+ tests | CPU unit tests |
-| DPO engine | ✅ Complete + 35+ tests | CPU unit tests |
-| CLI (4 commands) | ✅ Complete + tested | Single T4 GPU |
-| SFT trainer (LoRA + HF Trainer) | ✅ Complete | Single T4 GPU (<20 min toy) |
-| Reward model trainer | ✅ Complete | Single T4 GPU |
-| Async checkpointing (`async_io.py`) | ✅ Complete | CPU tests |
-| NCCL comm hooks (`comm_hooks.py`) | ✅ Implemented | Not multi-node validated |
-| DeepSpeed ZeRO-3 topology | ✅ Config + code | Not multi-node validated |
-| TRL benchmark comparison | ⚠️ Framework ready | Requires `pip install trl` |
-| Multi-node cluster (128+ GPUs) | ❌ Not validated | Design only |
-
-The distributed multi-node path — `torchrun --nnodes=128` — is architecturally sound and the code is written to support it, but has not been run on a cluster. The docs describe the intended behavior, not measured results.
-
----
-
-## Quick start (single T4, under 20 minutes)
+Recount after you change tests:
 
 ```bash
-git clone https://github.com/Mattral/Improving-LLM-Models-with-RLHF-PPO-DPO
-cd Improving-LLM-Models-with-RLHF-PPO-DPO
-pip install -e .
+PYTHONPATH=src pytest --collect-only -q
+```
 
-# 1. Fine-tune base model (5-7 min)
-python -m rlhf_platform.cli train-sft --toy --epochs 1
+There is no coverage number in this README. A green coverage run has not been recorded.
 
-# 2. Train reward model (3-5 min)
-python -m rlhf_platform.cli train-reward --toy --epochs 1
+## What is in the tree
 
-# 3. PPO alignment
+| Path | What it is |
+| --- | --- |
+| `src/rlhf_platform/config.py` | Pydantic configs. `TrainingConfig.toy_mode()` and `from_yaml`. Tested in `tests/test_config.py`. |
+| `src/rlhf_platform/ppo_engine.py` | `PPOTrainer`: GAE, a clipped policy loss, a value loss, entropy, and a KL term. Some of its tests fail. See S0.6. |
+| `src/rlhf_platform/alignment/ppo_engine.py` | A second PPO implementation, `DistributedPPOEngine`. S0.4 merges the two. |
+| `src/rlhf_platform/alignment/loss.py` | Categorical KL from full logits, GAE, and a clipped PPO loss. Not parity-tested against TRL yet. |
+| `src/rlhf_platform/dpo_engine.py` | `DPOTrainer`. The CLI does not call it. |
+| `src/rlhf_platform/sft_engine.py` | LoRA SFT through the Hugging Face `Trainer`. |
+| `src/rlhf_platform/reward_engine.py` | Preference reward-model trainer. |
+| `src/rlhf_platform/dataset.py` | Preference-pair loading. Toy mode slices Anthropic HH-RLHF to 1,000 rows when it builds the cache. |
+| `src/rlhf_platform/cli.py` | Four Typer commands. Two of them do not train. See below. |
+| `src/rlhf_platform/distributed/` | Topology, communication hooks, and async checkpoints. The package does not import on torch 2.15. |
+| `train.py` | Distributed training entrypoint. It has not been run on a cluster in this repo. |
+| `configs/` | YAML for a toy run, a default run, a cluster topology, and a DeepSpeed ZeRO-3 config. |
+
+Work still open is tracked in [ROADMAP.md](ROADMAP.md).
+
+## DPO
+
+DPO trains on preference pairs and does not train a reward model. The loss uses a frozen reference policy.
+
+`DPOTrainer.compute_dpo_loss` takes sequence scores named `policy_logits_*` and `ref_logits_*` in the signature. The body treats them as log-probabilities:
+
+```
+logits = beta * ((policy_chosen - policy_rejected) - (ref_chosen - ref_rejected))
+loss = -logsigmoid(logits).mean()
+```
+
+That is the DPO objective at sequence level. Parity with TRL, including the log-probability shift and the mask, is item S0.6. It is not done.
+
+`python -m rlhf_platform.cli run-dpo` prints a placeholder and exits 0. It does not construct `DPOTrainer`.
+
+## PPO
+
+`PPOTrainer` in `ppo_engine.py` is the implementation the current unit tests call. The intended step is GAE, then a clipped probability ratio, a value loss, an entropy bonus, and a KL penalty. `train_step` currently gathers log-probabilities with the wrong tensor rank, so the step test raises. Details are in the S0.6 notes.
+
+`alignment/loss.py` computes KL as the full-vocabulary categorical KL, `sum_i p_i (log p_i - log q_i)`, and clamps it to `[0, 1000]`. The sampled-token estimators usually called k1, k2, and k3 are not implemented here. Naming and testing that estimator is S0.6e.
+
+## Command line
+
+```bash
+python -m rlhf_platform.cli train-sft --config configs/toy.yaml
+python -m rlhf_platform.cli train-reward --config configs/toy.yaml
 python -m rlhf_platform.cli run-ppo --toy
-
-# 4. DPO alignment (alternative to PPO)
 python -m rlhf_platform.cli run-dpo --toy
 ```
 
-Toy mode uses 1,000 preference pairs from Anthropic HH-RLHF. No cluster required.
+`train-sft` builds `SFTTrainer` and calls `train`. `train-reward` builds `RewardModelTrainer` and calls `train`. Both will download models and the HH-RLHF dataset. Neither command has a recorded runtime in this repo.
 
----
+`run-ppo` checks that `alignment.method` is `ppo`, writes the config YAML, and returns. The function body says the training loop is not wired up.
 
-## Installation
+`run-dpo` does not train.
 
-Three requirements files for different components:
+`TrainingConfig.toy_mode()` sets the policy and the reference model to `distilgpt2`, the reward model to `prajjwal1/bert-tiny`, the device to `cuda`, and the dataset name to `Anthropic/hh-rlhf`. Those are config defaults. They are not a measured run.
 
-```bash
-pip install -e .                              # Core PPO/DPO + CLI
-pip install -r requirements-fine-tune.txt    # SFT trainer
-pip install -r requirements-reward.txt       # Reward model trainer
-pip install trl==0.5.0                       # Optional: TRL benchmark comparison
-```
+## Install
 
-Run tests:
-```bash
-pytest tests/ -v                             # 110+ tests, CPU-only safe
-CUDA_VISIBLE_DEVICES="" pytest tests/        # Force CPU if CUDA errors
-```
+`pyproject.toml` pins an old stack, including `transformers==4.32.0`, `trl==0.5.0`, `bitsandbytes==0.41.1`, and `triton==3.7.0`. `pip install -e .` was not run for the check in Measured scope.
 
----
+That check used a virtualenv with the CPU wheel of torch 2.15.0 and current `pydantic`, `pytest`, `pyyaml`, `transformers`, and `datasets`, imported via `PYTHONPATH=src`.
 
-## Architecture
+## Distributed design
 
-The framework separates four models into two process groups to avoid the "generation bubble" — the idle GPU time caused by waiting for rollout generation before training can start.
+Process-group layout, bucket sizes, and context lengths for 8, 512, and 10,000 GPUs are written down as design targets in [docs/design.md](docs/design.md). They are not measurements. No run in this repo has produced a throughput, memory, or latency number.
+
+## Layout
 
 ```
-ACTOR_CRITIC_GROUP (active optimization)
-  ├── Actor (policy)    — DeepSpeed ZeRO-3, generates responses
-  └── Critic (value)    — estimates returns for GAE
-
-REFERENCE_REWARD_GROUP (frozen inference)
-  ├── Reference model   — computes KL baseline (no gradient tracking)
-  └── Reward model      — scores responses (no gradient tracking)
-
-Host CPU pinned ring-buffer
-  — async streaming between groups
-  — pre-populates epoch N+1 rollouts while epoch N trains
+src/rlhf_platform/     package (import name until S0.5)
+configs/               toy, default, topology, and DeepSpeed YAML
+tests/                 CPU unit tests; the full run is not green
+docs/                  design notes and older write-ups
+train.py               distributed entrypoint
+ROADMAP.md             status of the work
 ```
-
-While Actor/Critic run backprop for step N, the Reference/Reward group populates the next batch of rollouts. NCCL gradient buckets are reduced asynchronously during the backward pass rather than after it.
-
-**Important:** This architecture is implemented and the design is sound. Multi-node validation (128+ GPUs) has not been performed.
-
----
-
-## PPO implementation
-
-The core loss function:
-
-$$\mathcal{L}_{PPO}(\theta) = \hat{\mathbb{E}}_t \left[ \min\left(r_t(\theta)\hat{A}_t,\ \text{clip}(r_t(\theta), 1-\epsilon, 1+\epsilon)\hat{A}_t\right) \right] - \beta\, D_{KL}\left(\pi_\theta \parallel \pi_{ref}\right)$$
-
-Implemented in `src/rlhf_platform/alignment/`:
-
-- `loss.py` — numerically stable KL penalties, clipped advantage computation
-- `ppo_engine.py` — multi-model PPO step orchestration, W&B logging
-- `rollout.py` — async generation pipeline, pinned memory buffer
-
-GAE advantage estimation runs with distributed variance normalization across the full `ACTOR_CRITIC_GROUP` rank mesh.
-
----
-
-## DPO implementation
-
-DPO skips the reward model entirely. Given a preferred response $y_w$ and a rejected response $y_l$ for prompt $x$:
-
-$$\mathcal{L}_{DPO}(\pi_\theta) = -\mathbb{E}\left[\log \sigma\!\left(\beta \log \frac{\pi_\theta(y_w|x)}{\pi_{ref}(y_w|x)} - \beta \log \frac{\pi_\theta(y_l|x)}{\pi_{ref}(y_l|x)}\right)\right]$$
-
-The DPO engine (`src/rlhf_platform/alignment/dpo_engine.py`) is 382 lines, 100% type-safe, with 35+ unit tests. Run via `python -m rlhf_platform.cli run-dpo`.
-
----
-
-## Core Systems Optimization Pillars
-
-### 1. Asynchronous Rollout Ring-Buffers (`rollout.py`)
-
-Auto-regressive token sampling is bound by memory bandwidth, while gradient updates are bound by matrix multiplication compute limits. Instead of executing these phases sequentially, our rollout engine utilizes an asynchronous background generator. While the active compute mesh executes backpropagation updates for epoch $N$, the inference mesh continuously populates a thread-safe, pinned CPU host memory ring buffer with rollout tokens for epoch $N+1$. This architecture entirely mitigates generation stalls.
-
-### 2. NCCL Collective Communication Overlapping (`comm_hooks.py`)
-
-During the Actor's backward pass, gradients are not cached globally until the end of the execution step. Instead, we register custom communication hooks. As independent layers finalize their gradients, they are immediately packed into discrete memory buckets. The engine triggers asynchronous network operations (`all_reduce` or `reduce_scatter`) over InfiniBand channels concurrently while the remaining GPU clusters continue executing preceding tensor layers.
-
-### 3. Non-Blocking Fault Tolerance (`async_io.py`)
-
-At petascale, Mean Time Between Failures (MTBF) degrades to hours. Traditional saving operations freeze the execution graph across all ranks, wasting millions of compute cycles. This engine leverages multi-tiered, asynchronous checkpointing: model weights are copied instantly to CPU pinned memory via local memory copies, and a background thread streams the snapshot to storage asynchronously while rank 0 handles disk IO, letting the primary cluster resume training within milliseconds.
-
----
-
-## Configuration
-
-All training behavior is controlled by `configs/cluster_topology.yaml` and `configs/deepspeed_zero3.yaml`. The Pydantic v2 config system validates every field at load time with clear error messages.
-
-```python
-from rlhf_platform.config import RLHFConfig
-
-# Toy mode — single GPU, small model, 1K samples
-config = RLHFConfig.toy_mode()
-
-# Production mode — reads from YAML
-config = RLHFConfig.from_yaml("configs/cluster_topology.yaml")
-```
-
-Topology must satisfy: `tensor_parallel × pipeline_parallel × data_parallel = WORLD_SIZE`. The config validator enforces this at startup.
-
----
-
-## Distributed training (multi-node design)
-
-```bash
-torchrun \
-  --nnodes=128 \
-  --nproc_per_node=8 \
-  --node_rank=$NODE_RANK \
-  --master_addr=$MASTER_ADDR \
-  --master_port=29500 \
-  train.py --config configs/cluster_topology.yaml
-```
-
-**Note:** This launch command is the intended interface. It has not been validated on a physical cluster. For single-GPU use, the CLI commands in Quick Start are the validated path.
-
-Cluster configuration targets:
-
-| Metric / Layer | 8x GPU Node (Local Dev) | 512x GPU Cluster (Pod Scale) | 10,000x GPU Cluster (Petascale) |
-| --- | --- | --- | --- |
-| **Tensor Parallelism (TP)** | 1 | 8 (Intra-Chassis NVLink) | 8 (Intra-Chassis NVLink) |
-| **Pipeline Parallelism (PP)** | 1 | 2 (Inter-Node InfiniBand) | 16 (Inter-Node Ring) |
-| **Data Parallelism (DP)** | 8 (ZeRO-3) | 32 (FSDP + Sharding) | 780 (Hybrid FSDP / ZeRO) |
-| **Gradient Overlap Bucket** | 25MB | 50MB | 128MB |
-| **Target Context Length** | 4,096 | 16,384 | 65,536 |
-
----
-
-## Telemetry
-
-Every training step emits structured JSON to stdout — connects directly to Grafana, Prometheus, or W&B:
-
-```json
-{
-  "timestamp": "2026-05-29T21:44:45Z",
-  "rank": 0,
-  "step": 1420,
-  "type": "ppo_step",
-  "policy_loss": 0.0412,
-  "value_loss": 0.1182,
-  "kl_divergence": 0.0314,
-  "vram_allocated_bytes": 79456891200,
-  "nccl_bubble_stall_ms": 0.42,
-  "tokens_per_sec_per_gpu": 2450.8
-}
-```
-
----
-
-## Repository layout
-
-```
-src/rlhf_platform/
-├── distributed/
-│   ├── topology.py       # Process group creation, rank assignment
-│   ├── comm_hooks.py     # NCCL bucket overlap hooks
-│   └── async_io.py       # Non-blocking background checkpointing
-├── alignment/
-│   ├── loss.py           # KL penalty, clipped advantage (numerically stable)
-│   ├── ppo_engine.py     # PPO step orchestration
-│   ├── dpo_engine.py     # DPO loss + training loop
-│   └── rollout.py        # Async generation + pinned ring buffer
-└── utils/
-    └── telemetry.py      # Rank-aware zero-allocation JSON metrics
-
-configs/
-├── cluster_topology.yaml # Training + parallelism hyperparameters
-└── deepspeed_zero3.yaml  # ZeRO-3 optimizer config
-
-docs/
-├── core/ARCHITECTURE.md      # Component lifecycles, execution topology
-├── core/philosophy.md        # Design tradeoffs
-├── operations/system_design.md
-├── operations/setup.md       # Cluster deployment runbook
-├── governance/security.md    # Reward hacking, checkpoint security
-└── governance/contributing.md
-
-tests/                    # 110+ tests — PPO, DPO, config, integration
-results/benchmarks.md     # Benchmark framework (TRL comparison ready)
-```
-
----
-
-## Documentation map
-
-| Audience | Start here | Deep dive |
-|---|---|---|
-| First-time user | [Quick Start](#quick-start-single-t4-under-20-minutes) | [docs/PHASE_3_CLI.md](docs/PHASE_3_CLI.md) |
-| ML engineer | [PPO implementation](#ppo-implementation) | [docs/core/ARCHITECTURE.md](docs/core/ARCHITECTURE.md) |
-| Infra / DevOps | [Distributed training](#distributed-training-multi-node-design) | [docs/operations/setup.md](docs/operations/setup.md) |
-| Contributor | [Contributing](docs/governance/contributing.md) | [DEVELOPMENT.md](docs/DEVELOPMENT.md) |
-
-Phase-by-phase implementation docs: [PHASE_1_CONFIG.md](docs/PHASE_1_CONFIG.md) · [PHASE_2_PPO.md](docs/PHASE_2_PPO.md) · [PHASE_3_CLI.md](docs/PHASE_3_CLI.md) · [PHASE_4_BENCHMARKS.md](docs/PHASE_4_BENCHMARKS.md)
-
----
-
-## Contributing
-
-```bash
-pre-commit install
-pytest tests/ -v
-mypy src/rlhf_platform --strict
-black src/ tests/ && ruff check --fix
-```
-
-All PRs must pass: tests · mypy strict · black + ruff · no fabricated claims.
-
----
 
 ## Citation
 
 ```bibtex
-@software{rlhf_platform_2026,
-  title  = {RLHF Platform: PPO and DPO for LLM Alignment},
+@software{rlpost_2026,
+  title  = {rlpost},
   author = {Mattral and contributors},
   year   = {2026},
-  url    = {https://github.com/Mattral/Improving-LLM-Models-with-RLHF-PPO-DPO}
-}
-
-@article{schulman2017proximal,
-  title  = {Proximal Policy Optimization Algorithms},
-  author = {Schulman, John and others},
-  year   = {2017},
-  url    = {https://arxiv.org/abs/1707.06347}
-}
-
-@article{rafailov2023direct,
-  title  = {Direct Preference Optimization},
-  author = {Rafailov, Rafael and others},
-  year   = {2023},
-  url    = {https://arxiv.org/abs/2305.18290}
+  url    = {https://github.com/Mattral/rlpost}
 }
 ```
 
----
-
 ## License
 
-This project is licensed under the Apache License 2.0. See [LICENSE](LICENSE) for details.
-
-
-## Acknowledgments
-
-This project builds on the work of:
-- [OpenAI](https://openai.com/) for PPO research and baselines
-- [Hugging Face](https://huggingface.co/) for TRL library and transformers
-- [DeepSpeed](https://www.deepspeed.ai/) for distributed training optimization
-- [Anthropic](https://www.anthropic.com/) for RLHF research and HH-RLHF dataset
-- The open-source community for PyTorch, Pydantic, and ecosystem tools
+Apache License 2.0. See [LICENSE](LICENSE).

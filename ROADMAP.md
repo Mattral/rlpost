@@ -52,7 +52,7 @@ The exit criteria for Stage 0:
     66 pass and 11 fail. Those failures were already in the code. Details are under
     S0.6 and S0.9. S0.1 does not change Python.
 
-### [ ] S0.2 README truth pass
+### [x] S0.2 README truth pass
 - Fix the DPO description: it is reward-model-free, not reference-free.
 - Replace hand-typed test counts and coverage badges with generated values, or remove them.
 - Remove the telemetry JSON example (79 GB VRAM, 2,450 tok/s; never measured) and the
@@ -61,6 +61,19 @@ The exit criteria for Stage 0:
 - Add a "Measured scope" section. Right now it should honestly read "unit-tested on CPU;
   no GPU benchmark yet".
 - Notes:
+  - README rewritten. DPO is described as using a frozen reference policy and not training
+    a reward model. Test-count and coverage badges are gone. Measured scope states the
+    2026-10-30 CPU result (77 collected tests in three modules, 66 passed, 11 failed;
+    two modules do not collect) and points at `pytest --collect-only -q` to recount.
+  - The telemetry JSON sample was deleted. It was a fabricated measurement, so it was
+    not copied into `docs/design.md`. The 8 / 512 / 10,000-GPU table moved there and is
+    labelled "design target, not measured".
+  - README now also says what the CLI does: `train-sft` and `train-reward` call their
+    trainers; `run-ppo` only writes a config; `run-dpo` exits 0 without calling
+    `DPOTrainer`. CLI help strings still mention a T4 timing and "Phase 4". Those
+    strings were left for a later code edit.
+  - `pip install -e .` was not run. The measured-scope check used CPU torch 2.15 with
+    `PYTHONPATH=src`.
 
 ### [ ] S0.3 CI that tells the truth
 - Remove jobs pointing at non-existent `tests/integration/` and `tests/benchmarks/`.
@@ -229,3 +242,4 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 
 - 2026-10-30 · — · Roadmap created; replaces the old `roadmap.md` (whose phase "completion" statuses were not backed by measurements) · —
 - 2026-10-30 · S0.1 · Gitignore, untracked caches and egg-info, ROADMAP.md replaces the old roadmap. Phase-completion docs kept pending an owner decision. · 33bed64
+- 2026-10-30 · S0.2 · README states the CPU test result and drops unmeasured numbers. The GPU-count table moved to docs/design.md as a design target. The fake telemetry JSON was deleted. · pending-sha
