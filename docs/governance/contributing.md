@@ -8,7 +8,7 @@ Every pull request updates `ROADMAP.md`: status, notes, and a change-log line.
 ## Checks
 
 The CI job is `CPU torch, ruff, pytest` in `.github/workflows/ci.yml`.
-It installs `requirements-cpu.txt` (the CPU wheel of torch) and runs:
+It installs the package with the `[test]` extra, constrained by `requirements-cpu.txt` (the CPU wheel of torch), and runs:
 
 ```bash
 ruff check .
