@@ -11,7 +11,7 @@ What the remaining code does:
 
 An older draft of this page claimed a 40% GPU-memory reduction. That number was not a measurement. It is gone.
 
-S0.9 removed the process-group module, the communication hooks, the async checkpoint writer, the multi-rank script, the cluster-layout YAML, and `docs/design.md`. S0.9b removed `NCCLProfiler`, `DistributedMetricsCollector`, the unused `TrainingConfig` device fields, and `configs/deepspeed_zero3.yaml`. Stage 2 builds rollout and weight-sync distribution from scratch.
+S0.9 removed the process-group module, the communication hooks, the async checkpoint writer, the multi-rank script, the cluster-layout YAML, and `docs/design.md`. S0.9b removed `NCCLProfiler`, `DistributedMetricsCollector`, the unused `TrainingConfig` device fields, and the unread ZeRO-3 config. Stage 2 builds rollout and weight-sync distribution from scratch.
 
 ## What is not wired
 

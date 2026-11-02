@@ -37,7 +37,7 @@ This documentation emphasizes **engineering intuition**, not just API usage.
 
 ## High-Level RLHF Pipeline
 
-At a conceptual level, the process implemented here follows this flow:
+At a conceptual level, RLHF follows this flow:
 
 ```
 Pretrained LLM
@@ -53,7 +53,7 @@ PPO-based Reinforcement Learning
 Aligned LLM
 ```
 
-Key engineering constraints enforced throughout:
+Key engineering constraints in that pipeline:
 
 * **KL divergence regularization** to prevent catastrophic drift
 * Parameter-efficient fine-tuning (LoRA / QLoRA)
@@ -95,50 +95,6 @@ In practice, **RLHF is best viewed as a refinement layer**, not a replacement fo
 
 ---
 
-## Implementation Overview
-
-The foundational notebooks implement the full RLHF pipeline using:
-
-* **Base LLM**: OPT-1.3B
-* **Reward Model**: DeBERTa-v3 (300M)
-* **Techniques**:
-  * LoRA / QLoRA
-  * PPO with KL control
-  * Quantization via BitsAndBytes
-* **Monitoring**: Weights & Biases
-* **Datasets**:
-  * OpenOrca
-  * Anthropic HH-RLHF
-  * Alpaca-OrcaChat
-
----
-
-## Original Notebook Structure
-
-Three foundational notebooks implement the core RLHF stages:
-
-### 1. `FineTuning_Reward_Model.ipynb`
-Trains a reward/value model (DeBERTa-v3) on pairwise chosen/rejected data from Anthropic HH-RLHF. The reward model becomes a proxy for human preference and is used during PPO optimization.
-
-### 2. `FineTuning_a_LLM_QLoRA.ipynb`
-Performs Supervised Fine-Tuning (SFT) using QLoRA on OPT-1.3B using the OpenOrca dataset. Creates the policy that will be optimized via PPO.
-
-### 3. `FineTune_LRHF.ipynb`
-Full PPO loop: generates rollouts from the SFT model, scores them with the reward model, and applies PPO updates with KL regularization to align the policy with human preferences.
-
----
-
-## Scaling Limitations of Notebook Implementations
-
-The original notebooks are optimized for **educational clarity**, not cluster-scale deployment. Key limitations:
-
-1. **Sequential Processing**: Rollout generation and gradient optimization occur serially, causing GPU stalls.
-2. **Monolithic Models**: Actor, Reference, Critic, and Reward models occupy identical memory/compute footprints, wasting resources.
-3. **No Fault Tolerance**: No checkpointing, asynchronous I/O, or recovery mechanisms.
-4. **Limited Observability**: Standard Python logging without structured telemetry or rank-specific tracing.
-
----
-
 ## Modern Alternatives to RLHF
 
 Recent research proposes simpler or more scalable alignment methods:
@@ -155,12 +111,3 @@ Recent research proposes simpler or more scalable alignment methods:
 - Christiano et al. (2023) — "Deep Reinforcement Learning from Human Preferences"
 - Ziegler et al. (2019) — "Fine-Tuning Language Models from Human Preferences"
 - Rafailov et al. (2023) — "Direct Preference Optimization: Your Language Model is Secretly a Reward Model"
-
----
-
-**Note**: This document is preserved as the foundational educational reference. The production implementation resides in `src/rlhf_platform/` and supporting configurations in `configs/`.
-
-
-
-
-

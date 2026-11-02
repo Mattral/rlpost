@@ -1,5 +1,5 @@
 """
-Production-grade configuration engine for RLHF/DPO alignment training.
+Configuration models for SFT, reward-model, PPO, and DPO training.
 
 This module provides a strict, type-safe Pydantic v2 configuration layer that decouples
 training hyperparameters, model paths, and optimization settings from code. All configurations
@@ -587,17 +587,17 @@ class TrainingConfig(BaseConfig):
 
     @classmethod
     def default_config(cls: type["TrainingConfig"]) -> "TrainingConfig":
-        """Create a sensible default configuration for production training.
+        """Build the default TrainingConfig.
 
-        Default configuration uses standard models and hyperparameters suitable
-        for training on modern GPUs with decent memory (e.g., A100, H100).
+        The policy model id is ``meta-llama/Llama-2-7b``. Mixed precision is
+        ``bf16``. This is a stored default. It is not a measured run.
 
         Returns:
-            TrainingConfig with production-recommended defaults.
+            TrainingConfig.
         """
         return cls(
-            run_name="rlhf_production_run",
-            output_dir="./outputs/production_run",
+            run_name="rlhf_default_run",
+            output_dir="./outputs/default_run",
             seed=42,
             device="cuda",
             log_to_wandb=True,

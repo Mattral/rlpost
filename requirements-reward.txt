@@ -51,7 +51,6 @@ datasets==2.14.4
 dbus-python==1.2.16
 decorator==4.4.2
 deeplake==3.6.19
-deepspeed==0.10.1
 defusedxml==0.6.0
 dill==0.3.7
 distlib==0.3.0

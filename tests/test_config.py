@@ -244,7 +244,7 @@ class TestTrainingConfig:
         assert config.optimization.gradient_accumulation_steps == 1
 
     def test_default_config(self) -> None:
-        """Verify production default configuration."""
+        """Verify default_config model id and mixed precision."""
         config = TrainingConfig.default_config()
         assert config.model.policy_model_id == "meta-llama/Llama-2-7b"
         assert config.optimization.mixed_precision == "bf16"
