@@ -411,6 +411,15 @@ Cover:
   - CPU pytest after the decision, same command: 79 collected, 68 passed,
     11 failed, in 20.40s. The 11 names are unchanged. Ruff check and format
     check pass.
+  - `a90d4de` rewrites `docs/governance/contributing.md` (27 lines). It names
+    the CPU job (`ruff check`, `ruff format --check`, `pytest -q`), branching
+    from `main`, one roadmap item per PR, Conventional Commits, a `ROADMAP.md`
+    update on every PR, and result files under `benchmarks/results/`. The same
+    commit drops the unused mypy extra, the `[tool.mypy]` table, and the
+    `.mypy_cache/` ignore. `git grep -i "enterprise\|gatekeep\|mypy\|bandit\|pre-commit\|release/"`
+    matches only this file.
+  - CPU pytest after that rewrite: 79 collected, 68 passed, 11 failed. The 11
+    names are unchanged. Ruff check and format check pass.
 
 ### [ ] S0.10 P2000 CUDA smoke test (optional)
 - Use the cu126 wheel, fp32, a tiny model, and run 20 steps each of SFT, DPO and PPO.
@@ -518,3 +527,4 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-10-30 · S0.9b · Removed the unused NCCL profiler, the distributed metrics collector, the four TrainingConfig device fields, and the unread ZeRO-3 YAML. The 11 known failures are unchanged. One passing config test went with the fields. · c72ccd7
 - 2026-10-30 · S0.9c · Removed the unused DeepSpeed extra and deleted the operations docs that described SLURM, Kubernetes, and NCCL. Claim text in the five files is unchanged pending an owner decision. · 3cbd7b5
 - 2026-10-30 · S0.9c · Owner decision: deleted philosophy.md and governance/security.md, added SECURITY.md, and rewrote the deep dive and DEVELOPMENT.md. The grep matches this file, and LICENSE on the substring inside "reproduction". · 116dd75
+- 2026-10-30 · S0.9c · Rewrote contributing.md to the CPU CI job. The unused mypy config is gone, so the governance grep matches only this file. · a90d4de
