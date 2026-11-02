@@ -49,11 +49,13 @@ The failures that are still red are listed under S0.6 in [ROADMAP.md](../ROADMAP
 
 A Pascal GPU (compute capability sm_61) needs the cu126 PyTorch wheel. PyTorch builds for CUDA 12.8 and newer dropped Pascal.
 
+The cu126 index has no `torch==2.15.0` wheel. The newest stable wheel on that index is `2.14.1`:
+
 ```bash
-pip install torch --index-url https://download.pytorch.org/whl/cu126
+pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cu126
 ```
 
-That wheel is for fp32 smoke tests on a tiny model. It is not a benchmark. The default test run stays on CPU.
+The package floor stays `torch>=2.15`. That floor was checked on torch 2.15. `torch==2.14.1` is the Pascal wheel for fp32 smoke tests on a tiny model. It is not a benchmark. The default test run stays on CPU.
 
 ## Commands
 

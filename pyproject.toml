@@ -47,10 +47,9 @@ lora = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourusername/rlpost"
-Documentation = "https://rlpost.readthedocs.io"
-Repository = "https://github.com/yourusername/rlpost.git"
-Issues = "https://github.com/yourusername/rlpost/issues"
+Homepage = "https://github.com/Mattral/rlpost"
+Repository = "https://github.com/Mattral/rlpost.git"
+Issues = "https://github.com/Mattral/rlpost/issues"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

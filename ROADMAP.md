@@ -275,6 +275,14 @@ The exit criteria for Stage 0:
   - typer and rich are required because `cli.py` imports them. They are not
     pinned in the CPU lock. The 3.12 CPU install resolved typer 0.27.3 and
     rich 15.0.0.
+  - Project URLs are `https://github.com/Mattral/rlpost`, the repository URL
+    with `.git`, and the issues URL. The Documentation URL is removed. There
+    is no readthedocs site.
+  - `pip download torch==2.15.0 --index-url https://download.pytorch.org/whl/cu126 --no-deps`
+    finds no file. The index lists cu126 wheels from 2.6.0 through 2.14.1.
+    The newest stable wheel is `torch==2.14.1` (cp311 and cp312 manylinux
+    wheels answer HTTP 200). The package floor stays `torch>=2.15`. Tests
+    were not re-run on 2.14.1. `docs/DEVELOPMENT.md` names that Pascal install.
 
 ### [ ] S0.6 Numerical parity tests (core correctness)
 For each check below, compare against TRL (pinned version) or a closed-form computation,
@@ -357,6 +365,10 @@ Cover:
     `reward_engine.py` import it. No test calls those trainers, so the extra is
     unverified. `cli.py` imports both trainers at import time, so
     `python -m rlpost.cli` needs the extra. `import rlpost` does not.
+  - Hugging Face `Trainer` needs `accelerate` at runtime. `sft_engine.py`
+    constructs `Trainer`. The reward model is on the same SFT/reward path.
+    S0.11 must declare `accelerate` for that path, in the `[lora]` extra or in
+    a `[train]` extra. It is not a project dependency today.
 
 ### [x] S0.9 Delete the orphaned distributed scaffolding
 - Branch: `chore/S0.9-delete-distributed`.
@@ -513,6 +525,9 @@ Cover:
 - Use the cu126 wheel, fp32, a tiny model, and run 20 steps each of SFT, DPO and PPO.
 - This catches device and dtype bugs only. **It is not a benchmark.**
 - Notes:
+  - 2026-11-02: the cu126 index has no torch 2.15.0 wheel. The newest stable
+    wheel is `torch==2.14.1`. `docs/DEVELOPMENT.md` names that install. The
+    package floor stays `torch>=2.15`.
 
 ---
 
@@ -618,3 +633,4 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-10-30 · S0.9c · Rewrote contributing.md to the CPU CI job. The unused mypy config is gone, so the governance grep matches only this file. · a90d4de
 - 2026-11-02 · S0.5 · The package, project name, and CLI path are rlpost. No shim. The default run is rlpost_default_run. · 2bf145a
 - 2026-11-02 · S0.5b · Dependencies are the imported packages. The test extra pins TRL 1.17.1. CI installs that extra under the CPU lock. The 11 known failures are unchanged. · 87efbe5
+- 2026-11-02 · S0.5b · Project URLs point at Mattral/rlpost. Pascal installs torch==2.14.1 from the cu126 index. The package floor stays torch>=2.15. · #17
