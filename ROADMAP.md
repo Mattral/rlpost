@@ -190,11 +190,47 @@ The exit criteria for Stage 0:
     names are the ones already listed under S0.6. No other test failed.
     `.venv/bin/ruff check .` and `.venv/bin/ruff format --check .` pass.
 
-### [ ] S0.5 Package rename `rlhf_platform` → `rlpost`
+### [x] S0.5 Package rename `rlhf_platform` → `rlpost`
 - Depends on: the owner renaming the GitHub repo first.
 - Update imports, `pyproject.toml`, the CLI entry point and docs. Keep a note in the README
   pointing to the old repo name.
 - Notes:
+  - 2026-11-02: branched from `origin/main` `aabce4f` (merge of PR #15).
+    Branch `refactor/S0.5-package-rename`.
+  - `60abd6f` lengthens the alignment package docstring. The old one-line
+    docstring was most of that file, so changing the identifier on that line
+    alone fell under git's 50% rename threshold. The new sentence says the
+    package re-exports the rollout buffer and the token sampler.
+  - `2bf145a` is `git mv src/rlhf_platform src/rlpost` plus the identifier
+    edits. Every moved file is a rename at similarity 75% or higher.
+    `git log --follow` reaches the old path. There is no compatibility shim.
+  - Imports, tests, `train.py`, and `pyproject.toml` use `rlpost`. The project
+    name is `rlpost`. Package data and the coverage source use that name.
+    There was no setuptools console-script entry point. The CLI is
+    `python -m rlpost.cli`. The Typer app name is `rlpost`.
+  - README, `docs/CODE_MAP.md`, `docs/core/ARCHITECTURE.md`,
+    `docs/DEVELOPMENT.md`, and `scripts/README.md` use the new path.
+    `docs/governance/contributing.md` and `.github/workflows/ci.yml` do not
+    name the package, so they are unchanged. CI still installs with
+    `pip install -e .`.
+  - `TrainingConfig.default_config` and `configs/default.yaml` use run name
+    `rlpost_default_run` and output dir `./outputs/rlpost_default_run`.
+    W&B project strings that were the old distribution name are `rlpost` and
+    `rlpost-toy`. The field default `rlhf_alignment_run` and the toy run
+    `rlhf_toy_run` stay. They are run names, not the package id.
+  - The README says the repository was formerly
+    Improving-LLM-Models-with-RLHF-PPO-DPO. RLHF, PPO, and DPO stay where
+    they name the methods.
+  - `git grep -n "rlhf_platform"` matches only this file.
+  - CPU pytest on this branch, `.venv`, torch 2.15.0+cpu, `PYTHONPATH=src`,
+    `pytest -q -m "not slow and not gpu"`: 79 collected, 68 passed, 11 failed.
+    The 11 names are the ones already listed under S0.6. No other test failed.
+    `.venv/bin/ruff check .` and `.venv/bin/ruff format --check .` pass.
+  - Fresh venv, `pip install -e .`: the `rlpost` wheel built, then the install
+    failed building `tokenizers==0.13.3`. rustc rejected a `&T` to `&mut T`
+    cast in that pin. The pin was already in `pyproject.toml`. A second fresh
+    venv, `pip install -e . --no-deps`, installed `rlpost` 0.1.0.
+    `python -c "import rlpost"` loaded `src/rlpost/__init__.py`.
 
 ### [ ] S0.6 Numerical parity tests (core correctness)
 For each check below, compare against TRL (pinned version) or a closed-form computation,
@@ -528,3 +564,4 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-10-30 · S0.9c · Removed the unused DeepSpeed extra and deleted the operations docs that described SLURM, Kubernetes, and NCCL. Claim text in the five files is unchanged pending an owner decision. · 3cbd7b5
 - 2026-10-30 · S0.9c · Owner decision: deleted philosophy.md and governance/security.md, added SECURITY.md, and rewrote the deep dive and DEVELOPMENT.md. The grep matches this file, and LICENSE on the substring inside "reproduction". · 116dd75
 - 2026-10-30 · S0.9c · Rewrote contributing.md to the CPU CI job. The unused mypy config is gone, so the governance grep matches only this file. · a90d4de
+- 2026-11-02 · S0.5 · The package, project name, and CLI path are rlpost. No shim. The default run is rlpost_default_run. · 2bf145a

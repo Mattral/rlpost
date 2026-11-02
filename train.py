@@ -10,11 +10,11 @@ import sys
 
 
 def main() -> int:
-    """Exit. PPO updates are ``rlhf_platform.ppo_engine.PPOTrainer``."""
+    """Exit. PPO updates are ``rlpost.ppo_engine.PPOTrainer``."""
     print(
         "train.py does not run PPO. "
         "S0.4 removed DistributedPPOEngine. "
-        "The update is rlhf_platform.ppo_engine.PPOTrainer. "
+        "The update is rlpost.ppo_engine.PPOTrainer. "
         "Connecting this script is S0.11.",
         file=sys.stderr,
     )

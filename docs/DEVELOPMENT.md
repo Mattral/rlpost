@@ -50,7 +50,7 @@ That wheel is for fp32 smoke tests on a tiny model. It is not a benchmark. The d
 
 ## Commands
 
-`python -m rlhf_platform.cli train-sft` and `train-reward` construct their trainers and call `train`. Both will try to download models and data. Neither has a recorded CPU run.
+`python -m rlpost.cli train-sft` and `train-reward` construct their trainers and call `train`. Both will try to download models and data. Neither has a recorded CPU run.
 
 `run-ppo` checks that `alignment.method` is `ppo`, writes the config YAML, and returns. It does not call `PPOTrainer`.
 

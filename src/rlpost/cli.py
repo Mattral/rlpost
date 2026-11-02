@@ -16,15 +16,15 @@ from typing import Optional
 import typer
 from rich.console import Console
 
-from rlhf_platform.config import TrainingConfig
-from rlhf_platform.reward_engine import RewardModelTrainer
-from rlhf_platform.sft_engine import SFTTrainer
+from rlpost.config import TrainingConfig
+from rlpost.reward_engine import RewardModelTrainer
+from rlpost.sft_engine import SFTTrainer
 
 logger = logging.getLogger(__name__)
 console = Console()
 
 app = typer.Typer(
-    name="rlhf-platform",
+    name="rlpost",
     help="SFT, reward-model, PPO, and DPO commands. run-ppo and run-dpo do not train.",
 )
 
@@ -76,8 +76,8 @@ def train_sft(
     examples before RLHF training.
 
     Example:
-        python -m rlhf_platform.cli train-sft --toy --epochs 1
-        python -m rlhf_platform.cli train-sft --config configs/default.yaml
+        python -m rlpost.cli train-sft --toy --epochs 1
+        python -m rlpost.cli train-sft --config configs/default.yaml
     """
     setup_logging(verbose)
 
@@ -172,7 +172,7 @@ def train_reward(
     enabling PPO to optimize the policy.
 
     Example:
-        python -m rlhf_platform.cli train-reward --toy --epochs 1
+        python -m rlpost.cli train-reward --toy --epochs 1
     """
     setup_logging(verbose)
 
@@ -259,7 +259,7 @@ def run_ppo(
     to the reference model (KL constraint).
 
     Example:
-        python -m rlhf_platform.cli run-ppo --toy --epochs 1
+        python -m rlpost.cli run-ppo --toy --epochs 1
     """
     setup_logging(verbose)
 
@@ -351,7 +351,7 @@ def run_dpo(
     without learning a separate reward model.
 
     Example:
-        python -m rlhf_platform.cli run-dpo --toy
+        python -m rlpost.cli run-dpo --toy
     """
     setup_logging(verbose)
 
@@ -372,10 +372,10 @@ def main(
     """SFT, a reward model, PPO, and DPO.
 
     For detailed help on any command:
-        python -m rlhf_platform.cli COMMAND --help
+        python -m rlpost.cli COMMAND --help
     """
     if version:
-        console.print("rlhf-platform version 0.1.0")
+        console.print("rlpost version 0.1.0")
         raise typer.Exit()
 
 

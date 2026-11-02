@@ -16,8 +16,8 @@ from torch.nn import Module
 from torch.optim import AdamW
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from rlhf_platform.config import TrainingConfig
-from rlhf_platform.dataset import ToyDatasetLoader
+from rlpost.config import TrainingConfig
+from rlpost.dataset import ToyDatasetLoader
 
 logger = logging.getLogger(__name__)
 

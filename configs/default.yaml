@@ -1,9 +1,9 @@
-run_name: rlhf_default_run
-output_dir: ./outputs/default_run
+run_name: rlpost_default_run
+output_dir: ./outputs/rlpost_default_run
 seed: 42
 device: cuda
 log_to_wandb: true
-wandb_project: rlhf-platform
+wandb_project: rlpost
 wandb_entity: null
 eval_steps: 500
 save_steps: 500

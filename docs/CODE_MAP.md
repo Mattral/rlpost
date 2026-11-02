@@ -4,13 +4,13 @@ Written from the code on this branch. Shapes below are what the functions use, n
 
 `tested` means a CPU test calls the behavior. `untested` means nothing in `tests/` calls it. `known-broken` means the code disagrees with the algorithm it claims, and a later item owns the fix. A module can be more than one of these.
 
-## `src/rlhf_platform/__init__.py`
+## `src/rlpost/__init__.py`
 
 Package marker. Lists `alignment` and `utils` in `__all__`. It does not import them. No tensors.
 
 Status: untested. The version string is `"0.1.0"`.
 
-## `src/rlhf_platform/config.py`
+## `src/rlpost/config.py`
 
 Pydantic models for a run: `ModelConfig`, `OptimizationConfig`, `AlignmentConfig`, `DatasetConfig`, `TrainingConfig`. No tensors. YAML and JSON round-trip through `from_yaml`, `to_yaml`, `from_json_file`, and `to_json_file`. `TrainingConfig.toy_mode()` builds a small config the unit tests use.
 
@@ -20,7 +20,7 @@ Status: tested for construction, validation, and YAML load. The missing attribut
 
 Tests: `tests/test_config.py`.
 
-## `src/rlhf_platform/dataset.py`
+## `src/rlpost/dataset.py`
 
 Loads preference pairs as strings: `prompt`, `chosen`, `rejected`, and optional reward floats. `PreferencePairDataset.load` prefers a local JSONL cache, then Hugging Face `datasets`. `get_dataloader` tokenizes `prompt + chosen` with `return_tensors="pt"` (each field is `[1, L]` before padding) and collates with `IgnorePaddingLabelCollator`.
 
@@ -32,7 +32,7 @@ Status: untested. The HH-RLHF column mismatch is known-broken. See [S0.11](../RO
 
 Tests: none.
 
-## `src/rlhf_platform/sft_engine.py`
+## `src/rlpost/sft_engine.py`
 
 `load_model_with_lora` loads `AutoModelForCausalLM` and wraps it with PEFT LoRA (`task_type="CAUSAL_LM"`). It always applies LoRA. It does not read `use_peft_lora`. Optional 4-bit or 8-bit quantization goes through `BitsAndBytesConfig`. `SFTTrainer.train` builds a Hugging Face `Trainer` on `get_dataloader(...).dataset`, with `eval_dataset=None`, `evaluation_strategy="steps"`, and `load_best_model_at_end=True`. There is no early-stopping callback. The return value is the Trainer result object (`training_loss` is an attribute). The annotation says `dict`.
 
@@ -40,9 +40,9 @@ No tensor is built in this file except inside the Hugging Face trainer, which is
 
 Status: untested. See [S0.11](../ROADMAP.md#s011-cli-actually-runs-sftrmdpoppo-end-to-end-on-a-tiny-model-on-cpu).
 
-Tests: none. `python -m rlhf_platform.cli train-sft` constructs `SFTTrainer` and calls `train`.
+Tests: none. `python -m rlpost.cli train-sft` constructs `SFTTrainer` and calls `train`.
 
-## `src/rlhf_platform/reward_engine.py`
+## `src/rlpost/reward_engine.py`
 
 `load_reward_model_with_lora` loads `AutoModelForSequenceClassification` with `num_labels=1` and PEFT LoRA (`task_type="SEQ_CLS"`).
 
@@ -54,7 +54,7 @@ Status: untested. See [S0.11](../ROADMAP.md#s011-cli-actually-runs-sftrmdpoppo-e
 
 Tests: none. `train-reward` calls `train` and reads `result["loss"]` and `result["accuracy"]`.
 
-## `src/rlhf_platform/dpo_engine.py`
+## `src/rlpost/dpo_engine.py`
 
 Reward-model-free DPO with a frozen reference policy. The module used to say "reference-free". That was the wrong term. The reference model is loaded and frozen with `requires_grad_(False)`.
 
@@ -81,7 +81,7 @@ Status: `compute_dpo_loss` is tested and known-broken on the margin and on `beta
 
 Tests: `tests/test_dpo_engine.py`. Failing there, and left failing: `test_init_creates_trainer`, `test_reference_model_frozen`, `test_margin_computation`, `test_beta_affects_loss`, `test_metrics_batch_aggregation`, `test_config_integration`, `test_custom_beta_from_config`.
 
-## `src/rlhf_platform/ppo_engine.py`
+## `src/rlpost/ppo_engine.py`
 
 The only PPO implementation. `PPOTrainer` holds a policy, a value model, a frozen reference, and one optimizer.
 
@@ -135,7 +135,7 @@ Status: GAE, entropy, KL-on-identical-inputs, explained variance, and the adapti
 
 Tests: `tests/test_ppo_engine.py`. Failing, and left failing: `test_policy_loss_computation`, `test_value_loss_computation`, `test_train_step_updates_weights`, `test_train_step_returns_metrics`.
 
-## `src/rlhf_platform/cli.py`
+## `src/rlpost/cli.py`
 
 Typer commands. No tensors of its own.
 
@@ -147,13 +147,13 @@ Status: untested. See [S0.11](../ROADMAP.md#s011-cli-actually-runs-sftrmdpoppo-e
 
 Tests: none.
 
-## `src/rlhf_platform/alignment/__init__.py`
+## `src/rlpost/alignment/__init__.py`
 
 Re-exports `rollout`. PPO is not in this package.
 
 Status: untested as an import. The rollout pieces below are what the tests import directly.
 
-## `src/rlhf_platform/alignment/rollout.py`
+## `src/rlpost/alignment/rollout.py`
 
 `Rollout` is one trajectory. Per row after `RolloutGenerator`: `query_tokens` `[T_query]` long, `response_tokens` `[T_response]` long, `reward` a scalar (or `[1]` if a head squeezes that way), `logits_policy` `[T_response, V]`, `logits_reference` `[T_response, V]`. The generator's forward sees a batch. The stored row does not.
 
@@ -167,7 +167,7 @@ Status: buffer, collator, and generator are tested on CPU with stand-in modules.
 
 Tests: `tests/test_rollout.py` (3 tests, passing).
 
-## `src/rlhf_platform/utils/telemetry.py`
+## `src/rlpost/utils/telemetry.py`
 
 `RankAwareTelemetry.log_event` appends a `TelemetryEvent` and logs one JSON line. `log_ppo_step`, `log_communication`, `log_checkpoint`, and `log_memory_usage` are thin wrappers. `log_communication` sets `throughput_gbps = (data_size_mb * 8) / (duration_ms / 1000) / 1000`. No test checks that conversion. Nothing in `tests/` or `scripts/` constructs `RankAwareTelemetry`.
 
@@ -177,7 +177,7 @@ Status: untested.
 
 Tests: none.
 
-## `src/rlhf_platform/utils/__init__.py`
+## `src/rlpost/utils/__init__.py`
 
 Re-exports `telemetry`.
 

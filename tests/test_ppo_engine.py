@@ -1,4 +1,4 @@
-"""Unit tests for PPO trainer implementation (src/rlhf_platform/ppo_engine.py).
+"""Unit tests for PPO trainer implementation (src/rlpost/ppo_engine.py).
 
 Tests validate:
 - Generalized Advantage Estimation (GAE) computation
@@ -17,10 +17,10 @@ import pytest
 import torch
 import torch.nn as nn
 
-from rlhf_platform.config import (
+from rlpost.config import (
     TrainingConfig,
 )
-from rlhf_platform.ppo_engine import (
+from rlpost.ppo_engine import (
     GeneralizedAdvantageEstimation,
     PPOMetrics,
     PPOTrainer,

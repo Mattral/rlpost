@@ -423,7 +423,7 @@ class TrainingConfig(BaseConfig):
         description="Enable Weights & Biases experiment logging",
     )
     wandb_project: str = Field(
-        default="rlhf-platform",
+        default="rlpost",
         description="Weights & Biases project name",
     )
     wandb_entity: str | None = Field(
@@ -527,7 +527,7 @@ class TrainingConfig(BaseConfig):
             seed=42,
             device="cuda",
             log_to_wandb=True,
-            wandb_project="rlhf-platform-toy",
+            wandb_project="rlpost-toy",
             eval_steps=10,
             save_steps=20,
             save_total_limit=2,
@@ -596,12 +596,12 @@ class TrainingConfig(BaseConfig):
             TrainingConfig.
         """
         return cls(
-            run_name="rlhf_default_run",
-            output_dir="./outputs/default_run",
+            run_name="rlpost_default_run",
+            output_dir="./outputs/rlpost_default_run",
             seed=42,
             device="cuda",
             log_to_wandb=True,
-            wandb_project="rlhf-platform",
+            wandb_project="rlpost",
             eval_steps=500,
             save_steps=500,
             save_total_limit=5,

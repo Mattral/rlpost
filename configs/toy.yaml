@@ -3,7 +3,7 @@ output_dir: ./outputs/toy_run
 seed: 42
 device: cuda
 log_to_wandb: true
-wandb_project: rlhf-platform-toy
+wandb_project: rlpost-toy
 wandb_entity: null
 eval_steps: 10
 save_steps: 20

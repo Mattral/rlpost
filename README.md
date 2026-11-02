@@ -2,7 +2,7 @@
 
 Code for language-model post-training: supervised fine-tuning, a reward model, PPO, and DPO.
 
-The GitHub repository was renamed from [Improving-LLM-Models-with-RLHF-PPO-DPO](https://github.com/Mattral/Improving-LLM-Models-with-RLHF-PPO-DPO). The Python package is still `rlhf_platform`. Renaming the package is item S0.5 in [ROADMAP.md](ROADMAP.md).
+The repository was formerly [Improving-LLM-Models-with-RLHF-PPO-DPO](https://github.com/Mattral/Improving-LLM-Models-with-RLHF-PPO-DPO).
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11+-blue.svg)](pyproject.toml)
@@ -29,13 +29,13 @@ There is no coverage number in this README. A green coverage run has not been re
 
 | Path | What it is |
 | --- | --- |
-| `src/rlhf_platform/config.py` | Pydantic configs. `TrainingConfig.toy_mode()` and `from_yaml`. Tested in `tests/test_config.py`. |
-| `src/rlhf_platform/ppo_engine.py` | The only PPO implementation: `PPOTrainer`. GAE, a clipped policy loss, an unclipped value loss, entropy, and a KL term. `train_step` still gathers log-probabilities on the wrong axis. See S0.6. |
-| `src/rlhf_platform/dpo_engine.py` | `DPOTrainer`. The CLI does not call it. |
-| `src/rlhf_platform/sft_engine.py` | LoRA SFT through the Hugging Face `Trainer`. |
-| `src/rlhf_platform/reward_engine.py` | Preference reward-model trainer. |
-| `src/rlhf_platform/dataset.py` | Preference-pair loading. Toy mode slices Anthropic HH-RLHF to 1,000 rows when it builds the cache. |
-| `src/rlhf_platform/cli.py` | Four Typer commands. Two of them do not train. See below. |
+| `src/rlpost/config.py` | Pydantic configs. `TrainingConfig.toy_mode()` and `from_yaml`. Tested in `tests/test_config.py`. |
+| `src/rlpost/ppo_engine.py` | The only PPO implementation: `PPOTrainer`. GAE, a clipped policy loss, an unclipped value loss, entropy, and a KL term. `train_step` still gathers log-probabilities on the wrong axis. See S0.6. |
+| `src/rlpost/dpo_engine.py` | `DPOTrainer`. The CLI does not call it. |
+| `src/rlpost/sft_engine.py` | LoRA SFT through the Hugging Face `Trainer`. |
+| `src/rlpost/reward_engine.py` | Preference reward-model trainer. |
+| `src/rlpost/dataset.py` | Preference-pair loading. Toy mode slices Anthropic HH-RLHF to 1,000 rows when it builds the cache. |
+| `src/rlpost/cli.py` | Four Typer commands. Two of them do not train. See below. |
 | `train.py` | Exits with status 2. It does not call `PPOTrainer`. |
 | `configs/` | YAML for a toy run and a default run. |
 
@@ -54,7 +54,7 @@ loss = -logsigmoid(logits).mean()
 
 That is the DPO objective at sequence level. Parity with TRL, including the log-probability shift and the mask, is item S0.6. It is not done.
 
-`python -m rlhf_platform.cli run-dpo` prints a placeholder and exits 0. It does not construct `DPOTrainer`.
+`python -m rlpost.cli run-dpo` prints a placeholder and exits 0. It does not construct `DPOTrainer`.
 
 ## PPO
 
@@ -65,10 +65,10 @@ That is the DPO objective at sequence level. Parity with TRL, including the log-
 ## Command line
 
 ```bash
-python -m rlhf_platform.cli train-sft --config configs/toy.yaml
-python -m rlhf_platform.cli train-reward --config configs/toy.yaml
-python -m rlhf_platform.cli run-ppo --toy
-python -m rlhf_platform.cli run-dpo --toy
+python -m rlpost.cli train-sft --config configs/toy.yaml
+python -m rlpost.cli train-reward --config configs/toy.yaml
+python -m rlpost.cli run-ppo --toy
+python -m rlpost.cli run-dpo --toy
 ```
 
 `train-sft` builds `SFTTrainer` and calls `train`. `train-reward` builds `RewardModelTrainer` and calls `train`. Both will download models and the HH-RLHF dataset. Neither command has a recorded runtime in this repo.
@@ -88,7 +88,7 @@ That check used a virtualenv with the CPU wheel of torch 2.15.0 and current `pyd
 ## Layout
 
 ```
-src/rlhf_platform/     package (import name until S0.5)
+src/rlpost/            package
 configs/               toy and default YAML
 tests/                 CPU unit tests; the full run is not green
 docs/                  notes and older write-ups

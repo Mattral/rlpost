@@ -14,8 +14,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from rlhf_platform.config import TrainingConfig
-from rlhf_platform.dpo_engine import DPOMetrics, DPOTrainer
+from rlpost.config import TrainingConfig
+from rlpost.dpo_engine import DPOMetrics, DPOTrainer
 
 logger = logging.getLogger(__name__)
 
@@ -55,8 +55,8 @@ class TestDPOMetrics:
 class TestDPOTrainerInit:
     """Test DPOTrainer initialization."""
 
-    @patch("rlhf_platform.dpo_engine.AutoTokenizer.from_pretrained")
-    @patch("rlhf_platform.dpo_engine.AutoModelForCausalLM.from_pretrained")
+    @patch("rlpost.dpo_engine.AutoTokenizer.from_pretrained")
+    @patch("rlpost.dpo_engine.AutoModelForCausalLM.from_pretrained")
     def test_init_creates_trainer(self, mock_model, mock_tokenizer):
         """Test trainer initialization."""
         # Mock models
@@ -80,8 +80,8 @@ class TestDPOTrainerInit:
         assert trainer.beta == 0.1  # Default beta
         assert trainer.step_count == 0
 
-    @patch("rlhf_platform.dpo_engine.AutoTokenizer.from_pretrained")
-    @patch("rlhf_platform.dpo_engine.AutoModelForCausalLM.from_pretrained")
+    @patch("rlpost.dpo_engine.AutoTokenizer.from_pretrained")
+    @patch("rlpost.dpo_engine.AutoModelForCausalLM.from_pretrained")
     def test_reference_model_frozen(self, mock_model, mock_tokenizer):
         """Test that reference model gradients are disabled."""
         mock_tokenizer.return_value = MagicMock()
@@ -281,8 +281,8 @@ class TestDPOBetaParameter:
 class TestDPOGradientFlow:
     """Test gradient flow through DPO trainer."""
 
-    @patch("rlhf_platform.dpo_engine.AutoTokenizer.from_pretrained")
-    @patch("rlhf_platform.dpo_engine.AutoModelForCausalLM.from_pretrained")
+    @patch("rlpost.dpo_engine.AutoTokenizer.from_pretrained")
+    @patch("rlpost.dpo_engine.AutoModelForCausalLM.from_pretrained")
     def test_gradients_not_through_reference(self, mock_model, mock_tokenizer):
         """Test that gradients don't flow through frozen reference model."""
         # Mock tokenizer
@@ -406,8 +406,8 @@ class TestDPOBatchProcessing:
 class TestDPOConfiguration:
     """Test DPO integration with TrainingConfig."""
 
-    @patch("rlhf_platform.dpo_engine.AutoTokenizer.from_pretrained")
-    @patch("rlhf_platform.dpo_engine.AutoModelForCausalLM.from_pretrained")
+    @patch("rlpost.dpo_engine.AutoTokenizer.from_pretrained")
+    @patch("rlpost.dpo_engine.AutoModelForCausalLM.from_pretrained")
     def test_config_integration(self, mock_model, mock_tokenizer):
         """Test that DPO trainer respects configuration."""
         mock_tokenizer.return_value = MagicMock()
@@ -428,8 +428,8 @@ class TestDPOConfiguration:
         assert trainer.config.model.reference_model_id == config.model.reference_model_id
         assert trainer.config.optimization.learning_rate == config.optimization.learning_rate
 
-    @patch("rlhf_platform.dpo_engine.AutoTokenizer.from_pretrained")
-    @patch("rlhf_platform.dpo_engine.AutoModelForCausalLM.from_pretrained")
+    @patch("rlpost.dpo_engine.AutoTokenizer.from_pretrained")
+    @patch("rlpost.dpo_engine.AutoModelForCausalLM.from_pretrained")
     def test_custom_beta_from_config(self, mock_model, mock_tokenizer):
         """Test that custom beta parameter is read from config."""
         mock_tokenizer.return_value = MagicMock()
