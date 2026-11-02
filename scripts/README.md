@@ -2,7 +2,7 @@
 
 `train.py` lives at the repository root, not in this directory.
 
-`train.py` exits with status 2. S0.4 removed `DistributedPPOEngine`, and this script does not call `PPOTrainer`. The PPO update is `rlhf_platform.ppo_engine.PPOTrainer`. Connecting a run is S0.11 in `ROADMAP.md`.
+`train.py` exits with status 2. S0.4 removed `DistributedPPOEngine`, and this script does not call `PPOTrainer`. The PPO update is `rlpost.ppo_engine.PPOTrainer`. Connecting a run is S0.11 in `ROADMAP.md`.
 
 `python train.py` prints a message and exits 2. It does not train.
 

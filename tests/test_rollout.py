@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import torch
 import torch.nn as nn
 
-from rlhf_platform.alignment.rollout import (
+from rlpost.alignment.rollout import (
     Rollout,
     RolloutBuffer,
     RolloutCollator,

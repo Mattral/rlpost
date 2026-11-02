@@ -31,7 +31,7 @@ try:
 except ImportError:
     wandb = None
 
-from rlhf_platform.config import AlignmentConfig, OptimizationConfig, TrainingConfig
+from rlpost.config import AlignmentConfig, OptimizationConfig, TrainingConfig
 
 logger = logging.getLogger(__name__)
 

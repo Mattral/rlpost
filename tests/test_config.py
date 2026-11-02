@@ -1,4 +1,4 @@
-"""Unit tests for configuration engine (src/rlhf_platform/config.py).
+"""Unit tests for configuration engine (src/rlpost/config.py).
 
 Tests validate:
 - YAML loading and parsing
@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from rlhf_platform.config import (
+from rlpost.config import (
     AlignmentConfig,
     DatasetConfig,
     ModelConfig,

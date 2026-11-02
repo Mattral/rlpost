@@ -19,8 +19,8 @@ from transformers import (
     AutoTokenizer,
 )
 
-from rlhf_platform.config import ModelConfig, TrainingConfig
-from rlhf_platform.dataset import PreferencePairDataset, ToyDatasetLoader
+from rlpost.config import ModelConfig, TrainingConfig
+from rlpost.dataset import PreferencePairDataset, ToyDatasetLoader
 
 logger = logging.getLogger(__name__)
 

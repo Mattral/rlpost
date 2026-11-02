@@ -2,7 +2,7 @@
 
 This note is not a measured result. The module-by-module map, with tensor shapes and test status, is [CODE_MAP.md](../CODE_MAP.md).
 
-`train.py` exits with status 2. S0.4 removed `DistributedPPOEngine`. The PPO update is `PPOTrainer` in `src/rlhf_platform/ppo_engine.py`. Connecting a run is S0.11.
+`train.py` exits with status 2. S0.4 removed `DistributedPPOEngine`. The PPO update is `PPOTrainer` in `src/rlpost/ppo_engine.py`. Connecting a run is S0.11.
 
 What the remaining code does:
 
@@ -24,14 +24,14 @@ train.py
   exits 2. It does not import the modules below.
 
 The modules that still exist:
-  ├─ rlhf_platform.alignment.rollout
+  ├─ rlpost.alignment.rollout
   │   ├─ RolloutBuffer (CPU list, pin only if CUDA exists)
   │   └─ RolloutGenerator (autoregressive sampling)
   │
-  ├─ rlhf_platform.ppo_engine
+  ├─ rlpost.ppo_engine
   │   └─ PPOTrainer (the only PPO update)
   │
-  └─ rlhf_platform.utils.telemetry
+  └─ rlpost.utils.telemetry
       └─ RankAwareTelemetry (structured JSON logging)
 ```
 
@@ -42,6 +42,6 @@ The modules that still exist:
 | `train.py` | Exits 2. Does not call `PPOTrainer` |
 | `scripts/README.md` | Note for this directory |
 | `ROADMAP.md` | Work status, notes, and change log |
-| `src/rlhf_platform/alignment/rollout.py` | CPU rollout buffer and token sampler |
-| `src/rlhf_platform/ppo_engine.py` | `PPOTrainer`, the only PPO update |
-| `src/rlhf_platform/utils/telemetry.py` | JSON logging. No test calls it |
+| `src/rlpost/alignment/rollout.py` | CPU rollout buffer and token sampler |
+| `src/rlpost/ppo_engine.py` | `PPOTrainer`, the only PPO update |
+| `src/rlpost/utils/telemetry.py` | JSON logging. No test calls it |

@@ -19,8 +19,8 @@ from transformers import (
     TrainingArguments,
 )
 
-from rlhf_platform.config import ModelConfig, TrainingConfig
-from rlhf_platform.dataset import get_dataloader
+from rlpost.config import ModelConfig, TrainingConfig
+from rlpost.dataset import get_dataloader
 
 logger = logging.getLogger(__name__)
 

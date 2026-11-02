@@ -14,7 +14,7 @@ from typing import Iterator, Optional
 from datasets import Dataset, load_dataset
 from torch.utils.data import DataLoader, IterableDataset
 
-from rlhf_platform.config import DatasetConfig
+from rlpost.config import DatasetConfig
 
 logger = logging.getLogger(__name__)
 
