@@ -179,20 +179,26 @@ class TestPPOLosses:
 
         trainer = PPOTrainer(config, policy, value, reference, optimizer)
 
-        batch_size = 8
-        log_probs_new = torch.randn(batch_size)
-        log_probs_old = torch.randn(batch_size)
-        advantages = torch.randn(batch_size)
+        # Ratio 1 is inside the default clip, so the surrogate depends on logp_new.
+        log_probs_new = torch.zeros(4, requires_grad=True)
+        log_probs_old = torch.zeros(4, requires_grad=True)
+        advantages = torch.tensor([1.0, 1.0, 1.0, -1.0], requires_grad=True)
 
         loss, ratio = trainer.compute_policy_loss(log_probs_new, log_probs_old, advantages)
 
-        assert loss.shape == torch.Size([])  # Scalar
-        assert ratio.shape == (batch_size,)
+        assert loss.shape == torch.Size([])
+        assert ratio.shape == (4,)
         assert loss.requires_grad
+        loss.backward()
+        assert log_probs_new.grad is not None
+        assert log_probs_new.grad.abs().sum() > 0
+        assert log_probs_old.grad is None
+        assert advantages.grad is None
 
     def test_value_loss_computation(self) -> None:
-        """Verify value function loss computation."""
+        """Gradients of the value loss reach V and stop there."""
         config = TrainingConfig.toy_mode()
+        config.alignment.value_clip = 0.2
         policy = DummyModel()
         value = DummyValueModel()
         reference = DummyModel()
@@ -200,14 +206,20 @@ class TestPPOLosses:
 
         trainer = PPOTrainer(config, policy, value, reference, optimizer)
 
-        batch_size = 8
-        value_pred = torch.randn(batch_size)
-        returns = torch.randn(batch_size)
+        # Inside the clip, V_clip equals V, so the square depends on V.
+        value_pred = torch.tensor([1.0, 0.5], requires_grad=True)
+        returns = torch.zeros(2, requires_grad=True)
+        old_values = torch.tensor([1.0, 0.5], requires_grad=True)
 
-        loss = trainer.compute_value_loss(value_pred, returns)
+        loss = trainer.compute_value_loss(value_pred, returns, old_values)
 
-        assert loss.shape == torch.Size([])  # Scalar
+        assert loss.shape == torch.Size([])
         assert loss.requires_grad
+        loss.backward()
+        assert value_pred.grad is not None
+        assert value_pred.grad.abs().sum() > 0
+        assert returns.grad is None
+        assert old_values.grad is None
 
     def test_entropy_computation(self) -> None:
         """Verify entropy bonus computation."""

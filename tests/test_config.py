@@ -184,6 +184,26 @@ class TestAlignmentConfig:
         with pytest.raises(ValueError):
             config.dpo_beta = 0.0
 
+    def test_value_clip_optional_and_non_negative(self) -> None:
+        """value_clip is its own field. None is unclipped. A set radius is >= 0."""
+        config = AlignmentConfig()
+        assert config.value_clip is None
+        assert config.ppo_epsilon == 0.2
+
+        config = AlignmentConfig(value_clip=0.0, ppo_epsilon=0.2)
+        assert config.value_clip == 0.0
+        config = AlignmentConfig(value_clip=0.3, ppo_epsilon=0.1)
+        assert config.value_clip == 0.3
+        assert config.ppo_epsilon == 0.1
+
+        with pytest.raises(ValueError):
+            AlignmentConfig(value_clip=-0.1)
+        config = AlignmentConfig()
+        with pytest.raises(ValueError):
+            config.value_clip = -0.2
+        config.value_clip = None
+        assert config.value_clip is None
+
     def test_alignment_method_literal(self) -> None:
         """Verify alignment method is restricted to valid values."""
         for method in ["ppo", "dpo"]:
