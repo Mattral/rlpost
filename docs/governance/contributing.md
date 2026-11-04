@@ -18,7 +18,7 @@ pytest -q
 
 `pytest -q` skips tests marked `slow` or `gpu`. The job uses Python 3.12.
 
-Failures listed under S0.6 in `ROADMAP.md` stay red. Do not mark them xfail or skip.
+The S0.6d policy and value loss tests pass, and the CPU suite is green. Do not mark a failing test xfail or skip.
 
 ## Numbers
 

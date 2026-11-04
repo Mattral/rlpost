@@ -248,6 +248,7 @@ class AlignmentConfig(BaseConfig):
         gae_lambda: Smoothing parameter for GAE (lambda in GAE-lambda).
         entropy_coefficient: Weight of entropy regularization in policy loss.
         value_loss_coefficient: Weight of value function loss.
+        value_clip: Clip radius for the value loss. None keeps the half square error.
         advantage_normalization: Normalize advantages to zero-mean, unit-variance.
     """
 
@@ -305,6 +306,15 @@ class AlignmentConfig(BaseConfig):
         default=0.5,
         ge=0.0,
         description="Weight of value function loss in total objective",
+    )
+    value_clip: float | None = Field(
+        default=None,
+        ge=0.0,
+        description=(
+            "Value-loss clip radius c. V_clip = V_old + clip(V - V_old, -c, c). "
+            "None and a set radius both use coefficient * mean(0.5 * squared error). "
+            "When set, must be >= 0. This is not ppo_epsilon."
+        ),
     )
     advantage_normalization: bool = Field(
         default=True,
@@ -577,6 +587,7 @@ class TrainingConfig(BaseConfig):
                 gae_lambda=0.95,
                 entropy_coefficient=0.01,
                 value_loss_coefficient=0.5,
+                value_clip=None,
                 advantage_normalization=True,
             ),
             dataset=DatasetConfig(
@@ -652,6 +663,7 @@ class TrainingConfig(BaseConfig):
                 gae_lambda=0.95,
                 entropy_coefficient=0.01,
                 value_loss_coefficient=0.5,
+                value_clip=None,
                 advantage_normalization=True,
             ),
             dataset=DatasetConfig(

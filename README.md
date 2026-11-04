@@ -31,7 +31,7 @@ There is no coverage number in this README. A green coverage run has not been re
 | --- | --- |
 | `src/rlpost/config.py` | Pydantic configs. `TrainingConfig.toy_mode()` and `from_yaml`. Tested in `tests/test_config.py`. |
 | `src/rlpost/ops.py` | `gather_logprobs`: logits at position `t` score token `t+1`. Shape `[B, T, V]` in, `[B, T-1]` out. |
-| `src/rlpost/ppo_engine.py` | The only PPO implementation: `PPOTrainer`. GAE, a clipped policy loss, an unclipped value loss, entropy, and a KL term. `train_step` uses `gather_logprobs`. |
+| `src/rlpost/ppo_engine.py` | The only PPO implementation: `PPOTrainer`. GAE, a clipped policy loss, a value loss (unclipped unless `value_clip` is set), entropy, and a KL term. `train_step` uses `gather_logprobs`. |
 | `src/rlpost/dpo_engine.py` | `DPOTrainer`. The CLI does not call it. |
 | `src/rlpost/sft_engine.py` | LoRA SFT through the Hugging Face `Trainer`. |
 | `src/rlpost/reward_engine.py` | Preference reward-model trainer. |
@@ -64,9 +64,9 @@ Parity is against TRL 1.17.1 `DPOTrainer._compute_loss` (`loss_type` sigmoid, `l
 
 ## PPO
 
-`PPOTrainer` in `ppo_engine.py` is the only PPO implementation. The step is GAE, then a clipped probability ratio, an unclipped value loss, an entropy bonus, and a KL penalty. `compute_kl_divergence(policy_logits, ref_logits)` evaluates the full-vocabulary KL(reference || policy), `sum_a p_ref(a) (log p_ref(a) - log p_policy(a))`. The sampled-token estimators usually called k1, k2, and k3 are not implemented. Naming that estimator is S0.6e.
+`PPOTrainer` in `ppo_engine.py` is the only PPO implementation. The step is GAE, then a clipped probability ratio, a value loss, an entropy bonus, and a KL penalty. With `value_clip` unset, the value term is `value_loss_coefficient * mean(0.5 * (V - R)^2)`. With `value_clip = c` (`c >= 0`), it is `value_loss_coefficient * mean(0.5 * max((V - R)^2, (V_clip - R)^2))`, where `V_clip = V_old + clip(V - V_old, -c, c)`. A radius that never binds matches the unset loss. `c` is not `ppo_epsilon`. `compute_kl_divergence(policy_logits, ref_logits)` evaluates the full-vocabulary KL(reference || policy), `sum_a p_ref(a) (log p_ref(a) - log p_policy(a))`. The sampled-token estimators usually called k1, k2, and k3 are not implemented. Naming that estimator is S0.6e.
 
-`train_step` calls `gather_logprobs`. Logits at position `t` score token `t+1`, and the policy ratio uses those log-probabilities, shape `[B, T-1]`. The two step tests run on a tiny causal LM. Two PPO loss tests still fail; see S0.6d.
+`train_step` calls `gather_logprobs`. Logits at position `t` score token `t+1`, and the policy ratio uses those log-probabilities, shape `[B, T-1]`. The two step tests run on a tiny causal LM. The clipped surrogate, both value losses, and the entropy term are tested. The entropy scalar is the mean of TRL 1.17.1 `entropy_from_logits`.
 
 ## Command line
 

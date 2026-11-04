@@ -46,6 +46,7 @@ alignment:
   gae_lambda: 0.95
   entropy_coefficient: 0.01
   value_loss_coefficient: 0.5
+  value_clip: null
   advantage_normalization: true
 
 dataset:

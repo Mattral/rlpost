@@ -6,7 +6,7 @@ This is the only PPO implementation. The step is:
     A_t = delta_t + gamma * lambda * (1 - done_t) * A_{t+1}
     ratio_t = exp(log_pi_new(a_t) - log_pi_old(a_t))
     L = -mean(min(ratio * A, clip(ratio, 1-eps, 1+eps) * A))
-        + c_v * MSE(value, A + value)
+        + c_v * L_v
         - c_ent * entropy
         + beta * KL
 
@@ -19,7 +19,15 @@ log-prob of token ``t``. A padding mask of 0 removes that index from the
 backup. ``train_step`` does not pass one. ``compute_kl_divergence`` is the
 full-vocabulary KL(old || new). ``train_step`` passes (policy, reference),
 so the penalty is KL(reference || policy). Naming that estimator is S0.6e.
-The value loss is unclipped MSE. A clipped value loss is S0.6d.
+
+``V_clip`` is ``V_old + clip(V - V_old, -c, c)``. ``eps`` in the policy
+clip is ``ppo_epsilon``. ``c`` is the ``value_clip`` config field, not
+``ppo_epsilon``. Both value modes use the same one-half. When
+``value_clip`` is set, ``L_v`` is the mean of
+``0.5 * max((V - R)^2, (V_clip - R)^2)`` and ``train_step`` passes the
+batch values as ``V_old``. When ``value_clip`` is unset, ``L_v`` is
+``mean(0.5 * (V - R)^2)``. The loss functions do not take a padding
+mask. ``train_step`` still does not pass one. That mask stays in S0.7.
 """
 
 import logging
@@ -237,70 +245,113 @@ class PPOTrainer:
         log_probs_old: Tensor,
         advantages: Tensor,
     ) -> Tuple[Tensor, Tensor]:
-        """Compute PPO clipped surrogate objective loss.
+        """Compute the clipped surrogate.
 
-        Clipped objective:
-            L^CLIP(θ) = Ê_t [ min(r_t(θ)Â_t, clip(r_t(θ), 1-ε, 1+ε)Â_t) ]
+        ``r = exp(log_probs_new - log_probs_old)`` and
+
+            L = -mean(min(r * A, clip(r, 1-eps, 1+eps) * A))
+
+        ``eps`` is ``ppo_epsilon``. ``log_probs_old`` and ``advantages`` are
+        detached, so the gradient reaches ``log_probs_new`` only. No mask is
+        applied. Masking stays in S0.7.
 
         Args:
-            log_probs_new: Log probabilities from policy, shape (batch_size,)
-            log_probs_old: Log probabilities from old policy, shape (batch_size,)
-            advantages: GAE advantages, shape (batch_size,)
+            log_probs_new: Current action log-probs. Any shape that matches the
+                other two arguments.
+            log_probs_old: Rollout action log-probs, same shape.
+            advantages: Advantages for those actions, same shape.
 
         Returns:
-            loss: Clipped PPO loss (scalar, to minimize)
-            ratio: Probability ratios for diagnostic
+            loss: Scalar to minimize.
+            ratio: ``r``, same shape as the inputs.
         """
-        # Probability ratio: r_t(θ) = π_new / π_old
-        ratio = torch.exp(log_probs_new - log_probs_old)
-
-        # Clipped surrogate objective
-        surr1 = ratio * advantages
-        surr2 = (
-            torch.clamp(
-                ratio,
-                1.0 - self.alignment_config.ppo_epsilon,
-                1.0 + self.alignment_config.ppo_epsilon,
+        if log_probs_new.shape != log_probs_old.shape or advantages.shape != log_probs_new.shape:
+            raise ValueError(
+                "shape mismatch: "
+                f"log_probs_new {tuple(log_probs_new.shape)}, "
+                f"log_probs_old {tuple(log_probs_old.shape)}, "
+                f"advantages {tuple(advantages.shape)}"
             )
-            * advantages
-        )
-
-        # Take minimum: discourages large changes
-        policy_loss = -torch.min(surr1, surr2).mean()
-
-        return policy_loss, ratio
+        log_probs_old = log_probs_old.detach()
+        advantages = advantages.detach()
+        ratio = torch.exp(log_probs_new - log_probs_old)
+        epsilon = self.alignment_config.ppo_epsilon
+        unclipped = ratio * advantages
+        clipped = ratio.clamp(1.0 - epsilon, 1.0 + epsilon) * advantages
+        return -torch.min(unclipped, clipped).mean(), ratio
 
     def compute_value_loss(
         self: "PPOTrainer",
         value_pred: Tensor,
         returns: Tensor,
+        old_values: Tensor | None = None,
     ) -> Tensor:
         """Compute the critic loss.
 
-        Mean squared error, multiplied by ``value_loss_coefficient``.
-        There is no value clip.
+        ``returns`` and ``old_values`` are detached, so the gradient reaches
+        ``value_pred`` only. No mask is applied.
+
+        Both modes return ``value_loss_coefficient * L_v``. ``L_v`` always
+        includes the one-half. When ``value_clip`` is unset, ``old_values``
+        is not used and
+
+            L_v = mean(0.5 * (V - R)^2)
+
+        When ``value_clip`` is a radius ``c >= 0``, ``old_values`` is required
+        and
+
+            V_clip = V_old + clip(V - V_old, -c, c)
+            L_v = mean(0.5 * max((V - R)^2, (V_clip - R)^2))
+
+        A radius that does not bind matches the unset loss. ``c`` is not
+        ``ppo_epsilon``.
 
         Args:
-            value_pred: Predicted values from critic, shape (batch_size,)
-            returns: Bootstrapped returns (targets), shape (batch_size,)
+            value_pred: Current critic values ``V``.
+            returns: Targets ``R``, same shape as ``value_pred``.
+            old_values: Rollout values ``V_old``. Required when ``value_clip``
+                is set. Same shape as ``value_pred``.
 
         Returns:
-            loss: Value function loss (scalar, to minimize)
+            loss: Scalar to minimize.
         """
-        value_loss = F.mse_loss(value_pred, returns)
-        return value_loss * self.alignment_config.value_loss_coefficient
+        if value_pred.shape != returns.shape:
+            raise ValueError(
+                "shape mismatch: "
+                f"value_pred {tuple(value_pred.shape)}, returns {tuple(returns.shape)}"
+            )
+        returns = returns.detach()
+        coefficient = self.alignment_config.value_loss_coefficient
+        squared_error = (value_pred - returns).square()
+        clip = self.alignment_config.value_clip
+        if clip is not None:
+            if old_values is None:
+                raise ValueError("value_clip is set; old_values is required")
+            if old_values.shape != value_pred.shape:
+                raise ValueError(
+                    "shape mismatch: "
+                    f"value_pred {tuple(value_pred.shape)}, "
+                    f"old_values {tuple(old_values.shape)}"
+                )
+            old_values = old_values.detach()
+            value_clipped = old_values + (value_pred - old_values).clamp(-clip, clip)
+            clipped = (value_clipped - returns).square()
+            squared_error = torch.maximum(squared_error, clipped)
+        return squared_error.mean() * 0.5 * coefficient
 
     def compute_entropy_bonus(self: "PPOTrainer", logits: Tensor) -> Tensor:
-        """Compute entropy regularization bonus to prevent policy collapse.
+        """Mean per-row Shannon entropy of the action distribution.
 
-        Entropy = -Σ p(a) log p(a), summed over action space.
-        Higher entropy = more exploratory policy.
+        For each row, ``H = -sum_a softmax(logits)_a * log_softmax(logits)_a``.
+        The scalar is the mean of those rows. That per-row value is the same
+        quantity as ``trl.trainer.utils.entropy_from_logits`` in TRL 1.17.1.
+        This module does not import TRL. No mask is applied.
 
         Args:
-            logits: Action logits from policy model, shape (batch_size, num_actions)
+            logits: Action logits, shape ``[..., num_actions]``.
 
         Returns:
-            entropy: Mean entropy across batch (scalar)
+            entropy: Mean entropy (scalar, nats).
         """
         log_probs = F.log_softmax(logits, dim=-1)
         probs = torch.exp(log_probs)
@@ -467,7 +518,9 @@ class PPOTrainer:
         policy_loss, ratio = self.compute_policy_loss(
             token_logprobs, old_log_probs, action_advantages
         )
-        value_loss = self.compute_value_loss(value_pred, returns)
+        # batch["values"] is V_old. compute_value_loss uses it only when
+        # value_clip is set. No padding mask is passed. That stays in S0.7.
+        value_loss = self.compute_value_loss(value_pred, returns, values)
         entropy = self.compute_entropy_bonus(policy_logits)
         kl_div = self.compute_kl_divergence(policy_logits, ref_logits)
 
