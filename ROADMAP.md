@@ -286,8 +286,8 @@ The exit criteria for Stage 0:
 
 ### S0.6 Numerical parity tests (core correctness)
 For each check below, compare against TRL (pinned version) or a closed-form computation,
-on a tiny model on CPU, with an explicit tolerance. Split into S0.6a–e. A bug found
-here is a result.
+on a tiny model on CPU, with an explicit tolerance. Split into S0.6a–f. A bug found
+here is a result. S0.6f is optional and does not change the order of S0.6b–e.
 
 ### [x] S0.6a Per-token logprob gather
 - Depends on: S0.5b.
@@ -371,6 +371,23 @@ here is a result.
   KL(reference || policy).
 - Notes:
 
+### [ ] S0.6f fp32 logsumexp gather (optional, before Stage 1)
+- Depends on: S0.6a. Optional. It does not block S0.6b–e or S0.7. Land it before
+  Stage 1.
+- Inside `gather_logprobs`, upcast the shifted logits to fp32 and return
+  `gathered_logit - logsumexp` over the vocabulary. Do not materialize the
+  `[B, T-1, V]` log-probability tensor.
+- Re-measure the bf16 tolerance against the fp32 gather, and record the peak
+  memory difference on the tiny model (2 layers, hidden 32, vocab 128).
+- Notes:
+  - 2026-11-04, recorded only, from main `2200c69` (merge of PR #18). No code
+    change. `gather_logprobs` still calls `F.log_softmax` on the shifted logits
+    and gathers, which builds a `[B, T-1, V]` tensor. The S0.6a bf16 absolute
+    tolerance is `2e-2`. On CPU, torch 2.15, that Llama, the max absolute gap
+    was 0.0173. That figure stays the S0.6a result. S0.6f records a new bf16
+    tolerance for the logsumexp gather, and the peak-memory difference against
+    this gather. Those two numbers are not measured yet.
+
 ### [ ] S0.7 Classic RLHF edge-case tests
 Cover:
 - prompt-token masking in the loss
@@ -387,6 +404,17 @@ Cover:
   - The causal logprob shift is tested in S0.6a. This item still owns prompt-token
     masking, padding in the loss, EOS, reward position, reference gradients, which
     tokens the KL uses, and advantage normalisation over padding.
+  - 2026-11-04, on main `2200c69`. `PPOTrainer.train_step` applies no mask.
+    `ppo_engine.py` reads no attention mask, response mask, or prompt length.
+    The policy loss is the mean of the clipped surrogate over every scored
+    token, shape `[B, T-1]`. Entropy and the KL term are means over the full
+    logits `[B, T, V]`. Prompt tokens and padding tokens are inside the policy
+    loss, the entropy, and the KL.
+  - The target is response-token-only masking. Write the tests so they require
+    that mask and fail on the behavior above. Do not change `train_step` before
+    those tests exist. DPO `compute_log_probs` already multiplies by
+    `attention_mask[:, 1:]` and still averages prompt tokens; that prompt mask
+    stays in this item.
 
 ### [ ] S0.8 Determinism and resumable checkpoints
 - Seeding gives identical losses on CPU for 2 runs.
@@ -677,3 +705,4 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-11-02 · S0.5b · Dependencies are the imported packages. The test extra pins TRL 1.17.1. CI installs that extra under the CPU lock. The 11 known failures are unchanged. · 87efbe5
 - 2026-11-02 · S0.5b · Project URLs point at Mattral/rlpost. Pascal installs torch==2.14.1 from the cu126 index. The package floor stays torch>=2.15. · #17
 - 2026-11-04 · S0.6a · One shifted logprob gather, parity-tested against TRL 1.17.1 selective_log_softmax. The two train_step tests pass. Nine older failures remain. · 48c6e03
+- 2026-11-04 · S0.7 · Notes only. PPO train_step applies no mask. Policy loss, entropy, and KL include prompt and padding tokens. The target is response-token-only masking, with tests that fail on that behavior. Added optional S0.6f, an fp32 logsumexp gather before Stage 1. · b1abaff
