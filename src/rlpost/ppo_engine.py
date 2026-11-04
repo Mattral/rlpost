@@ -10,8 +10,9 @@ This is the only PPO implementation. The step is:
         - c_ent * entropy
         + beta * KL
 
-``train_step`` gathers token log-probabilities on dimension 1. That is wrong,
-and it is left for S0.6a. ``compute_kl_divergence`` is the full-vocabulary
+``train_step`` reads token log-probabilities from ``gather_logprobs``:
+logits at position ``t`` score token ``t + 1``, and the result has shape
+``[B, T - 1]``. ``compute_kl_divergence`` is the full-vocabulary
 KL(old || new). ``train_step`` passes (policy, reference), so the penalty is
 KL(reference || policy). Naming that estimator is S0.6e. The value loss is
 unclipped MSE. A clipped value loss is S0.6d.
@@ -32,6 +33,7 @@ except ImportError:
     wandb = None
 
 from rlpost.config import AlignmentConfig, OptimizationConfig, TrainingConfig
+from rlpost.ops import gather_logprobs
 
 logger = logging.getLogger(__name__)
 
@@ -375,7 +377,8 @@ class PPOTrainer:
                 - "values": Bootstrapped values, shape (batch_size,)
                 - "next_values": Next-step values, shape (batch_size,)
                 - "dones": Episode termination flags, shape (batch_size,)
-            old_log_probs: Log probs from reference policy, shape (batch_size,)
+            old_log_probs: Log-probs of tokens ``1 .. T-1`` under the old policy,
+                shape ``[B, T - 1]``, matching ``gather_logprobs``.
 
         Returns:
             metrics: PPOMetrics container with all training metrics
@@ -415,17 +418,22 @@ class PPOTrainer:
             adv_std = advantages.std() + 1e-8
             advantages = (advantages - adv_mean) / adv_std
 
-        # Get new log probs.
-        # S0.6a: this gather is the known bug. It is not fixed here.
-        # input_ids is [B, T], so the index is [B, T, 1]. gather uses dimension 1.
-        # DummyModel logits are [B, V], and the index rank does not match.
-        # Causal-LM logits are [B, T, V]. Dimension 1 is time, not vocabulary,
-        # and there is no shift (logits at t predict token t+1).
-        log_probs_new = F.log_softmax(policy_logits, dim=-1)
-        log_probs_action = log_probs_new.gather(1, input_ids.unsqueeze(-1)).squeeze(-1)
+        # Token log-probs, shape [B, T-1]. Index t scores input_ids[:, t+1].
+        # GAE advantages stay aligned with input positions [B, T]. The ratio
+        # uses the advantages of the scored tokens, advantages[:, 1:].
+        # No mask is applied here.
+        token_logprobs = gather_logprobs(policy_logits, input_ids)
+        if old_log_probs.shape != token_logprobs.shape:
+            raise ValueError(
+                f"old_log_probs shape {tuple(old_log_probs.shape)} must match "
+                f"gathered logprobs {tuple(token_logprobs.shape)}"
+            )
+        action_advantages = advantages[:, 1:]
 
         # Compute all losses
-        policy_loss, ratio = self.compute_policy_loss(log_probs_action, old_log_probs, advantages)
+        policy_loss, ratio = self.compute_policy_loss(
+            token_logprobs, old_log_probs, action_advantages
+        )
         value_loss = self.compute_value_loss(value_pred, returns)
         entropy = self.compute_entropy_bonus(policy_logits)
         kl_div = self.compute_kl_divergence(policy_logits, ref_logits)

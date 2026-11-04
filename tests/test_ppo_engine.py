@@ -16,10 +16,12 @@ import math
 import pytest
 import torch
 import torch.nn as nn
+from tests.tiny_lm import VOCAB, tiny_causal_lm
 
 from rlpost.config import (
     TrainingConfig,
 )
+from rlpost.ops import gather_logprobs
 from rlpost.ppo_engine import (
     GeneralizedAdvantageEstimation,
     PPOMetrics,
@@ -374,73 +376,89 @@ class TestMetricsComputation:
         assert metrics.entropy > 0
 
 
+class _TokenValue(nn.Module):
+    """Per-position value, shape [B, T]. No sequence pooling."""
+
+    def __init__(self, vocab: int = VOCAB, hidden: int = 32) -> None:
+        super().__init__()
+        self.embed = nn.Embedding(vocab, hidden)
+        self.proj = nn.Linear(hidden, 1)
+
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.proj(self.embed(input_ids)).squeeze(-1)
+
+
+def _causal_train_batch(seed: int = 0) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+    torch.manual_seed(seed)
+    batch_size, seq_len = 2, 8
+    input_ids = torch.randint(0, VOCAB, (batch_size, seq_len))
+    reference = tiny_causal_lm(seed + 1)
+    with torch.no_grad():
+        old_log_probs = gather_logprobs(reference(input_ids).logits, input_ids)
+    batch = {
+        "input_ids": input_ids,
+        "rewards": torch.randn(batch_size, seq_len),
+        "values": torch.randn(batch_size, seq_len),
+        "next_values": torch.randn(batch_size, seq_len),
+        "dones": torch.zeros(batch_size, seq_len),
+    }
+    return batch, old_log_probs
+
+
 class TestTrainStep:
-    """Integration tests for training step."""
+    """Integration tests for training step on a tiny causal LM."""
 
     def test_train_step_updates_weights(self) -> None:
         """Verify train_step actually updates model weights."""
         config = TrainingConfig.toy_mode()
-        policy = DummyModel()
-        value = DummyValueModel()
-        reference = DummyModel()
+        config.log_to_wandb = False
+        policy = tiny_causal_lm(0)
+        policy.train()
+        value = _TokenValue()
+        reference = tiny_causal_lm(1)
         optimizer = torch.optim.Adam(
             list(policy.parameters()) + list(value.parameters()),
-            lr=config.optimization.learning_rate,
+            lr=1e-2,
         )
 
         trainer = PPOTrainer(config, policy, value, reference, optimizer)
+        initial_weights = [p.detach().clone() for p in policy.parameters()]
+        batch, old_log_probs = _causal_train_batch()
 
-        # Save initial weights
-        initial_weights = [p.clone() for p in policy.parameters()]
+        trainer.train_step(batch, old_log_probs)
 
-        # Create batch
-        batch_size, seq_len = 4, 8
-        batch = {
-            "input_ids": torch.randint(0, 50257, (batch_size, seq_len)),
-            "rewards": torch.randn(batch_size, seq_len),
-            "values": torch.randn(batch_size, seq_len),
-            "next_values": torch.randn(batch_size, seq_len),
-            "dones": torch.zeros(batch_size, seq_len),
-        }
-        old_log_probs = torch.randn(batch_size, seq_len)
-
-        # Train step
-        metrics = trainer.train_step(batch, old_log_probs)
-
-        # Check weights changed
-        for initial, current in zip(initial_weights, policy.parameters()):
-            assert not torch.allclose(initial, current, atol=1e-5)
-
-        assert metrics.global_step == 0  # Metrics computed before step increment
+        changed = [
+            not torch.allclose(initial, current, atol=1e-6)
+            for initial, current in zip(initial_weights, policy.parameters())
+        ]
+        assert any(changed)
+        assert trainer.global_step == 1
 
     def test_train_step_returns_metrics(self) -> None:
-        """Verify train_step returns valid metrics."""
+        """Verify train_step returns finite metrics from a causal LM."""
         config = TrainingConfig.toy_mode()
-        policy = DummyModel()
-        value = DummyValueModel()
-        reference = DummyModel()
-        optimizer = torch.optim.Adam(list(policy.parameters()) + list(value.parameters()))
+        config.log_to_wandb = False
+        policy = tiny_causal_lm(2)
+        policy.train()
+        value = _TokenValue()
+        reference = tiny_causal_lm(3)
+        optimizer = torch.optim.Adam(
+            list(policy.parameters()) + list(value.parameters()),
+            lr=1e-2,
+        )
 
         trainer = PPOTrainer(config, policy, value, reference, optimizer)
-
-        batch_size, seq_len = 4, 8
-        batch = {
-            "input_ids": torch.randint(0, 50257, (batch_size, seq_len)),
-            "rewards": torch.randn(batch_size, seq_len),
-            "values": torch.randn(batch_size, seq_len),
-            "next_values": torch.randn(batch_size, seq_len),
-            "dones": torch.zeros(batch_size, seq_len),
-        }
-        old_log_probs = torch.randn(batch_size, seq_len)
+        batch, old_log_probs = _causal_train_batch(seed=4)
 
         metrics = trainer.train_step(batch, old_log_probs)
 
         assert isinstance(metrics, PPOMetrics)
-        assert metrics.policy_loss > 0
+        assert math.isfinite(metrics.policy_loss)
         assert metrics.value_loss > 0
         assert metrics.entropy > 0
         assert metrics.kl_divergence >= 0
-        assert -1 <= metrics.explained_variance <= 1
+        assert math.isfinite(metrics.explained_variance)
+        assert metrics.explained_variance <= 1
 
 
 if __name__ == "__main__":
