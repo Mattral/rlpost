@@ -1,7 +1,10 @@
-# Pinned CPU test environment used by CI.
-# This is not the dependency list in pyproject.toml. That list still pins an
-# older stack (transformers==4.32.0, trl==0.5.0, triton, bitsandbytes) which
-# this job does not install.
+# Constraints for the CPU CI job.
+# The job runs:
+#   pip install -e ".[test]" -c requirements-cpu.txt \
+#     --extra-index-url https://download.pytorch.org/whl/cpu
+# numpy is constrained because the job resolves it transitively. The package
+# does not import numpy. accelerate is constrained because trl requires it.
+# The package does not import accelerate.
 --extra-index-url https://download.pytorch.org/whl/cpu
 
 torch==2.15.0+cpu
@@ -13,3 +16,4 @@ numpy==2.5.4
 transformers==5.22.0
 datasets==5.1.0
 accelerate==1.15.0
+trl==1.17.1

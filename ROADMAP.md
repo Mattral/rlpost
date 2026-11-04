@@ -232,6 +232,58 @@ The exit criteria for Stage 0:
     venv, `pip install -e . --no-deps`, installed `rlpost` 0.1.0.
     `python -c "import rlpost"` loaded `src/rlpost/__init__.py`.
 
+### [x] S0.5b One dependency truth
+- Depends on: S0.5.
+- `[project.dependencies]` lists only packages the code imports, with lower bounds the
+  CPU lock satisfies. `pydantic` is declared. Packages nothing imports are not required.
+- `[test]` pins pytest, ruff, and TRL. `[lora]` is peft. The three freeze files are
+  deleted. CI installs `.[test]` under `requirements-cpu.txt`.
+- Notes:
+  - 2026-11-02: branched from `origin/main` `5f8b6e1` (merge of PR #16).
+    Branch `chore/S0.5b-dependency-truth`.
+  - Direct imports: torch, transformers, datasets, pydantic, PyYAML, typer, rich.
+    peft is imported by `sft_engine.py` and `reward_engine.py`, so it is the `[lora]`
+    extra (`peft>=0.17`). wandb is imported inside `try` / `except ImportError` and
+    stays optional. numpy, accelerate, bitsandbytes, triton, safetensors, tensorboard,
+    and tokenizers are not imported. `BitsAndBytesConfig` comes from transformers.
+  - `[dev]`, `[eval]`, and `[docs]` named tools nothing in the tree imports. They are
+    removed so the extras are not a second dependency list.
+  - `[test]` pins `pytest==9.2.0`, `ruff==0.17.3`, and `trl==1.17.1`. TRL 1.17.1
+    requires Python >=3.11, `transformers>=4.56.2` (no upper bound; 5.22.0 satisfies
+    it), `torch>=2.6.0`, `datasets>=4.7.0`, `accelerate>=1.11.0`, and `numpy>=1.26`.
+    The CPU lock already has transformers 5.22.0, torch 2.15.0+cpu, datasets 5.1.0,
+    and accelerate 1.15.0.
+  - `requirements.txt`, `requirements-fine-tune.txt`, and `requirements-reward.txt`
+    are deleted. The S0.9c note that names them stays as history.
+  - numpy stays pinned only in `requirements-cpu.txt` (`numpy==2.5.4`, Python >=3.12).
+    That pin is why the CI job stays on 3.12. An unconstrained `pip install -e ".[test]"`
+    does not force it, so Python 3.11 can resolve.
+  - Fresh venvs, `pip install -e ".[test]"` (no constraints file):
+    Python 3.11.18 resolved trl 1.17.1, transformers 5.22.1, torch 2.15.0+cu132,
+    datasets 5.1.0, numpy 2.4.6. Python 3.12.3 resolved trl 1.17.1,
+    transformers 5.22.1, torch 2.15.0+cu132, datasets 5.1.0, numpy 2.5.4.
+    `python -c "import rlpost, trl"` loaded `src/rlpost/__init__.py` on both.
+    Ruff check and ruff format check pass on both. Pytest collects 79
+    (37 + 17 + 22 + 3), 68 passed, 11 failed. The 11 names are the ones
+    already listed under S0.6.
+  - The same install under `requirements-cpu.txt` and the CPU torch index, on
+    Python 3.12.3, resolved trl 1.17.1, transformers 5.22.0, torch 2.15.0+cpu.
+    Ruff passes. Pytest is the same 79 / 68 / 11.
+  - `python -c "import rlpost.cli"` in the test extra raises
+    `ModuleNotFoundError: peft`. The CLI imports the trainers at import time.
+    That coupling is recorded under S0.11. It is not changed here.
+  - typer and rich are required because `cli.py` imports them. They are not
+    pinned in the CPU lock. The 3.12 CPU install resolved typer 0.27.3 and
+    rich 15.0.0.
+  - Project URLs are `https://github.com/Mattral/rlpost`, the repository URL
+    with `.git`, and the issues URL. The Documentation URL is removed. There
+    is no readthedocs site.
+  - `pip download torch==2.15.0 --index-url https://download.pytorch.org/whl/cu126 --no-deps`
+    finds no file. The index lists cu126 wheels from 2.6.0 through 2.14.1.
+    The newest stable wheel is `torch==2.14.1` (cp311 and cp312 manylinux
+    wheels answer HTTP 200). The package floor stays `torch>=2.15`. Tests
+    were not re-run on 2.14.1. `docs/DEVELOPMENT.md` names that Pascal install.
+
 ### [ ] S0.6 Numerical parity tests (core correctness)
 For each check below, compare against TRL (pinned version) or a closed-form computation,
 on a tiny model on CPU, with an explicit tolerance:
@@ -275,6 +327,10 @@ Split into S0.6a–e if needed. Record any discrepancy found in Notes. A bug fou
     reason not to keep that engine unchanged.
   - S0.6e: the current penalty is full-vocabulary KL(ref || policy); the expected target
     is KL(policy || ref) on sampled tokens with a named estimator.
+  - S0.5b pins the parity target at `trl==1.17.1`. That release requires
+    `transformers>=4.56.2` (no upper bound; transformers 5.22.0 satisfies it),
+    `torch>=2.6.0`, `datasets>=4.7.0`, and `accelerate>=1.11.0`. Parity in this item
+    is measured against that pin. Not implemented here.
 
 ### [ ] S0.7 Classic RLHF edge-case tests
 Cover:
@@ -305,6 +361,14 @@ Cover:
 - Notes:
   - SFT and the reward model read undeclared config fields (`lora_target_modules`,
     `dataset_size`). Declare and validate them as part of S0.11.
+  - PEFT is the optional `[lora]` extra (`peft>=0.17`). `sft_engine.py` and
+    `reward_engine.py` import it. No test calls those trainers, so the extra is
+    unverified. `cli.py` imports both trainers at import time, so
+    `python -m rlpost.cli` needs the extra. `import rlpost` does not.
+  - Hugging Face `Trainer` needs `accelerate` at runtime. `sft_engine.py`
+    constructs `Trainer`. The reward model is on the same SFT/reward path.
+    S0.11 must declare `accelerate` for that path, in the `[lora]` extra or in
+    a `[train]` extra. It is not a project dependency today.
 
 ### [x] S0.9 Delete the orphaned distributed scaffolding
 - Branch: `chore/S0.9-delete-distributed`.
@@ -461,6 +525,9 @@ Cover:
 - Use the cu126 wheel, fp32, a tiny model, and run 20 steps each of SFT, DPO and PPO.
 - This catches device and dtype bugs only. **It is not a benchmark.**
 - Notes:
+  - 2026-11-02: the cu126 index has no torch 2.15.0 wheel. The newest stable
+    wheel is `torch==2.14.1`. `docs/DEVELOPMENT.md` names that install. The
+    package floor stays `torch>=2.15`.
 
 ---
 
@@ -565,3 +632,5 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-10-30 · S0.9c · Owner decision: deleted philosophy.md and governance/security.md, added SECURITY.md, and rewrote the deep dive and DEVELOPMENT.md. The grep matches this file, and LICENSE on the substring inside "reproduction". · 116dd75
 - 2026-10-30 · S0.9c · Rewrote contributing.md to the CPU CI job. The unused mypy config is gone, so the governance grep matches only this file. · a90d4de
 - 2026-11-02 · S0.5 · The package, project name, and CLI path are rlpost. No shim. The default run is rlpost_default_run. · 2bf145a
+- 2026-11-02 · S0.5b · Dependencies are the imported packages. The test extra pins TRL 1.17.1. CI installs that extra under the CPU lock. The 11 known failures are unchanged. · 87efbe5
+- 2026-11-02 · S0.5b · Project URLs point at Mattral/rlpost. Pascal installs torch==2.14.1 from the cu126 index. The package floor stays torch>=2.15. · #17

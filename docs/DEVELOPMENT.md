@@ -9,18 +9,25 @@ git clone https://github.com/Mattral/rlpost.git
 cd rlpost
 ```
 
-`pyproject.toml` says `requires-python` is `>=3.11`. The CPU job uses Python 3.12, because `requirements-cpu.txt` pins `numpy==2.5.4`, which requires Python 3.12 or newer.
+`pyproject.toml` says `requires-python` is `>=3.11`. The CPU job uses Python 3.12, because `requirements-cpu.txt` pins `numpy==2.5.4`, which requires Python 3.12 or newer. The package does not import numpy. The pin stays in the lock so the job resolves one version.
 
 ## CPU tests
 
-The CI job installs the CPU file, then the package without pulling the older pins in `pyproject.toml`:
+Install the package and the `[test]` extra under the CPU lock:
 
 ```bash
-python -m pip install -r requirements-cpu.txt
-pip install -e . --no-deps
+python -m pip install -e ".[test]" -c requirements-cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu
 ```
 
-`requirements-cpu.txt` pins `torch==2.15.0+cpu` from the CPU wheel index, plus pytest, ruff, pydantic, PyYAML, numpy, transformers, datasets, and accelerate.
+`requirements-cpu.txt` pins `torch==2.15.0+cpu` from the CPU wheel index, plus pytest, ruff, pydantic, PyYAML, numpy, transformers, datasets, accelerate, and `trl==1.17.1`.
+
+Without the lock, the same extra is:
+
+```bash
+pip install -e ".[test]"
+```
+
+That command resolves torch from PyPI. The `[lora]` extra adds `peft` for the SFT and reward trainers. Weights & Biases is optional: the engines import it only when it is installed.
 
 Then:
 
@@ -36,17 +43,19 @@ The failures that are still red are listed under S0.6 in [ROADMAP.md](../ROADMAP
 
 ## CI
 
-`.github/workflows/ci.yml` has one job, `CPU torch, ruff, pytest`. It runs on pull requests and on pushes to `main`. The steps are Python 3.12, `requirements-cpu.txt`, `pip install -e . --no-deps`, `ruff check`, `ruff format --check`, and `pytest -q -m "not slow and not gpu"`.
+`.github/workflows/ci.yml` has one job, `CPU torch, ruff, pytest`. It runs on pull requests and on pushes to `main`. The steps are Python 3.12, `pip install -e ".[test]" -c requirements-cpu.txt` with the CPU torch index, `ruff check`, `ruff format --check`, and `pytest -q -m "not slow and not gpu"`. The install pulls the dependencies declared on the package.
 
 ## Pascal GPUs
 
 A Pascal GPU (compute capability sm_61) needs the cu126 PyTorch wheel. PyTorch builds for CUDA 12.8 and newer dropped Pascal.
 
+The cu126 index has no `torch==2.15.0` wheel. The newest stable wheel on that index is `2.14.1`:
+
 ```bash
-pip install torch --index-url https://download.pytorch.org/whl/cu126
+pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cu126
 ```
 
-That wheel is for fp32 smoke tests on a tiny model. It is not a benchmark. The default test run stays on CPU.
+The package floor stays `torch>=2.15`. That floor was checked on torch 2.15. `torch==2.14.1` is the Pascal wheel for fp32 smoke tests on a tiny model. It is not a benchmark. The default test run stays on CPU.
 
 ## Commands
 

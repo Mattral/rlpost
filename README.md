@@ -81,9 +81,15 @@ python -m rlpost.cli run-dpo --toy
 
 ## Install
 
-`pyproject.toml` pins an old stack, including `transformers==4.32.0`, `trl==0.5.0`, `bitsandbytes==0.41.1`, and `triton==3.7.0`. `pip install -e .` was not run for the check in Measured scope.
+Required packages are the ones the code imports: torch, transformers, datasets, pydantic, PyYAML, typer, and rich. Lower bounds are in `pyproject.toml`. They accept the versions in `requirements-cpu.txt`.
 
-That check used a virtualenv with the CPU wheel of torch 2.15.0 and current `pydantic`, `pytest`, `pyyaml`, `transformers`, and `datasets`, imported via `PYTHONPATH=src`.
+```bash
+pip install -e ".[test]"
+```
+
+`[test]` pins pytest 9.2.0, ruff 0.17.3, and TRL 1.17.1. `[lora]` adds peft for the SFT and reward trainers. The CPU job installs `.[test]` under `requirements-cpu.txt` and the CPU torch index. See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+
+The measured-scope check above used a virtualenv with the CPU wheel of torch 2.15.0 and `PYTHONPATH=src`. It did not run `pip install -e .`.
 
 ## Layout
 

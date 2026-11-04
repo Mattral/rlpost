@@ -27,46 +27,29 @@ classifiers = [
 ]
 
 dependencies = [
-    "torch>=2.0.0",
-    "transformers==4.32.0",
-    "tokenizers==0.13.3",
-    "safetensors==0.3.2",
-    "accelerate==0.22.0",
-    "datasets==2.14.4",
-    "peft==0.5.0",
-    "trl==0.5.0",
-    "bitsandbytes==0.41.1",
-    "triton==3.7.0",
+    "torch>=2.15",
+    "transformers>=5.22",
+    "datasets>=5.1",
+    "pydantic>=2.14",
     "pyyaml>=6.0",
-    "numpy>=1.24.0",
-    "tensorboard>=2.13.0",
+    "typer>=0.12",
+    "rich>=13",
 ]
 
 [project.optional-dependencies]
-dev = [
-    "pytest>=7.0",
-    "pytest-cov>=4.0",
-    "black>=23.0",
-    "isort>=5.12",
-    "flake8>=6.0",
-    "pylint>=2.17",
+test = [
+    "pytest==9.2.0",
+    "ruff==0.17.3",
+    "trl==1.17.1",
 ]
-eval = [
-    "lm-eval>=0.3.0",
-    "rouge-score>=0.1.2",
-    "bert-score>=0.3.13",
-]
-docs = [
-    "sphinx>=6.0",
-    "sphinx-rtd-theme>=1.2",
-    "sphinx-autodoc-typehints>=1.22",
+lora = [
+    "peft>=0.17",
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourusername/rlpost"
-Documentation = "https://rlpost.readthedocs.io"
-Repository = "https://github.com/yourusername/rlpost.git"
-Issues = "https://github.com/yourusername/rlpost/issues"
+Homepage = "https://github.com/Mattral/rlpost"
+Repository = "https://github.com/Mattral/rlpost.git"
+Issues = "https://github.com/Mattral/rlpost/issues"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
