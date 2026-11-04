@@ -184,6 +184,22 @@ class TestAlignmentConfig:
         with pytest.raises(ValueError):
             config.dpo_beta = 0.0
 
+    def test_kl_estimator_is_k1_k2_or_k3(self) -> None:
+        """kl_estimator names the PPO penalty. The default is k3."""
+        config = AlignmentConfig()
+        assert config.kl_estimator == "k3"
+        assert config.kl_coefficient == 0.1
+
+        for name in ("k1", "k2", "k3"):
+            config = AlignmentConfig(kl_estimator=name)
+            assert config.kl_estimator == name
+
+        with pytest.raises(ValueError):
+            AlignmentConfig(kl_estimator="k4")
+        config = AlignmentConfig()
+        with pytest.raises(ValueError):
+            config.kl_estimator = "full"
+
     def test_value_clip_optional_and_non_negative(self) -> None:
         """value_clip is its own field. None is unclipped. A set radius is >= 0."""
         config = AlignmentConfig()
@@ -372,6 +388,7 @@ class TestConfigYAMLLoading:
             config = TrainingConfig.from_yaml(toy_yaml_path)
             assert config.model.policy_model_id == "distilgpt2"
             assert config.dataset.batch_size == 8
+            assert config.alignment.kl_estimator == "k3"
 
     def test_load_default_yaml(self) -> None:
         """Verify default.yaml can be loaded from configs directory."""
@@ -380,6 +397,7 @@ class TestConfigYAMLLoading:
             config = TrainingConfig.from_yaml(default_yaml_path)
             assert config.model.policy_model_id == "meta-llama/Llama-2-7b"
             assert config.optimization.mixed_precision == "bf16"
+            assert config.alignment.kl_estimator == "k3"
 
 
 class TestConfigConsistency:

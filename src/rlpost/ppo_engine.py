@@ -16,9 +16,14 @@ logits at position ``t`` score token ``t + 1``, and the result has shape
 Axis 1 is time, and ``rewards[:, t]`` is the reward for token ``t``.
 The policy ratio uses ``advantages[:, 1:]``, so that reward weights the
 log-prob of token ``t``. A padding mask of 0 removes that index from the
-backup. ``train_step`` does not pass one. ``compute_kl_divergence`` is the
-full-vocabulary KL(old || new). ``train_step`` passes (policy, reference),
-so the penalty is KL(reference || policy). Naming that estimator is S0.6e.
+backup. ``train_step`` does not pass one.
+
+The KL term estimates KL(policy || reference) on the sampled tokens.
+``gather_logprobs`` supplies ``log p`` at those tokens, and
+``lr = log p_ref - log p_policy``. ``kl_estimator`` selects ``k1 = -lr``,
+``k2 = 0.5 * lr^2``, or ``k3 = exp(lr) - 1 - lr``. The default is ``k3``:
+unbiased for that KL, and >= 0 at every token. ``train_step`` averages
+every gathered token. It does not pass a mask. That mask stays in S0.7.
 
 ``V_clip`` is ``V_old + clip(V - V_old, -c, c)``. ``eps`` in the policy
 clip is ``ppo_epsilon``. ``c`` is the ``value_clip`` config field, not
@@ -32,7 +37,7 @@ mask. ``train_step`` still does not pass one. That mask stays in S0.7.
 
 import logging
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Literal, Tuple
 
 import torch
 import torch.nn as nn
@@ -58,7 +63,7 @@ class PPOMetrics:
         policy_loss: Clipped surrogate objective loss.
         value_loss: Critic network loss.
         entropy: Policy entropy (explorativity metric).
-        kl_divergence: KL divergence between new and old policy.
+        kl_divergence: Mean per-token KL(policy || reference) under kl_estimator.
         explained_variance: Fraction of value function explained.
         adaptive_kl_coefficient: Current KL penalty coefficient (beta).
         reward_mean: Mean reward in batch.
@@ -74,6 +79,52 @@ class PPOMetrics:
     reward_mean: float
     advantage_mean: float
     gae_mean: float
+
+
+def per_token_kl(
+    logp_policy: Tensor,
+    logp_ref: Tensor,
+    estimator: Literal["k1", "k2", "k3"],
+) -> Tensor:
+    """Per-token estimate of KL(policy || reference) at sampled tokens.
+
+    ``logp_policy`` and ``logp_ref`` are the log-probabilities of the same
+    sampled tokens and must share a shape. ``logp_ref`` is detached, so the
+    gradient reaches ``logp_policy`` only.
+
+    Let ``lr = logp_ref - logp_policy``.
+
+    - ``k1 = -lr``. Unbiased for KL(policy || reference). A token can be negative.
+    - ``k2 = 0.5 * lr^2``. Always >= 0. This is the quadratic term, so it is biased.
+    - ``k3 = exp(lr) - 1 - lr``. Unbiased, and >= 0 at every token: ``f(x) =
+      exp(x) - 1 - x`` is convex and its minimum is 0 at ``x = 0``.
+
+    ``k3`` is the ``AlignmentConfig`` default for that reason. The expression
+    is the one TRL 1.17.1 ``GRPOTrainer._compute_loss`` assigns to
+    ``per_token_kl`` before the optional importance-ratio multiply.
+
+    Args:
+        logp_policy: Log-probability of the sampled token under the policy.
+        logp_ref: Log-probability of that same token under the reference.
+        estimator: ``k1``, ``k2``, or ``k3``.
+
+    Returns:
+        One estimate per token, same shape as the inputs.
+    """
+    if logp_policy.shape != logp_ref.shape:
+        raise ValueError(
+            "shape mismatch: "
+            f"logp_policy {tuple(logp_policy.shape)}, logp_ref {tuple(logp_ref.shape)}"
+        )
+    if estimator not in ("k1", "k2", "k3"):
+        raise ValueError(f"kl_estimator must be k1, k2, or k3, got {estimator!r}")
+
+    log_ratio = logp_ref.detach() - logp_policy
+    if estimator == "k1":
+        return -log_ratio
+    if estimator == "k2":
+        return 0.5 * log_ratio.square()
+    return torch.exp(log_ratio) - log_ratio - 1
 
 
 class GeneralizedAdvantageEstimation:
@@ -360,35 +411,40 @@ class PPOTrainer:
 
     def compute_kl_divergence(
         self: "PPOTrainer",
-        logits_new: Tensor,
-        logits_old: Tensor,
+        logp_policy: Tensor,
+        logp_ref: Tensor,
+        mask: Tensor | None = None,
     ) -> Tensor:
-        """Compute KL divergence between new and old policy distributions.
+        """Mean per-token KL(policy || reference) on the sampled tokens.
 
-        This is KL(logits_old || logits_new):
+        The estimator is ``alignment.kl_estimator`` (see ``per_token_kl``).
+        ``logp_ref`` is detached inside that function.
 
-            sum_a p_old(a) * (log p_old(a) - log p_new(a))
-
-        ``train_step`` calls it as ``(policy_logits, ref_logits)``, so the
-        number added to the loss is KL(reference || policy). S0.6e names
-        the estimator. The sampled-token estimators k1, k2, and k3 are not
-        implemented here.
+        ``mask`` has the same shape as the log-probabilities. ``1`` keeps a
+        token and ``0`` drops it. The mean divides by the sum of ``mask``.
+        An all-zero mask returns 0. ``mask is None`` averages every token.
+        ``train_step`` does not pass a mask, so prompt and padding tokens
+        that were gathered still enter the mean. Which tokens those are
+        stays in S0.7.
 
         Args:
-            logits_new: Logits treated as the second distribution, shape (..., num_actions)
-            logits_old: Logits treated as the first distribution, shape (..., num_actions)
+            logp_policy: Log-probability of each sampled token under the policy.
+            logp_ref: Log-probability of the same tokens under the reference.
+            mask: Optional keep-mask, same shape. ``None`` keeps every token.
 
         Returns:
-            kl_div: Mean KL over every dimension except the action axis (scalar)
+            kl_div: Scalar mean.
         """
-        log_probs_new = F.log_softmax(logits_new, dim=-1)
-        log_probs_old = F.log_softmax(logits_old, dim=-1)
-        probs_old = torch.exp(log_probs_old)
-
-        # KL divergence: Σ p_old * (log p_old - log p_new)
-        kl_div = (probs_old * (log_probs_old - log_probs_new)).sum(dim=-1).mean()
-
-        return kl_div
+        values = per_token_kl(logp_policy, logp_ref, self.alignment_config.kl_estimator)
+        if mask is None:
+            return values.mean()
+        if mask.shape != values.shape:
+            raise ValueError(
+                f"shape mismatch: kl values {tuple(values.shape)}, mask {tuple(mask.shape)}"
+            )
+        weight = mask.to(dtype=values.dtype)
+        # An all-zero mask has nothing to average. The clamp yields 0.
+        return (values * weight).sum() / weight.sum().clamp(min=1.0)
 
     def compute_explained_variance(
         self: "PPOTrainer",
@@ -450,7 +506,7 @@ class PPOTrainer:
         1. Policy loss (clipped surrogate objective)
         2. Value loss (critic training)
         3. Entropy bonus (exploration)
-        4. KL penalty (policy constraint)
+        4. KL penalty (per-token ``kl_estimator`` on the gathered tokens, no mask)
         5. Combined loss = policy_loss + value_loss - entropy_coef * entropy + beta * KL
 
         Args:
@@ -477,9 +533,11 @@ class PPOTrainer:
 
         # Forward passes (should not compute gradients for reference model)
         with torch.no_grad():
-            # Get reference logits for KL divergence
+            # Reference log-probs of the sampled tokens. The shift matches
+            # the policy gather below. No mask is applied. S0.7 owns that.
             ref_outputs = self.reference_model(input_ids)
             ref_logits = ref_outputs.logits if hasattr(ref_outputs, "logits") else ref_outputs
+            ref_token_logprobs = gather_logprobs(ref_logits, input_ids)
 
         # Policy forward pass
         policy_outputs = self.policy_model(input_ids)
@@ -522,7 +580,8 @@ class PPOTrainer:
         # value_clip is set. No padding mask is passed. That stays in S0.7.
         value_loss = self.compute_value_loss(value_pred, returns, values)
         entropy = self.compute_entropy_bonus(policy_logits)
-        kl_div = self.compute_kl_divergence(policy_logits, ref_logits)
+        # Same gathered tokens as the policy ratio. No mask. S0.7.
+        kl_div = self.compute_kl_divergence(token_logprobs, ref_token_logprobs)
 
         # KL penalty term
         kl_penalty = self.kl_coefficient * kl_div
