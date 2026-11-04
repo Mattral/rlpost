@@ -676,3 +676,4 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-11-02 · S0.5 · The package, project name, and CLI path are rlpost. No shim. The default run is rlpost_default_run. · 2bf145a
 - 2026-11-02 · S0.5b · Dependencies are the imported packages. The test extra pins TRL 1.17.1. CI installs that extra under the CPU lock. The 11 known failures are unchanged. · 87efbe5
 - 2026-11-02 · S0.5b · Project URLs point at Mattral/rlpost. Pascal installs torch==2.14.1 from the cu126 index. The package floor stays torch>=2.15. · #17
+- 2026-11-04 · S0.6a · One shifted logprob gather, parity-tested against TRL 1.17.1 selective_log_softmax. The two train_step tests pass. Nine older failures remain. · 48c6e03
