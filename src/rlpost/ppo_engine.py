@@ -12,10 +12,14 @@ This is the only PPO implementation. The step is:
 
 ``train_step`` reads token log-probabilities from ``gather_logprobs``:
 logits at position ``t`` score token ``t + 1``, and the result has shape
-``[B, T - 1]``. ``compute_kl_divergence`` is the full-vocabulary
-KL(old || new). ``train_step`` passes (policy, reference), so the penalty is
-KL(reference || policy). Naming that estimator is S0.6e. The value loss is
-unclipped MSE. A clipped value loss is S0.6d.
+``[B, T - 1]``. Rewards, values, dones, and advantages are ``[B, T]``.
+Axis 1 is time, and ``rewards[:, t]`` is the reward for token ``t``.
+The policy ratio uses ``advantages[:, 1:]``, so that reward weights the
+log-prob of token ``t``. A padding mask of 0 removes that index from the
+backup. ``train_step`` does not pass one. ``compute_kl_divergence`` is the
+full-vocabulary KL(old || new). ``train_step`` passes (policy, reference),
+so the penalty is KL(reference || policy). Naming that estimator is S0.6e.
+The value loss is unclipped MSE. A clipped value loss is S0.6d.
 """
 
 import logging
@@ -96,40 +100,68 @@ class GeneralizedAdvantageEstimation:
         values: Tensor,
         next_values: Tensor,
         dones: Tensor,
+        mask: Tensor | None = None,
     ) -> Tuple[Tensor, Tensor]:
         """Compute advantages and returns using GAE.
 
+        Axis 1 of every ``[B, T]`` tensor is time. Index ``t`` is the token
+        ``input_ids[:, t]``. ``rewards[:, t]`` is that token's reward.
+        ``values[:, t]`` is ``V_t``. ``next_values[:, t]`` is ``V_{t+1}`` and
+        is not read from ``values``. The advantage after the last index is 0.
+
+        ``mask[:, t] == 0`` is padding, not a timestep. That index's advantage
+        and return are 0. Its reward, value, and advantage do not enter any
+        other index. ``dones[:, t] == 1`` stops the backup after a real token
+        whose next index is also real. On real tokens, ``returns = A + V``.
+
         Args:
-            rewards: Shape (batch_size, seq_len) or (batch_size,)
-            values: Critic estimates at current timesteps, shape (batch_size, seq_len)
-            next_values: Critic estimates at next timesteps, shape (batch_size, seq_len)
-            dones: Episode termination flags, shape (batch_size, seq_len)
+            rewards: Token rewards ``r_t``, shape ``[B, T]``.
+            values: Critic estimates ``V_t``, shape ``[B, T]``.
+            next_values: Critic estimates ``V_{t+1}``, shape ``[B, T]``.
+            dones: 1 stops the backup after this token, shape ``[B, T]``.
+            mask: 1 for a real token and 0 for padding, shape ``[B, T]``.
+                ``None`` means every position is real.
 
         Returns:
-            advantages: GAE-computed advantages, shape (batch_size, seq_len)
-            returns: Bootstrapped returns, shape (batch_size, seq_len)
+            advantages: GAE advantages, shape ``[B, T]``.
+            returns: ``A + V`` on real tokens and 0 on padding, shape ``[B, T]``.
         """
         if rewards.shape != values.shape:
             raise ValueError(
                 f"rewards and values shape mismatch: {rewards.shape} vs {values.shape}"
             )
+        if next_values.shape != values.shape or dones.shape != values.shape:
+            raise ValueError(
+                "shape mismatch: "
+                f"values {tuple(values.shape)}, "
+                f"next_values {tuple(next_values.shape)}, "
+                f"dones {tuple(dones.shape)}"
+            )
+        if mask is None:
+            token_mask = torch.ones_like(values)
+        else:
+            if mask.shape != values.shape:
+                raise ValueError(
+                    f"mask and values shape mismatch: {tuple(mask.shape)} vs {tuple(values.shape)}"
+                )
+            token_mask = mask.to(dtype=values.dtype)
 
-        # Compute TD residuals (one-step advantage)
-        deltas = rewards + self.gamma * next_values * (1 - dones) - values
-
-        # Initialize advantages (backward pass)
         batch_size, seq_len = values.shape
-        advantages = torch.zeros_like(values)
-        gae = 0.0
+        # V_{t+1} is a real token only when the next index is real. The value
+        # after the last index is the caller's bootstrap, not a pad token.
+        next_real = torch.ones_like(token_mask)
+        if seq_len > 1:
+            next_real[:, :-1] = token_mask[:, 1:]
+        continues = (1 - dones.to(dtype=values.dtype)) * next_real
+        deltas = (rewards + self.gamma * next_values * continues - values) * token_mask
 
-        # Compute GAE backwards through sequence
+        advantages = torch.zeros_like(values)
+        gae = torch.zeros(batch_size, device=values.device, dtype=values.dtype)
         for t in reversed(range(seq_len)):
-            gae = deltas[:, t] + self.gamma * self.lam * (1 - dones[:, t]) * gae
+            gae = (deltas[:, t] + self.gamma * self.lam * continues[:, t] * gae) * token_mask[:, t]
             advantages[:, t] = gae
 
-        # Compute returns (advantages + values)
-        returns = advantages + values
-
+        returns = (advantages + values) * token_mask
         return advantages, returns
 
 
@@ -371,12 +403,13 @@ class PPOTrainer:
         5. Combined loss = policy_loss + value_loss - entropy_coef * entropy + beta * KL
 
         Args:
-            batch: Dict with keys:
-                - "input_ids": Tokenized prompts/responses, shape (batch_size, seq_len)
-                - "rewards": Scalar rewards, shape (batch_size,)
-                - "values": Bootstrapped values, shape (batch_size,)
-                - "next_values": Next-step values, shape (batch_size,)
-                - "dones": Episode termination flags, shape (batch_size,)
+            batch: Dict with keys, time on axis 1:
+                - "input_ids": Tokens, shape ``[B, T]``.
+                - "rewards": Token reward ``r_t`` for ``input_ids[:, t]``,
+                  shape ``[B, T]``.
+                - "values": Critic ``V_t``, shape ``[B, T]``.
+                - "next_values": Critic ``V_{t+1}``, shape ``[B, T]``.
+                - "dones": 1 stops the backup after that token, shape ``[B, T]``.
             old_log_probs: Log-probs of tokens ``1 .. T-1`` under the old policy,
                 shape ``[B, T - 1]``, matching ``gather_logprobs``.
 
@@ -419,9 +452,9 @@ class PPOTrainer:
             advantages = (advantages - adv_mean) / adv_std
 
         # Token log-probs, shape [B, T-1]. Index t scores input_ids[:, t+1].
-        # GAE advantages stay aligned with input positions [B, T]. The ratio
-        # uses the advantages of the scored tokens, advantages[:, 1:].
-        # No mask is applied here.
+        # GAE stays on input positions [B, T]. rewards[:, t] is r_t for token t,
+        # and the ratio weight for that token is advantages[:, t], which sits
+        # in advantages[:, 1:] for t >= 1. No padding mask is passed here.
         token_logprobs = gather_logprobs(policy_logits, input_ids)
         if old_log_probs.shape != token_logprobs.shape:
             raise ValueError(
