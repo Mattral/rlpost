@@ -313,7 +313,7 @@ here is a result. S0.6f is optional and does not change the order of S0.6b–e.
   - Pytest on this branch: 85 collected, 76 passed, 9 failed. Ruff check and
     ruff format check pass.
 
-### [ ] S0.6b DPO loss, rewards, and margins
+### [x] S0.6b DPO loss, rewards, and margins
 - Depends on: S0.6a.
 - DPO loss, chosen/rejected rewards and margins vs TRL's DPO loss on identical inputs.
 - Notes:
@@ -352,6 +352,83 @@ here is a result. S0.6f is optional and does not change the order of S0.6b–e.
     `transformers>=4.56.2` (no upper bound; transformers 5.22.0 satisfies it),
     `torch>=2.6.0`, `datasets>=4.7.0`, and `accelerate>=1.11.0`. Parity in S0.6a
     was measured against `selective_log_softmax` from that pin.
+  - 2026-11-04: branch `test/S0.6b-dpo-loss` from `origin/main` `e96cb46`
+    (merge of PR #19). Code commit `9cb030b`.
+  - TRL 1.17.1 has no free function for the DPO loss. The sigmoid loss is
+    `DPOTrainer._compute_loss` with `loss_types == ["sigmoid"]`.
+    `DPOTrainer.__init__` builds a Hugging Face `Trainer` and a tokenizer,
+    and with no reference model it loads one from `config._name_or_path`.
+    The parity test does not call `__init__`. It builds the instance with
+    `__new__`, sets the attributes `_compute_loss` reads, and calls that
+    method on the same tiny Llama and the same token batch.
+  - The sigmoid branch does not read `label_smoothing`. Smoothing is applied
+    on the robust, exo_pair, and aot losses. Parity sets `label_smoothing`
+    to 0, `f_divergence_type` to `reverse_kl`, and `ld_alpha` to `None`.
+    The score is then the log-ratio, and the loss is
+    `-logsigmoid(beta * (chosen_logratio - rejected_logratio)).mean()`.
+  - Sequence log-probabilities are a sum, not a mean. `add_fused_lm_head`
+    writes 0 where the label is -100. Labels are `input_ids` with
+    `completion_mask == 0` set to -100, then shifted one position, so prompt
+    tokens and padding add nothing. `_compute_loss` sums that row.
+    `compute_log_probs` multiplies `gather_logprobs` by
+    `completion_mask[:, 1:]` and sums. A test fails if the attention mask
+    is used instead: that mask still includes the prompt.
+  - On CPU, torch 2.15, the tiny Llama (2 layers, hidden 32, vocab 128),
+    seeds 0 through 5: the largest |loss - TRL loss| was 1.8e-7. The largest
+    gap on the batch mean of the completion-token sums (TRL logs this as
+    `logps/chosen` and `logps/rejected`) was 1.907e-6, one float32 ulp near
+    magnitude 22. Loss, margin, and reward absolute tolerance is 1e-6.
+    The tolerance on those logged means is 1e-5.
+  - The old margin fixture is 0.04: beta 0.1 times the 0.4
+    reference-adjusted gap. The policy-only gap on that fixture was 1.5.
+    Accuracy on the aggregation fixture stays 0.75. Row 0 is a tie after
+    the reference adjustment, and the comparison is strict `>`.
+  - The old beta fixture had `policy_diff - ref_diff == 0`, so every beta
+    returned `-logsigmoid(0)`. The replacement has unscaled margin 1.
+    A larger beta then makes `-logsigmoid(beta)` smaller.
+  - `AlignmentConfig.dpo_beta` is a field, default 0.1, validated `> 0`.
+    `DPOTrainer` reads `config.alignment.dpo_beta`. The `getattr` fallback
+    is gone. `kl_coefficient` is unchanged and is still the PPO coefficient.
+  - `test_init_creates_trainer`, `test_reference_model_frozen`, and
+    `test_config_integration` now build the tiny Llama. The reference
+    parameters do not require grad and are not in the optimizer. A backward
+    through the policy log-probs leaves the reference grads as `None`.
+  - `compute_log_probs` had `@torch.no_grad`. That also blocked policy
+    gradients. The decorator is gone. `train_step` still wraps the
+    reference call in `torch.no_grad`.
+  - Pytest on this branch: 91 collected, 89 passed, 2 failed, 16.10s.
+    The two failures are `test_policy_loss_computation` and
+    `test_value_loss_computation` (S0.6d). Ruff check and ruff format
+    check pass.
+  - 2026-11-04 follow-up, same branch, test commit `c301a03` on top of
+    `9cb030b`. The parity test
+    is parametrized over seeds 0 through 5. The policy is
+    `tiny_causal_lm(seed)`, the reference is `tiny_causal_lm(seed + 10)`,
+    and the token batch uses that seed. Each seed runs a matched-mask
+    batch and a batch whose chosen and rejected rows differ in completion
+    length and in padding. Chosen completions are lengths 4 and 2 with
+    prompt length 2. Rejected completions are lengths 3 and 5 with prompt
+    length 3. The four masks are separate arguments to
+    `compute_log_probs`, and TRL receives them concatenated per side.
+    Reusing the chosen mask for the rejected side moves the loss by about
+    2e-3 on seed 0 of that batch.
+  - On that grid, CPU, torch 2.15, the same tiny Llama: the largest
+    |loss - TRL loss| was 2.384e-7. The largest margin gap was 5.700e-7.
+    The largest reward-mean gap was 5.737e-7. The accuracy gap was 0.
+    The logged sum-mean gap stayed 1.907e-6. Tolerances are unchanged:
+    1e-6 on the loss, the margin, and the rewards, and 1e-5 on the logged
+    means.
+  - Gradient parity builds a second policy and a second reference from
+    the same seeds, so the starting weights match. Both losses are
+    backwarded. The optimizer is not stepped. Every policy parameter has
+    a gradient on both copies. Absolute tolerance is 1e-6. The largest
+    |rlpost grad - TRL grad| was 9.686e-8. Both reference copies are
+    frozen, and every reference grad stays None. The mock
+    `test_gradients_not_through_reference` is deleted.
+    `test_reference_model_frozen` still checks the freeze.
+  - Pytest after that follow-up: 113 collected, 111 passed, 2 failed,
+    16.86s. The two failures are the same S0.6d PPO loss tests. Ruff
+    check and ruff format check pass.
 
 ### [ ] S0.6c GAE advantages and returns
 - Depends on: S0.6a.
@@ -415,6 +492,12 @@ Cover:
     those tests exist. DPO `compute_log_probs` already multiplies by
     `attention_mask[:, 1:]` and still averages prompt tokens; that prompt mask
     stays in this item.
+  - 2026-11-04, S0.6b, code commit `9cb030b`. The sentence above describes
+    main before that commit. DPO `compute_log_probs` now sums
+    `completion_mask[:, 1:]`. Prompt tokens are outside that sum.
+    `DPOTrainer._tokenize_for_loss` assumes right padding: the prompt ids
+    are a prefix of `prompt + response`. The PPO `train_step` mask is still
+    this item.
 
 ### [ ] S0.8 Determinism and resumable checkpoints
 - Seeding gives identical losses on CPU for 2 runs.
@@ -706,3 +789,5 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-11-02 · S0.5b · Project URLs point at Mattral/rlpost. Pascal installs torch==2.14.1 from the cu126 index. The package floor stays torch>=2.15. · #17
 - 2026-11-04 · S0.6a · One shifted logprob gather, parity-tested against TRL 1.17.1 selective_log_softmax. The two train_step tests pass. Nine older failures remain. · 48c6e03
 - 2026-11-04 · S0.7 · Notes only. PPO train_step applies no mask. Policy loss, entropy, and KL include prompt and padding tokens. The target is response-token-only masking, with tests that fail on that behavior. Added optional S0.6f, an fp32 logsumexp gather before Stage 1. · b1abaff
+- 2026-11-04 · S0.6b · Sigmoid DPO matches TRL 1.17.1 `_compute_loss`: beta-scaled rewards, completion-token sum, `dpo_beta` field. Seven DPO failures pass. Two PPO loss tests remain. · 9cb030b
+- 2026-11-04 · S0.6b · Parity covers seeds 0-5, unequal completion masks, and policy gradients at atol 1e-6. Reference grads stay None. The mock gradient test is gone. Two PPO loss tests remain. · c301a03

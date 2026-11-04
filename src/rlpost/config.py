@@ -242,7 +242,8 @@ class AlignmentConfig(BaseConfig):
         ppo_epsilon: PPO clipping ratio.
         ppo_num_epochs: Number of epochs to train on each batch of rollouts.
         target_kl: Target KL divergence between policy and reference (soft constraint).
-        kl_coefficient: Initial coefficient for KL penalty term.
+        kl_coefficient: Initial coefficient for the PPO KL penalty.
+        dpo_beta: DPO temperature. Scales the implicit reward. Not the PPO KL coefficient.
         gamma: Discount factor for advantage estimation.
         gae_lambda: Smoothing parameter for GAE (lambda in GAE-lambda).
         entropy_coefficient: Weight of entropy regularization in policy loss.
@@ -273,7 +274,15 @@ class AlignmentConfig(BaseConfig):
     kl_coefficient: float = Field(
         default=0.1,
         ge=0.0,
-        description="Initial coefficient for KL penalty term (beta in literature)",
+        description="Initial coefficient for the PPO KL penalty. Not used by DPO.",
+    )
+    dpo_beta: float = Field(
+        default=0.1,
+        gt=0.0,
+        description=(
+            "DPO temperature. The implicit reward is beta * (log π(y|x) - log π_ref(y|x)). "
+            "Must be > 0. This is not kl_coefficient."
+        ),
     )
     gamma: float = Field(
         default=0.99,
@@ -563,6 +572,7 @@ class TrainingConfig(BaseConfig):
                 ppo_num_epochs=2,
                 target_kl=0.1,
                 kl_coefficient=0.05,
+                dpo_beta=0.1,
                 gamma=0.99,
                 gae_lambda=0.95,
                 entropy_coefficient=0.01,
@@ -637,6 +647,7 @@ class TrainingConfig(BaseConfig):
                 ppo_num_epochs=4,
                 target_kl=0.1,
                 kl_coefficient=0.1,
+                dpo_beta=0.1,
                 gamma=0.99,
                 gae_lambda=0.95,
                 entropy_coefficient=0.01,

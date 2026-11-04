@@ -46,14 +46,19 @@ Work still open is tracked in [ROADMAP.md](ROADMAP.md).
 
 DPO trains on preference pairs and does not train a reward model. The loss uses a frozen reference policy.
 
-`DPOTrainer.compute_dpo_loss` takes sequence scores named `policy_logits_*` and `ref_logits_*` in the signature. The body treats them as log-probabilities:
+`log π(y|x)` is the sum of completion-token log-probabilities. `compute_log_probs` calls `gather_logprobs` (position `t` scores token `t+1`) and multiplies by `completion_mask[:, 1:]`. Prompt tokens and padding contribute 0. The reduction is a sum, not a mean.
+
+The sigmoid loss, label smoothing 0:
 
 ```
-logits = beta * ((policy_chosen - policy_rejected) - (ref_chosen - ref_rejected))
-loss = -logsigmoid(logits).mean()
+chosen_reward   = beta * (logp_policy_chosen - logp_ref_chosen)
+rejected_reward = beta * (logp_policy_rejected - logp_ref_rejected)
+loss            = -logsigmoid(chosen_reward - rejected_reward).mean()
 ```
 
-That is the DPO objective at sequence level. Sequence scores come from `gather_logprobs`, then a mask. Parity of the DPO loss with TRL is S0.6b. It is not done.
+`beta` is `AlignmentConfig.dpo_beta` (default 0.1, must be > 0). It is not the PPO `kl_coefficient`. The margin is the mean of `chosen_reward - rejected_reward`. Accuracy is the fraction of rows with `chosen_reward > rejected_reward`.
+
+Parity is against TRL 1.17.1 `DPOTrainer._compute_loss` (`loss_type` sigmoid, `label_smoothing` 0). That method sums completion-token log-probs the same way. On CPU, torch 2.15, the tiny Llama, the loss matched within `1e-6`. The logged mean of the sums matched within `1e-5`. The measured gap on that mean was `1.907e-6`.
 
 `python -m rlpost.cli run-dpo` prints a placeholder and exits 0. It does not construct `DPOTrainer`.
 
@@ -61,7 +66,7 @@ That is the DPO objective at sequence level. Sequence scores come from `gather_l
 
 `PPOTrainer` in `ppo_engine.py` is the only PPO implementation. The step is GAE, then a clipped probability ratio, an unclipped value loss, an entropy bonus, and a KL penalty. `compute_kl_divergence(policy_logits, ref_logits)` evaluates the full-vocabulary KL(reference || policy), `sum_a p_ref(a) (log p_ref(a) - log p_policy(a))`. The sampled-token estimators usually called k1, k2, and k3 are not implemented. Naming that estimator is S0.6e.
 
-`train_step` calls `gather_logprobs`. Logits at position `t` score token `t+1`, and the policy ratio uses those log-probabilities, shape `[B, T-1]`. The two step tests run on a tiny causal LM. Nine older failures remain; see S0.6.
+`train_step` calls `gather_logprobs`. Logits at position `t` score token `t+1`, and the policy ratio uses those log-probabilities, shape `[B, T-1]`. The two step tests run on a tiny causal LM. Two PPO loss tests still fail; see S0.6d.
 
 ## Command line
 

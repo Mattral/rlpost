@@ -1,21 +1,67 @@
-"""Unit tests for DPO (Direct Preference Optimization) engine.
+"""DPO loss, rewards, margin, and sequence log-probabilities.
 
-Tests cover:
-- Loss computation correctness
-- Gradient flow through reference model
-- Metrics calculation
-- Batch processing
-- Configuration integration
+Parity target: trl==1.17.1.
+The loss lives on ``trl.trainer.dpo_trainer.DPOTrainer._compute_loss``.
+That release has no free function for it. ``DPOTrainer.__init__`` also
+builds a Hugging Face ``Trainer``, requires a tokenizer, and can load a
+reference model from ``config._name_or_path``. The parity test skips that
+constructor. It builds the instance with ``DPOTrainer.__new__`` and sets
+the attributes ``_compute_loss`` reads, then calls the method.
+
+Sigmoid DPO, ``label_smoothing`` 0. In this release the sigmoid branch does
+not read ``label_smoothing``. Smoothing is on the robust, exo_pair, and aot
+losses. The sigmoid loss is ``-logsigmoid(beta * delta).mean()`` with
+``delta = (logp_policy - logp_ref)_chosen - (logp_policy - logp_ref)_rejected``.
+
+Sequence log-probabilities are a sum over completion tokens. The fused head
+writes 0 where ``completion_mask`` is 0 (prompt and padding), after shifting
+labels by one. ``_compute_loss`` then sums the row when ``ld_alpha`` is
+``None``. It does not average.
+
+The parity tests run seeds 0 through 5. The policy is ``tiny_causal_lm(seed)``,
+the reference is ``tiny_causal_lm(seed + 10)``, and the token batch uses that
+same seed. Each seed runs twice: the same masks on both sides, and a batch
+where chosen and rejected have different completion lengths and different
+padding. Those four masks are separate arguments on both sides.
+
+fp32 absolute tolerance on the loss, the margin, and the rewards is 1e-6.
+TRL logs the batch mean of those sums (``logps/chosen``, ``logps/rejected``).
+On CPU, torch 2.15, this Llama, that seed grid, and both mask layouts, the
+largest gap on that mean was 1.907e-6, one float32 ulp near magnitude 22.
+The tolerance on the logged means is 1e-5.
+
+Policy-parameter gradients use absolute tolerance 1e-6. The two losses are
+backwarded from identical initial weights, with no optimizer step. On the
+same grid the largest |rlpost grad - TRL grad| was 9.686e-8. The reference
+parameters are frozen, and their grads stay None.
 """
 
 import logging
-from unittest.mock import MagicMock, patch
+from collections import defaultdict
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
+import torch.nn.functional as F
+from tests.tiny_lm import VOCAB, tiny_causal_lm
+from trl.trainer.dpo_trainer import DPOTrainer as TrlDPOTrainer
+from trl.trainer.utils import add_fused_lm_head
 
 from rlpost.config import TrainingConfig
-from rlpost.dpo_engine import DPOMetrics, DPOTrainer
+from rlpost.dpo_engine import (
+    DPOMetrics,
+    DPOTrainer,
+    completion_token_mask,
+    prompt_prefix_length,
+)
+from rlpost.ops import gather_logprobs
+
+FP32_ATOL = 1e-6
+# One float32 ulp of a completion-token sum near magnitude 22 is 1.907e-6.
+SUM_MEAN_ATOL = 1e-5
+# Measured max |policy grad - TRL grad| on seeds 0-5 and both layouts: 9.686e-8.
+GRAD_ATOL = 1e-6
 
 logger = logging.getLogger(__name__)
 
@@ -52,55 +98,77 @@ class TestDPOMetrics:
         assert len(d) == 4
 
 
+def _trainer(
+    policy_seed: int = 0,
+    reference_seed: int = 1,
+    beta: float | None = None,
+    learning_rate: float | None = None,
+) -> DPOTrainer:
+    config = TrainingConfig.toy_mode()
+    config.log_to_wandb = False
+    if beta is not None:
+        config.alignment.dpo_beta = beta
+    if learning_rate is not None:
+        config.optimization.learning_rate = learning_rate
+    policy = tiny_causal_lm(policy_seed)
+    reference = tiny_causal_lm(reference_seed)
+    return DPOTrainer(config, policy_model=policy, reference_model=reference)
+
+
 class TestDPOTrainerInit:
-    """Test DPOTrainer initialization."""
+    """Test DPOTrainer initialization on a tiny causal LM."""
 
-    @patch("rlpost.dpo_engine.AutoTokenizer.from_pretrained")
-    @patch("rlpost.dpo_engine.AutoModelForCausalLM.from_pretrained")
-    def test_init_creates_trainer(self, mock_model, mock_tokenizer):
-        """Test trainer initialization."""
-        # Mock models
-        mock_tokenizer.return_value = MagicMock()
-        mock_tokenizer.return_value.pad_token = None
-        mock_tokenizer.return_value.eos_token = "<eos>"
-
-        mock_policy = MagicMock()
-        mock_policy.parameters.return_value = []
-        mock_reference = MagicMock()
-
-        mock_model.side_effect = [mock_policy, mock_reference]
-
-        # Initialize
+    def test_init_creates_trainer(self):
+        """A real Llama has parameters, and beta is dpo_beta rather than the PPO coefficient."""
         config = TrainingConfig.toy_mode()
-        trainer = DPOTrainer(config)
+        config.log_to_wandb = False
+        policy = tiny_causal_lm(0)
+        reference = tiny_causal_lm(1)
+        trainer = DPOTrainer(config, policy_model=policy, reference_model=reference)
 
-        assert trainer.config == config
-        assert trainer.policy_model is not None
-        assert trainer.reference_model is not None
-        assert trainer.beta == 0.1  # Default beta
+        assert trainer.config is config
+        assert trainer.policy_model is policy
+        assert trainer.reference_model is reference
+        assert trainer.beta == config.alignment.dpo_beta == 0.1
+        assert trainer.beta != config.alignment.kl_coefficient
         assert trainer.step_count == 0
+        assert any(p.requires_grad for p in trainer.policy_model.parameters())
+        opt_ids = {id(p) for group in trainer.optimizer.param_groups for p in group["params"]}
+        assert opt_ids == {id(p) for p in policy.parameters()}
 
-    @patch("rlpost.dpo_engine.AutoTokenizer.from_pretrained")
-    @patch("rlpost.dpo_engine.AutoModelForCausalLM.from_pretrained")
-    def test_reference_model_frozen(self, mock_model, mock_tokenizer):
-        """Test that reference model gradients are disabled."""
-        mock_tokenizer.return_value = MagicMock()
-        mock_tokenizer.return_value.pad_token = None
-        mock_tokenizer.return_value.eos_token = "<eos>"
-
-        mock_policy = MagicMock()
-        mock_policy.parameters.return_value = []
-        mock_reference = MagicMock()
-
-        mock_model.side_effect = [mock_policy, mock_reference]
-
+    def test_reference_model_frozen(self):
+        """The reference starts trainable. The trainer freezes it and leaves it out of the loss."""
         config = TrainingConfig.toy_mode()
-        trainer = DPOTrainer(config)
+        config.log_to_wandb = False
+        policy = tiny_causal_lm(0)
+        reference = tiny_causal_lm(1)
+        reference.requires_grad_(True)
+        trainer = DPOTrainer(config, policy_model=policy, reference_model=reference)
 
-        # Reference model should have requires_grad=False
-        trainer.reference_model.requires_grad_(False)
-        # Verify it was called
-        trainer.reference_model.requires_grad_.assert_called_with(False)
+        assert all(not p.requires_grad for p in trainer.reference_model.parameters())
+        opt_ids = {id(p) for group in trainer.optimizer.param_groups for p in group["params"]}
+        assert opt_ids.isdisjoint(id(p) for p in trainer.reference_model.parameters())
+
+        input_ids = torch.randint(0, VOCAB, (2, 8))
+        attention_mask = torch.ones(2, 8, dtype=torch.long)
+        completion_mask = torch.zeros(2, 8, dtype=torch.long)
+        completion_mask[:, 3:] = 1
+        policy_logp = trainer.compute_log_probs(
+            trainer.policy_model, input_ids, attention_mask, completion_mask
+        )
+        with torch.no_grad():
+            ref_logp = trainer.compute_log_probs(
+                trainer.reference_model, input_ids, attention_mask, completion_mask
+            )
+        rejected = torch.zeros_like(policy_logp)
+        loss, _ = trainer.compute_dpo_loss(policy_logp, rejected, ref_logp, ref_logp)
+        loss.backward()
+
+        assert any(
+            p.grad is not None and torch.count_nonzero(p.grad) > 0
+            for p in trainer.policy_model.parameters()
+        )
+        assert all(p.grad is None for p in trainer.reference_model.parameters())
 
 
 class TestDPOLossComputation:
@@ -220,7 +288,7 @@ class TestDPOMetricsComputation:
         assert metrics.accuracy == 1.0  # All chosen > rejected
 
     def test_margin_computation(self):
-        """Test margin metric (chosen - rejected difference)."""
+        """Margin is mean(beta * (logp_policy - logp_ref) chosen minus rejected)."""
         trainer = MagicMock(spec=DPOTrainer)
         trainer.beta = 0.1
 
@@ -237,26 +305,35 @@ class TestDPOMetricsComputation:
             ref_rejected,
         )
 
-        # Margin should be average of differences
-        expected_margin = ((2.0 - 1.0) + (3.0 - 1.5) + (4.0 - 2.0)) / 3
-        assert abs(metrics.margin_mean - expected_margin) < 0.01
+        # chosen log-ratio is 0.2, rejected log-ratio is -0.2, beta is 0.1.
+        # Per-row margin is 0.04. The policy-only gap on this fixture is 1.5.
+        chosen_reward = 0.1 * (policy_chosen - ref_chosen)
+        rejected_reward = 0.1 * (policy_rejected - ref_rejected)
+        expected_margin = (chosen_reward - rejected_reward).mean().item()
+        assert expected_margin == pytest.approx(0.04, abs=1e-6)
+        assert metrics.margin_mean == pytest.approx(expected_margin, abs=1e-6)
 
 
 class TestDPOBetaParameter:
     """Test DPO beta (temperature) parameter."""
 
     def test_beta_affects_loss(self):
-        """Test that beta parameter affects loss magnitude."""
+        """Beta scales a non-zero reference-adjusted margin.
+
+        The previous fixture had policy_diff - ref_diff == 0, so every beta
+        returned -logsigmoid(0). Here the unscaled margin is 1. A larger beta
+        makes -logsigmoid(beta) smaller.
+        """
         trainer_low_beta = MagicMock(spec=DPOTrainer)
         trainer_low_beta.beta = 0.01
 
         trainer_high_beta = MagicMock(spec=DPOTrainer)
         trainer_high_beta.beta = 1.0
 
-        policy_chosen = torch.tensor([0.5, 0.6, 0.7])
-        policy_rejected = torch.tensor([0.3, 0.4, 0.5])
-        ref_chosen = torch.tensor([0.4, 0.5, 0.6])
-        ref_rejected = torch.tensor([0.2, 0.3, 0.4])
+        policy_chosen = torch.tensor([1.0, 1.0, 1.0])
+        policy_rejected = torch.tensor([0.0, 0.0, 0.0])
+        ref_chosen = torch.zeros(3)
+        ref_rejected = torch.zeros(3)
 
         loss_low, _ = DPOTrainer.compute_dpo_loss(
             trainer_low_beta,
@@ -274,36 +351,9 @@ class TestDPOBetaParameter:
             ref_rejected,
         )
 
-        # Higher beta should give higher loss (stronger preference signal)
-        assert loss_high > loss_low
-
-
-class TestDPOGradientFlow:
-    """Test gradient flow through DPO trainer."""
-
-    @patch("rlpost.dpo_engine.AutoTokenizer.from_pretrained")
-    @patch("rlpost.dpo_engine.AutoModelForCausalLM.from_pretrained")
-    def test_gradients_not_through_reference(self, mock_model, mock_tokenizer):
-        """Test that gradients don't flow through frozen reference model."""
-        # Mock tokenizer
-        mock_tok = MagicMock()
-        mock_tok.pad_token = None
-        mock_tok.eos_token = "<eos>"
-        mock_tokenizer.return_value = mock_tok
-
-        # Create real tensors but mock model calls
-        mock_policy = MagicMock()
-        mock_policy.parameters.return_value = [torch.nn.Parameter(torch.randn(10))]
-        mock_reference = MagicMock()
-        mock_reference.requires_grad_ = MagicMock()
-
-        mock_model.side_effect = [mock_policy, mock_reference]
-
-        config = TrainingConfig.toy_mode()
-        trainer = DPOTrainer(config)
-
-        # Verify reference model requires_grad was set to False
-        trainer.reference_model.requires_grad_.assert_called()
+        assert torch.allclose(loss_low, -F.logsigmoid(torch.tensor(0.01)), atol=FP32_ATOL)
+        assert torch.allclose(loss_high, -F.logsigmoid(torch.tensor(1.0)), atol=FP32_ATOL)
+        assert loss_high < loss_low
 
 
 class TestDPONumericalStability:
@@ -398,58 +448,386 @@ class TestDPOBatchProcessing:
             ref_rejected,
         )
 
-        # All samples have chosen > rejected, so accuracy should be 1.0
-        assert metrics.accuracy == 1.0
-        assert abs(metrics.margin_mean) < 0.5
+        # Row 0 is a tie after the reference adjustment (both rewards are 0).
+        # Strict > does not count a tie, so accuracy is 0.75. The mean margin
+        # is beta * mean([0, 0.5, 1.0, 1.5]) = 0.075.
+        assert metrics.accuracy == pytest.approx(0.75, abs=1e-6)
+        chosen_reward = trainer.beta * (policy_chosen - ref_chosen)
+        rejected_reward = trainer.beta * (policy_rejected - ref_rejected)
+        expected_margin = (chosen_reward - rejected_reward).mean().item()
+        assert expected_margin == pytest.approx(0.075, abs=1e-6)
+        assert metrics.margin_mean == pytest.approx(expected_margin, abs=1e-6)
 
 
 class TestDPOConfiguration:
     """Test DPO integration with TrainingConfig."""
 
-    @patch("rlpost.dpo_engine.AutoTokenizer.from_pretrained")
-    @patch("rlpost.dpo_engine.AutoModelForCausalLM.from_pretrained")
-    def test_config_integration(self, mock_model, mock_tokenizer):
-        """Test that DPO trainer respects configuration."""
-        mock_tokenizer.return_value = MagicMock()
-        mock_tokenizer.return_value.pad_token = None
-        mock_tokenizer.return_value.eos_token = "<eos>"
+    def test_config_integration(self):
+        """The trainer reads the learning rate and the model ids off the config."""
+        trainer = _trainer(policy_seed=2, reference_seed=3, learning_rate=3e-4)
 
-        mock_policy = MagicMock()
-        mock_policy.parameters.return_value = []
-        mock_reference = MagicMock()
+        assert trainer.config.model.policy_model_id == "distilgpt2"
+        assert trainer.config.model.reference_model_id == "distilgpt2"
+        assert trainer.optimizer.param_groups[0]["lr"] == 3e-4
 
-        mock_model.side_effect = [mock_policy, mock_reference]
-
-        config = TrainingConfig.toy_mode()
-        trainer = DPOTrainer(config)
-
-        # Verify config is used
-        assert trainer.config.model.policy_model_id == config.model.policy_model_id
-        assert trainer.config.model.reference_model_id == config.model.reference_model_id
-        assert trainer.config.optimization.learning_rate == config.optimization.learning_rate
-
-    @patch("rlpost.dpo_engine.AutoTokenizer.from_pretrained")
-    @patch("rlpost.dpo_engine.AutoModelForCausalLM.from_pretrained")
-    def test_custom_beta_from_config(self, mock_model, mock_tokenizer):
-        """Test that custom beta parameter is read from config."""
-        mock_tokenizer.return_value = MagicMock()
-        mock_tokenizer.return_value.pad_token = None
-        mock_tokenizer.return_value.eos_token = "<eos>"
-
-        mock_policy = MagicMock()
-        mock_policy.parameters.return_value = []
-        mock_reference = MagicMock()
-
-        mock_model.side_effect = [mock_policy, mock_reference]
-
-        config = TrainingConfig.toy_mode()
-        # Set custom beta
-        if not hasattr(config, "alignment"):
-            config.alignment = MagicMock()
-        config.alignment.dpo_beta = 0.5
-
-        trainer = DPOTrainer(config)
+    def test_custom_beta_from_config(self):
+        """dpo_beta is read off the field. There is no getattr fallback."""
+        trainer = _trainer(policy_seed=4, reference_seed=5, beta=0.5)
         assert trainer.beta == 0.5
+        assert trainer.config.alignment.dpo_beta == 0.5
+
+
+def _pair_batch(seed: int = 0) -> dict[str, torch.Tensor]:
+    """Chosen and rejected rows, prompt length 3, last column padded on row 1."""
+    torch.manual_seed(seed)
+    chosen = torch.randint(1, VOCAB, (2, 8))
+    rejected = torch.randint(1, VOCAB, (2, 8))
+    attention = torch.ones(2, 8, dtype=torch.long)
+    attention[1, -1] = 0
+    chosen[1, -1] = 0
+    rejected[1, -1] = 0
+    completion = torch.zeros(2, 8, dtype=torch.long)
+    completion[:, 3:] = 1
+    completion = completion * attention
+    return {
+        "chosen_ids": chosen,
+        "rejected_ids": rejected,
+        "attention_mask": attention,
+        "completion_mask": completion,
+    }
+
+
+def _unequal_batch(seed: int) -> dict[str, torch.Tensor]:
+    """Chosen and rejected differ in completion length and in padding.
+
+    Both sides are width 8 so TRL can concatenate them. Chosen prompt length
+    is 2, with completion lengths 4 and 2 (the tails are padding). Rejected
+    prompt length is 3, with completion lengths 3 and 5 (row 1 has no pad).
+    """
+    torch.manual_seed(seed)
+    width = 8
+    chosen = torch.randint(1, VOCAB, (2, width))
+    rejected = torch.randint(1, VOCAB, (2, width))
+
+    chosen_attention = torch.zeros(2, width, dtype=torch.long)
+    chosen_attention[0, :6] = 1
+    chosen_attention[1, :4] = 1
+    chosen_completion = torch.zeros(2, width, dtype=torch.long)
+    chosen_completion[0, 2:6] = 1
+    chosen_completion[1, 2:4] = 1
+
+    rejected_attention = torch.zeros(2, width, dtype=torch.long)
+    rejected_attention[0, :6] = 1
+    rejected_attention[1, :] = 1
+    rejected_completion = torch.zeros(2, width, dtype=torch.long)
+    rejected_completion[0, 3:6] = 1
+    rejected_completion[1, 3:] = 1
+
+    chosen = chosen * chosen_attention
+    rejected = rejected * rejected_attention
+    return {
+        "chosen_ids": chosen,
+        "rejected_ids": rejected,
+        "chosen_attention_mask": chosen_attention,
+        "rejected_attention_mask": rejected_attention,
+        "chosen_completion_mask": chosen_completion,
+        "rejected_completion_mask": rejected_completion,
+    }
+
+
+def _preference_batch(layout: str, seed: int) -> dict[str, torch.Tensor]:
+    """One pair batch. Masks are per side, even when the values match."""
+    if layout == "matched":
+        batch = _pair_batch(seed)
+        attention = batch["attention_mask"]
+        completion = batch["completion_mask"]
+        return {
+            "chosen_ids": batch["chosen_ids"],
+            "rejected_ids": batch["rejected_ids"],
+            "chosen_attention_mask": attention,
+            "rejected_attention_mask": attention.clone(),
+            "chosen_completion_mask": completion,
+            "rejected_completion_mask": completion.clone(),
+        }
+    if layout == "unequal":
+        return _unequal_batch(seed)
+    raise ValueError(f"unknown layout {layout}")
+
+
+def _assert_sides_differ(batch: dict[str, torch.Tensor]) -> None:
+    """The unequal case is not the same mask concatenated with itself."""
+    assert not torch.equal(batch["chosen_attention_mask"], batch["rejected_attention_mask"])
+    assert not torch.equal(batch["chosen_completion_mask"], batch["rejected_completion_mask"])
+    assert not torch.equal(
+        batch["chosen_completion_mask"].sum(dim=1),
+        batch["rejected_completion_mask"].sum(dim=1),
+    )
+
+
+def _side_logprobs(
+    trainer: DPOTrainer,
+    model: torch.nn.Module,
+    batch: dict[str, torch.Tensor],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Policy or reference log-probs. Each side keeps its own masks."""
+    chosen = trainer.compute_log_probs(
+        model,
+        batch["chosen_ids"],
+        batch["chosen_attention_mask"],
+        batch["chosen_completion_mask"],
+    )
+    rejected = trainer.compute_log_probs(
+        model,
+        batch["rejected_ids"],
+        batch["rejected_attention_mask"],
+        batch["rejected_completion_mask"],
+    )
+    return chosen, rejected
+
+
+class _CharTokenizer:
+    """Maps each character to an id. Prompt text is a prefix of prompt+response."""
+
+    def __call__(
+        self,
+        text: str,
+        truncation: bool = False,
+        max_length: int = 32,
+        padding: str | None = None,
+        return_tensors: str | None = None,
+        add_special_tokens: bool = True,
+    ) -> dict:
+        del truncation, add_special_tokens
+        ids = [min(ord(ch), 120) for ch in text][:max_length]
+        if return_tensors != "pt":
+            return {"input_ids": ids}
+        length = len(ids)
+        pad = max_length - length
+        attn = [1] * length + [0] * pad
+        ids = ids + [0] * pad
+        return {
+            "input_ids": torch.tensor([ids], dtype=torch.long),
+            "attention_mask": torch.tensor([attn], dtype=torch.long),
+        }
+
+
+class TestCompletionLogProb:
+    """Sequence log-prob is the sum of completion tokens only."""
+
+    def test_prompt_tokens_are_not_counted(self):
+        """Fails if the reduction uses the attention mask, which still marks the prompt."""
+        trainer = _trainer()
+        batch = _pair_batch(seed=7)
+        input_ids = batch["chosen_ids"]
+        attention_mask = batch["attention_mask"]
+        completion_mask = batch["completion_mask"]
+
+        got = trainer.compute_log_probs(
+            trainer.policy_model, input_ids, attention_mask, completion_mask
+        )
+
+        logits = trainer.policy_model(input_ids=input_ids, attention_mask=attention_mask).logits
+        token_logps = gather_logprobs(logits, input_ids)
+        completion_sum = (token_logps * completion_mask[:, 1:].to(token_logps.dtype)).sum(dim=1)
+        prompt_and_completion = (token_logps * attention_mask[:, 1:].to(token_logps.dtype)).sum(
+            dim=1
+        )
+        mean_over_completion = completion_sum / completion_mask[:, 1:].sum(dim=1).clamp(min=1)
+
+        assert not torch.allclose(completion_sum, prompt_and_completion, atol=1e-3)
+        assert not torch.allclose(completion_sum, mean_over_completion, atol=1e-3)
+        assert torch.allclose(got, completion_sum, atol=FP32_ATOL, rtol=0)
+        assert got.shape == (input_ids.shape[0],)
+
+    def test_tokenize_masks_the_prompt_prefix(self):
+        """train_step's mask is 0 on the prompt prefix and on padding."""
+        config = TrainingConfig.toy_mode()
+        config.log_to_wandb = False
+        config.dataset.max_seq_length = 8
+        trainer = DPOTrainer(
+            config,
+            policy_model=tiny_causal_lm(0),
+            reference_model=tiny_causal_lm(1),
+            tokenizer=_CharTokenizer(),
+        )
+        input_ids, attention_mask, completion_mask = trainer._tokenize_for_loss("ab", "cd")
+
+        assert input_ids.shape == (1, 8)
+        assert int(attention_mask.sum()) == 4
+        assert completion_mask.tolist() == [[0, 0, 1, 1, 0, 0, 0, 0]]
+        # Counting the prompt would mark the first two real tokens as well.
+        assert completion_mask.tolist() != attention_mask.tolist()
+
+    def test_prefix_length_stops_at_the_first_difference(self):
+        assert prompt_prefix_length([1, 2, 3], [1, 2, 9, 4]) == 2
+        mask = completion_token_mask(
+            torch.tensor([[1, 1, 1, 1, 0]]),
+            torch.tensor([2]),
+        )
+        assert mask.tolist() == [[0, 0, 1, 1, 0]]
+
+
+def _trl_sigmoid_loss(
+    policy: torch.nn.Module,
+    reference: torch.nn.Module,
+    batch: dict[str, torch.Tensor],
+    beta: float,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """Call TRL 1.17.1 ``DPOTrainer._compute_loss`` on one concatenated batch.
+
+    ``__init__`` is not used. It constructs a Hugging Face Trainer and a
+    tokenizer, and with no reference model it loads one from the config
+    name. ``__new__`` plus the attributes the method reads is enough to run
+    the sigmoid loss on these tensors.
+
+    Chosen and rejected masks are concatenated in that order. They are not
+    the same tensor repeated.
+    """
+    add_fused_lm_head(policy, outputs=("log_probs", "entropy", "mean_logits", "is_top1"))
+    add_fused_lm_head(reference, outputs=("log_probs", "entropy", "mean_logits", "is_top1"))
+
+    class _Accel:
+        device = torch.device("cpu")
+
+        def gather(self, tensor: torch.Tensor) -> torch.Tensor:
+            return tensor
+
+        def gather_for_metrics(self, tensor: torch.Tensor) -> torch.Tensor:
+            return tensor
+
+    trainer = TrlDPOTrainer.__new__(TrlDPOTrainer)
+    trainer.model = policy
+    trainer.ref_model = reference
+    trainer.accelerator = _Accel()
+    trainer.ld_alpha = None
+    trainer.precompute_ref_logps = False
+    trainer.f_divergence_type = "reverse_kl"
+    trainer.loss_types = ["sigmoid"]
+    trainer.loss_weights = [1.0]
+    trainer.beta = beta
+    trainer.use_weighting = False
+    trainer.aux_loss_enabled = False
+    trainer.label_smoothing = 0.0
+    trainer._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
+    trainer._total_train_tokens = 0
+    trainer._tp_size = 1
+    trainer.args = SimpleNamespace(gradient_checkpointing_kwargs=None)
+
+    inputs = {
+        "input_ids": torch.cat([batch["chosen_ids"], batch["rejected_ids"]], dim=0),
+        "attention_mask": torch.cat(
+            [batch["chosen_attention_mask"], batch["rejected_attention_mask"]],
+            dim=0,
+        ),
+        "completion_mask": torch.cat(
+            [batch["chosen_completion_mask"], batch["rejected_completion_mask"]],
+            dim=0,
+        ),
+    }
+    loss = trainer._compute_loss(policy, inputs, return_outputs=False)
+    logged = {key: values[-1] for key, values in trainer._metrics["train"].items()}
+    return loss, logged
+
+
+def _weights_match(left: torch.nn.Module, right: torch.nn.Module) -> None:
+    pairs = zip(left.parameters(), right.parameters(), strict=True)
+    assert all(torch.equal(a, b) for a, b in pairs)
+
+
+class TestDPOParity:
+    """Loss, rewards, margin, accuracy, and policy gradients against TRL 1.17.1."""
+
+    def test_trl_pin(self) -> None:
+        import trl
+
+        assert trl.__version__ == "1.17.1"
+
+    @pytest.mark.parametrize("layout", ["matched", "unequal"])
+    @pytest.mark.parametrize("seed", range(6))
+    def test_loss_rewards_margin_match_trl(self, seed: int, layout: str) -> None:
+        beta = 0.2
+        trainer = _trainer(policy_seed=seed, reference_seed=seed + 10, beta=beta)
+        batch = _preference_batch(layout, seed)
+        if layout == "unequal":
+            _assert_sides_differ(batch)
+        policy = trainer.policy_model
+        reference = trainer.reference_model
+        policy.train()
+
+        policy_chosen, policy_rejected = _side_logprobs(trainer, policy, batch)
+        with torch.no_grad():
+            ref_chosen, ref_rejected = _side_logprobs(trainer, reference, batch)
+
+        loss, metrics = trainer.compute_dpo_loss(
+            policy_chosen, policy_rejected, ref_chosen, ref_rejected
+        )
+        # Paper equation, written here. It does not call rlpost or TRL.
+        chosen_reward = beta * (policy_chosen - ref_chosen)
+        rejected_reward = beta * (policy_rejected - ref_rejected)
+        paper_loss = -F.logsigmoid(chosen_reward - rejected_reward).mean()
+        assert torch.allclose(loss, paper_loss, atol=FP32_ATOL, rtol=0)
+
+        trl_loss, logged = _trl_sigmoid_loss(policy, reference, batch, beta)
+        assert torch.allclose(loss, trl_loss, atol=FP32_ATOL, rtol=0)
+        assert metrics.margin_mean == pytest.approx(logged["rewards/margins"], abs=FP32_ATOL)
+        assert metrics.accuracy == pytest.approx(logged["rewards/accuracies"], abs=FP32_ATOL)
+        assert policy_chosen.detach().mean().item() == pytest.approx(
+            logged["logps/chosen"], abs=SUM_MEAN_ATOL
+        )
+        assert policy_rejected.detach().mean().item() == pytest.approx(
+            logged["logps/rejected"], abs=SUM_MEAN_ATOL
+        )
+        assert chosen_reward.detach().mean().item() == pytest.approx(
+            logged["rewards/chosen"], abs=FP32_ATOL
+        )
+        assert rejected_reward.detach().mean().item() == pytest.approx(
+            logged["rewards/rejected"], abs=FP32_ATOL
+        )
+
+    @pytest.mark.parametrize("layout", ["matched", "unequal"])
+    @pytest.mark.parametrize("seed", range(6))
+    def test_policy_gradients_match_trl(self, seed: int, layout: str) -> None:
+        """Backward both losses from the same weights. Reference grads stay None."""
+        beta = 0.2
+        batch = _preference_batch(layout, seed)
+        if layout == "unequal":
+            _assert_sides_differ(batch)
+
+        policy = tiny_causal_lm(seed)
+        policy_trl = tiny_causal_lm(seed)
+        reference = tiny_causal_lm(seed + 10)
+        reference_trl = tiny_causal_lm(seed + 10)
+        _weights_match(policy, policy_trl)
+        _weights_match(reference, reference_trl)
+
+        config = TrainingConfig.toy_mode()
+        config.log_to_wandb = False
+        config.alignment.dpo_beta = beta
+        trainer = DPOTrainer(config, policy_model=policy, reference_model=reference)
+        reference_trl.requires_grad_(False)
+        reference_trl.eval()
+        policy.train()
+        policy_trl.train()
+
+        policy_chosen, policy_rejected = _side_logprobs(trainer, policy, batch)
+        with torch.no_grad():
+            ref_chosen, ref_rejected = _side_logprobs(trainer, reference, batch)
+        loss, _ = trainer.compute_dpo_loss(policy_chosen, policy_rejected, ref_chosen, ref_rejected)
+        loss.backward()
+
+        trl_loss, _ = _trl_sigmoid_loss(policy_trl, reference_trl, batch, beta)
+        trl_loss.backward()
+
+        compared = 0
+        for ours, theirs in zip(policy.parameters(), policy_trl.parameters(), strict=True):
+            assert ours.grad is not None
+            assert theirs.grad is not None
+            assert torch.allclose(ours.grad, theirs.grad, atol=GRAD_ATOL, rtol=0)
+            compared += 1
+        assert compared > 0
+        assert any(torch.count_nonzero(p.grad) > 0 for p in policy.parameters())
+        assert all(not p.requires_grad and p.grad is None for p in reference.parameters())
+        assert all(not p.requires_grad and p.grad is None for p in reference_trl.parameters())
 
 
 if __name__ == "__main__":
