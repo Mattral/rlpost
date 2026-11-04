@@ -22,10 +22,11 @@ so the penalty is KL(reference || policy). Naming that estimator is S0.6e.
 
 ``V_clip`` is ``V_old + clip(V - V_old, -c, c)``. ``eps`` in the policy
 clip is ``ppo_epsilon``. ``c`` is the ``value_clip`` config field, not
-``ppo_epsilon``. When ``value_clip`` is set, ``L_v`` is the mean of
+``ppo_epsilon``. Both value modes use the same one-half. When
+``value_clip`` is set, ``L_v`` is the mean of
 ``0.5 * max((V - R)^2, (V_clip - R)^2)`` and ``train_step`` passes the
 batch values as ``V_old``. When ``value_clip`` is unset, ``L_v`` is
-unclipped ``mean((V - R)^2)``. The loss functions do not take a padding
+``mean(0.5 * (V - R)^2)``. The loss functions do not take a padding
 mask. ``train_step`` still does not pass one. That mask stays in S0.7.
 """
 
@@ -290,8 +291,11 @@ class PPOTrainer:
         ``returns`` and ``old_values`` are detached, so the gradient reaches
         ``value_pred`` only. No mask is applied.
 
-        When ``value_clip`` is unset, the loss is ``value_loss_coefficient``
-        times ``mean((V - R)^2)``. ``old_values`` is not used.
+        Both modes return ``value_loss_coefficient * L_v``. ``L_v`` always
+        includes the one-half. When ``value_clip`` is unset, ``old_values``
+        is not used and
+
+            L_v = mean(0.5 * (V - R)^2)
 
         When ``value_clip`` is a radius ``c >= 0``, ``old_values`` is required
         and
@@ -299,7 +303,7 @@ class PPOTrainer:
             V_clip = V_old + clip(V - V_old, -c, c)
             L_v = mean(0.5 * max((V - R)^2, (V_clip - R)^2))
 
-        The returned loss is ``value_loss_coefficient * L_v``. ``c`` is not
+        A radius that does not bind matches the unset loss. ``c`` is not
         ``ppo_epsilon``.
 
         Args:
@@ -318,22 +322,22 @@ class PPOTrainer:
             )
         returns = returns.detach()
         coefficient = self.alignment_config.value_loss_coefficient
-        unclipped = (value_pred - returns).square()
+        squared_error = (value_pred - returns).square()
         clip = self.alignment_config.value_clip
-        if clip is None:
-            return unclipped.mean() * coefficient
-        if old_values is None:
-            raise ValueError("value_clip is set; old_values is required")
-        if old_values.shape != value_pred.shape:
-            raise ValueError(
-                "shape mismatch: "
-                f"value_pred {tuple(value_pred.shape)}, "
-                f"old_values {tuple(old_values.shape)}"
-            )
-        old_values = old_values.detach()
-        value_clipped = old_values + (value_pred - old_values).clamp(-clip, clip)
-        clipped = (value_clipped - returns).square()
-        return torch.maximum(unclipped, clipped).mean() * 0.5 * coefficient
+        if clip is not None:
+            if old_values is None:
+                raise ValueError("value_clip is set; old_values is required")
+            if old_values.shape != value_pred.shape:
+                raise ValueError(
+                    "shape mismatch: "
+                    f"value_pred {tuple(value_pred.shape)}, "
+                    f"old_values {tuple(old_values.shape)}"
+                )
+            old_values = old_values.detach()
+            value_clipped = old_values + (value_pred - old_values).clamp(-clip, clip)
+            clipped = (value_clipped - returns).square()
+            squared_error = torch.maximum(squared_error, clipped)
+        return squared_error.mean() * 0.5 * coefficient
 
     def compute_entropy_bonus(self: "PPOTrainer", logits: Tensor) -> Tensor:
         """Mean per-row Shannon entropy of the action distribution.

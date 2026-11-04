@@ -9,9 +9,10 @@ Entropy parity is ``trl.trainer.utils.entropy_from_logits`` (TRL 1.17.1,
 uses the mean of those rows. Triton is not used on this CPU.
 
 ``ppo_epsilon`` clips the probability ratio only. ``value_clip`` is the
-value radius ``c``. Unset, the value loss is ``value_loss_coefficient *
-mean((V - R)^2)``. Set, it is ``value_loss_coefficient * mean(0.5 *
-max((V - R)^2, (V_clip - R)^2))`` with
+value radius ``c``. Both modes use the same scale,
+``value_loss_coefficient * mean(0.5 * squared error)``. Unset, the
+squared error is ``(V - R)^2``. Set, it is
+``max((V - R)^2, (V_clip - R)^2)`` with
 ``V_clip = V_old + clip(V - V_old, -c, c)``.
 
 fp32 absolute tolerance is 1e-6. The hand numbers are dyadic.
@@ -59,13 +60,13 @@ def _closed_form_value(
     clip: float | None,
     coefficient: float,
 ) -> torch.Tensor:
-    unclipped = (value_pred - returns).square()
-    if clip is None:
-        return unclipped.mean() * coefficient
-    assert old_values is not None
-    value_clipped = old_values + (value_pred - old_values).clamp(-clip, clip)
-    clipped = (value_clipped - returns).square()
-    return torch.maximum(unclipped, clipped).mean() * 0.5 * coefficient
+    squared_error = (value_pred - returns).square()
+    if clip is not None:
+        assert old_values is not None
+        value_clipped = old_values + (value_pred - old_values).clamp(-clip, clip)
+        clipped = (value_clipped - returns).square()
+        squared_error = torch.maximum(squared_error, clipped)
+    return squared_error.mean() * 0.5 * coefficient
 
 
 def test_trl_1171_entropy_helper_and_no_ppo_value_loss() -> None:
@@ -108,6 +109,45 @@ def test_policy_loss_matches_closed_form() -> None:
     assert torch.allclose(ratio, spec_ratio, atol=ATOL, rtol=0)
 
 
+def test_policy_loss_keeps_the_unclipped_term_when_it_is_smaller() -> None:
+    """eps = 0.25. Outside the clip, min still takes r*A when that is smaller.
+
+    r=1.5 and A=-1: unclipped is -1.5, clipped is -1.25, min is -1.5.
+    r=0.5 and A=1: unclipped is 0.5, clipped is 0.75, min is 0.5.
+    The four terms are [-1.5, 0.5, -1.5, 0.5]. Their mean is -0.5.
+    The loss is 0.5.
+
+    Always multiplying by the clipped ratio instead gives [-1.25, 0.75,
+    -1.25, 0.75], mean -0.25, loss 0.25. That loss is not this one.
+    """
+    epsilon = 0.25
+    trainer = _trainer(epsilon, value_coef=1.0, value_clip=None)
+    log_probs_old = torch.zeros(4)
+    ratios = torch.tensor([1.5, 0.5, 1.5, 0.5])
+    log_probs_new = torch.log(ratios)
+    advantages = torch.tensor([-1.0, 1.0, -1.0, 1.0])
+
+    loss, ratio = trainer.compute_policy_loss(log_probs_new, log_probs_old, advantages)
+    spec_loss, spec_ratio = _closed_form_policy(log_probs_new, log_probs_old, advantages, epsilon)
+    unclipped = ratio * advantages
+    clipped_term = ratio.clamp(1.0 - epsilon, 1.0 + epsilon) * advantages
+    always_clipped = -clipped_term.mean()
+
+    assert torch.allclose(ratio, ratios, atol=ATOL, rtol=0)
+    assert torch.allclose(unclipped, torch.tensor([-1.5, 0.5, -1.5, 0.5]), atol=ATOL, rtol=0)
+    assert torch.allclose(
+        torch.min(unclipped, clipped_term),
+        unclipped,
+        atol=ATOL,
+        rtol=0,
+    )
+    assert torch.allclose(loss, torch.tensor(0.5), atol=ATOL, rtol=0)
+    assert torch.allclose(loss, spec_loss, atol=ATOL, rtol=0)
+    assert torch.allclose(ratio, spec_ratio, atol=ATOL, rtol=0)
+    assert torch.allclose(always_clipped, torch.tensor(0.25), atol=ATOL, rtol=0)
+    assert not torch.allclose(loss, always_clipped, atol=ATOL, rtol=0)
+
+
 def test_value_loss_clipped_matches_closed_form() -> None:
     """c = 0.25 and ppo_epsilon = 0.1, so the value radius is not the policy clip.
 
@@ -147,8 +187,8 @@ def test_value_loss_inside_the_clip_is_half_mse() -> None:
     assert torch.allclose(loss, half_mse, atol=ATOL, rtol=0)
 
 
-def test_value_loss_unclipped_matches_mse() -> None:
-    """value_clip unset keeps coefficient * MSE, including when V_old is passed."""
+def test_value_loss_unclipped_matches_half_mse() -> None:
+    """value_clip unset is coefficient * mean(0.5 * (V - R)^2), even if V_old is passed."""
     trainer = _trainer(epsilon=0.2, value_coef=0.5, value_clip=None)
     value_pred = torch.tensor([[0.0], [1.0]])
     old_values = torch.tensor([[1.0], [1.0]])
@@ -159,7 +199,8 @@ def test_value_loss_unclipped_matches_mse() -> None:
     spec = _closed_form_value(value_pred, returns, None, None, 0.5)
     clipped = _closed_form_value(value_pred, returns, old_values, 0.25, 0.5)
 
-    assert torch.allclose(loss, torch.tensor(0.0625), atol=ATOL, rtol=0)
+    # mean((V-R)^2) is 0.125. 0.5 * coefficient 0.5 * 0.125 = 0.03125.
+    assert torch.allclose(loss, torch.tensor(0.03125), atol=ATOL, rtol=0)
     assert torch.allclose(loss, omitted, atol=ATOL, rtol=0)
     assert torch.allclose(loss, spec, atol=ATOL, rtol=0)
     assert not torch.allclose(loss, clipped, atol=ATOL, rtol=0)
@@ -175,6 +216,21 @@ def test_value_clip_zero_uses_the_old_value() -> None:
     loss = trainer.compute_value_loss(value_pred, returns, old_values)
 
     assert torch.allclose(loss, torch.tensor(0.5), atol=ATOL, rtol=0)
+
+
+def test_value_clip_that_never_binds_matches_unclipped() -> None:
+    """A huge radius leaves every sample inside the clip, so the losses match."""
+    value_pred = torch.tensor([1.0, 0.5, 0.0])
+    old_values = torch.tensor([1.0, 0.0, 0.25])
+    returns = torch.tensor([0.0, 0.0, 0.5])
+    unclipped = _trainer(epsilon=0.2, value_coef=0.5, value_clip=None)
+    never_binds = _trainer(epsilon=0.2, value_coef=0.5, value_clip=1e9)
+
+    plain = unclipped.compute_value_loss(value_pred, returns, old_values)
+    wide = never_binds.compute_value_loss(value_pred, returns, old_values)
+
+    assert torch.equal(plain, wide)
+    assert torch.allclose(plain, torch.tensor(0.5 * 0.5 * (1.0 + 0.25 + 0.25) / 3.0), atol=ATOL)
 
 
 def test_value_clip_requires_old_values() -> None:
