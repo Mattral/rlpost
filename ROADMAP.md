@@ -400,6 +400,35 @@ here is a result. S0.6f is optional and does not change the order of S0.6b–e.
     The two failures are `test_policy_loss_computation` and
     `test_value_loss_computation` (S0.6d). Ruff check and ruff format
     check pass.
+  - 2026-11-04 follow-up, same branch, test commit `c301a03` on top of
+    `9cb030b`. The parity test
+    is parametrized over seeds 0 through 5. The policy is
+    `tiny_causal_lm(seed)`, the reference is `tiny_causal_lm(seed + 10)`,
+    and the token batch uses that seed. Each seed runs a matched-mask
+    batch and a batch whose chosen and rejected rows differ in completion
+    length and in padding. Chosen completions are lengths 4 and 2 with
+    prompt length 2. Rejected completions are lengths 3 and 5 with prompt
+    length 3. The four masks are separate arguments to
+    `compute_log_probs`, and TRL receives them concatenated per side.
+    Reusing the chosen mask for the rejected side moves the loss by about
+    2e-3 on seed 0 of that batch.
+  - On that grid, CPU, torch 2.15, the same tiny Llama: the largest
+    |loss - TRL loss| was 2.384e-7. The largest margin gap was 5.700e-7.
+    The largest reward-mean gap was 5.737e-7. The accuracy gap was 0.
+    The logged sum-mean gap stayed 1.907e-6. Tolerances are unchanged:
+    1e-6 on the loss, the margin, and the rewards, and 1e-5 on the logged
+    means.
+  - Gradient parity builds a second policy and a second reference from
+    the same seeds, so the starting weights match. Both losses are
+    backwarded. The optimizer is not stepped. Every policy parameter has
+    a gradient on both copies. Absolute tolerance is 1e-6. The largest
+    |rlpost grad - TRL grad| was 9.686e-8. Both reference copies are
+    frozen, and every reference grad stays None. The mock
+    `test_gradients_not_through_reference` is deleted.
+    `test_reference_model_frozen` still checks the freeze.
+  - Pytest after that follow-up: 113 collected, 111 passed, 2 failed,
+    16.86s. The two failures are the same S0.6d PPO loss tests. Ruff
+    check and ruff format check pass.
 
 ### [ ] S0.6c GAE advantages and returns
 - Depends on: S0.6a.
@@ -761,3 +790,4 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-11-04 · S0.6a · One shifted logprob gather, parity-tested against TRL 1.17.1 selective_log_softmax. The two train_step tests pass. Nine older failures remain. · 48c6e03
 - 2026-11-04 · S0.7 · Notes only. PPO train_step applies no mask. Policy loss, entropy, and KL include prompt and padding tokens. The target is response-token-only masking, with tests that fail on that behavior. Added optional S0.6f, an fp32 logsumexp gather before Stage 1. · b1abaff
 - 2026-11-04 · S0.6b · Sigmoid DPO matches TRL 1.17.1 `_compute_loss`: beta-scaled rewards, completion-token sum, `dpo_beta` field. Seven DPO failures pass. Two PPO loss tests remain. · 9cb030b
+- 2026-11-04 · S0.6b · Parity covers seeds 0-5, unequal completion masks, and policy gradients at atol 1e-6. Reference grads stay None. The mock gradient test is gone. Two PPO loss tests remain. · c301a03
