@@ -14,9 +14,9 @@ Status: untested. The version string is `"0.1.0"`.
 
 Pydantic models for a run: `ModelConfig`, `OptimizationConfig`, `AlignmentConfig`, `DatasetConfig`, `TrainingConfig`. No tensors. YAML and JSON round-trip through `from_yaml`, `to_yaml`, `from_json_file`, and `to_json_file`. `TrainingConfig.toy_mode()` builds a small config the unit tests use.
 
-`PPOTrainer` reads `alignment.gamma`, `gae_lambda`, `kl_coefficient`, `target_kl`, `ppo_epsilon`, `entropy_coefficient`, `value_loss_coefficient`, `advantage_normalization`, and `optimization.max_grad_norm`, plus `log_to_wandb`. It does not read `alignment.ppo_num_epochs`. SFT and the reward trainer read learning rate, weight decay, warmup, grad norm, mixed precision, and batch size. They also read `model.lora_target_modules`, which is not a field on `ModelConfig`. `PreferencePairDataset` reads `dataset.dataset_size`, which is not a field on `DatasetConfig`. Those two attributes raise `AttributeError` if that line runs. `model.use_peft_lora` and `model.attn_implementation` are stored. `tests/test_config.py` checks both. No loader reads `attn_implementation`, and the trainers apply LoRA without reading `use_peft_lora`.
+`PPOTrainer` reads `alignment.gamma`, `gae_lambda`, `kl_coefficient`, `target_kl`, `ppo_epsilon`, `entropy_coefficient`, `value_loss_coefficient`, `value_clip`, `advantage_normalization`, and `optimization.max_grad_norm`, plus `log_to_wandb`. It does not read `alignment.ppo_num_epochs`. SFT and the reward trainer read learning rate, weight decay, warmup, grad norm, mixed precision, and batch size. They also read `model.lora_target_modules`, which is not a field on `ModelConfig`. `PreferencePairDataset` reads `dataset.dataset_size`, which is not a field on `DatasetConfig`. Those two attributes raise `AttributeError` if that line runs. `model.use_peft_lora` and `model.attn_implementation` are stored. `tests/test_config.py` checks both. No loader reads `attn_implementation`, and the trainers apply LoRA without reading `use_peft_lora`.
 
-Status: tested for construction, validation, and YAML load. `AlignmentConfig.dpo_beta` is a field, default `0.1`, and it must be `> 0`. It is not `kl_coefficient`. `model.lora_target_modules` and `dataset.dataset_size` are still missing. See [S0.11](../ROADMAP.md#s011-cli-actually-runs-sftrmdpoppo-end-to-end-on-a-tiny-model-on-cpu).
+Status: tested for construction, validation, and YAML load. `AlignmentConfig.dpo_beta` is a field, default `0.1`, and it must be `> 0`. It is not `kl_coefficient`. `AlignmentConfig.value_clip` defaults to `None` and, when set, must be `>= 0`. It is not `ppo_epsilon`. `model.lora_target_modules` and `dataset.dataset_size` are still missing. See [S0.11](../ROADMAP.md#s011-cli-actually-runs-sftrmdpoppo-end-to-end-on-a-tiny-model-on-cpu).
 
 Tests: `tests/test_config.py`.
 
@@ -83,7 +83,7 @@ TRL 1.17.1 `DPOTrainer._compute_loss`, sigmoid loss, `label_smoothing` 0, `ld_al
 
 Status: the loss, the margin, the accuracy, `dpo_beta`, the completion-token sum, and construction on the tiny Llama are tested. `train_step` is untested.
 
-Tests: `tests/test_dpo_engine.py`. The two PPO loss tests in `tests/test_ppo_engine.py` still fail. That is [S0.6d](../ROADMAP.md#s06d-ppo-clipped-policy-loss-and-value-loss).
+Tests: `tests/test_dpo_engine.py`.
 
 ## `src/rlpost/ppo_engine.py`
 
@@ -106,11 +106,19 @@ ratio = exp(log_probs_new - log_probs_old)
 loss  = -mean(min(ratio * A, clip(ratio, 1-eps, 1+eps) * A))    # scalar
 ```
 
-`ratio` has the same shape as the inputs. The two loss tests fail because `torch.randn` inputs do not require grad. That is a test bug, left for S0.6. The formula is the clipped surrogate.
+`eps` is `ppo_epsilon`. `log_probs_old` and `advantages` are detached, so the gradient reaches `log_probs_new` only. `ratio` has the same shape as the inputs. The closed form, including a clip on both sides and a negative advantage, is in `tests/test_ppo_loss.py`.
 
-`compute_value_loss(value_pred, returns)` is `value_loss_coefficient * MSE`. Same shape in, scalar out. No clip. A clipped value loss is [S0.6d](../ROADMAP.md#s06-numerical-parity-tests-core-correctness).
+`compute_value_loss(value_pred, returns, old_values=None)` returns a scalar. `returns` and `old_values` are detached, so the gradient reaches `value_pred` only. When `alignment.value_clip` is `None`, the loss is `value_loss_coefficient * mean((V - R)^2)` and `old_values` is ignored. When `value_clip` is `c >= 0`, `old_values` is required:
 
-`compute_entropy_bonus(logits [..., A])` is the categorical entropy, mean over every axis except the last. Scalar. Tested for `[B, A]`.
+```
+V_clip = V_old + clip(V - V_old, -c, c)
+L_v    = mean(0.5 * max((V - R)^2, (V_clip - R)^2))
+loss   = value_loss_coefficient * L_v
+```
+
+`c` is not `ppo_epsilon`. Both forms are checked against a closed form in `tests/test_ppo_loss.py`. No mask is applied. Masking is [S0.7](../ROADMAP.md#s07-classic-rlhf-edge-case-tests).
+
+`compute_entropy_bonus(logits [..., A])` is the mean of the per-row Shannon entropy. Each row matches `trl.trainer.utils.entropy_from_logits` in TRL 1.17.1. A uniform row is `log(n)`. A `[0.75, 0.25]` row is checked by hand. Scalar. No mask.
 
 `compute_kl_divergence(logits_new, logits_old)` is the full-vocabulary categorical KL(old || new), then a mean. Scalar. `train_step` calls it as `(policy_logits, ref_logits)`, so the penalty is KL(reference || policy), not KL(policy || reference). k1, k2, and k3 are not implemented. Tested only for non-negativity and for identical inputs (about 0). Naming the estimator is [S0.6e](../ROADMAP.md#s06-numerical-parity-tests-core-correctness). The direction was not changed in S0.4.
 
@@ -126,11 +134,11 @@ policy_loss + value_loss - entropy_coefficient * entropy + kl_coefficient * kl
 
 `train_step` calls `gather_logprobs(policy_logits, input_ids)`. Logits at `t` score token `t+1`. The result is `[B, T-1]`. `old_log_probs` must have that shape. GAE stays `[B, T]`. The policy ratio uses `advantages[:, 1:]`, so the weight on token `t` (`t >= 1`) is `advantages[:, t]`. A reward at index `t` therefore enters the policy term for that same token. No padding mask is applied in this step. That mask, and advantage normalisation over padding, are [S0.7](../ROADMAP.md#s07-classic-rlhf-edge-case-tests). The two `test_train_step_*` tests build a tiny random-init Llama and pass.
 
-`value_pred` is used for the value loss. GAE uses the batch's `values` and `next_values`, not `value_pred`.
+`value_pred` is the current critic and is what the value loss trains. GAE uses the batch's `values` and `next_values`. `train_step` passes `values` into the value loss as `V_old`. That argument is used only when `value_clip` is set. No padding mask is passed to GAE or to the losses.
 
-Status: GAE is checked against the backward recursion, including a padding mask. Entropy, KL-on-identical-inputs, explained variance, the adaptive coefficient, and `train_step` on a tiny causal LM are tested. The clipped loss and the value loss are known-broken only on the test side (no grad). See [S0.4](../ROADMAP.md#s04-code-ownership-pass), [S0.6](../ROADMAP.md#s06-numerical-parity-tests-core-correctness), and [S0.7](../ROADMAP.md#s07-classic-rlhf-edge-case-tests).
+Status: GAE, the clipped surrogate, both value losses, entropy against the TRL helper, KL-on-identical-inputs, explained variance, the adaptive coefficient, and `train_step` on a tiny causal LM are tested. See [S0.4](../ROADMAP.md#s04-code-ownership-pass), [S0.6](../ROADMAP.md#s06-numerical-parity-tests-core-correctness), and [S0.7](../ROADMAP.md#s07-classic-rlhf-edge-case-tests).
 
-Tests: `tests/test_ppo_engine.py`, `tests/test_gae.py`, and `tests/test_logprob_gather.py`. Still failing: `test_policy_loss_computation`, `test_value_loss_computation`.
+Tests: `tests/test_ppo_engine.py`, `tests/test_ppo_loss.py`, `tests/test_gae.py`, and `tests/test_logprob_gather.py`.
 
 ## `src/rlpost/cli.py`
 
@@ -200,7 +208,7 @@ From Kyle, still unexplained as an API:
 
 From thitsarhmwe-commits:
 
-- The DPO margin, beta, and empty stand-in failures were the S0.6 triage. S0.6b implemented them and those tests pass. The two PPO loss tests that still fail are S0.6d.
+- The DPO margin, beta, and empty stand-in failures were the S0.6 triage. S0.6b implemented them and those tests pass. S0.6d rewrote the two PPO loss tests so their inputs require grad, and those tests pass.
 
 S0.9 deleted the process-group module, the communication hooks, the async checkpoint writer, and the multi-rank script. Those entries are gone with the files.
 

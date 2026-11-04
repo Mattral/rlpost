@@ -490,12 +490,40 @@ here is a result. S0.6f is optional and does not change the order of S0.6b–e.
     `test_policy_loss_computation` and `test_value_loss_computation`
     (S0.6d). Ruff check and ruff format check pass.
 
-### [ ] S0.6d PPO clipped policy loss and value loss
+### [x] S0.6d PPO clipped policy loss and value loss
 - Depends on: S0.6a.
 - PPO clipped policy loss, value loss (clipped) and entropy vs a reference implementation.
-- `test_policy_loss_computation` and `test_value_loss_computation` still fail because
-  `torch.randn` inputs do not require grad. Rewrite them here.
+- `test_policy_loss_computation` and `test_value_loss_computation` take inputs that
+  require grad. Gradients reach `logp_new` and `V` only.
 - Notes:
+  - 2026-11-04: branch `test/S0.6d-ppo-loss` from `origin/main` `a3cc67a`
+    (merge of PR #22). Code commit `0107a29`.
+  - The recovered stash clipped the value loss with `ppo_epsilon` and no
+    one-half, and its grad tests checked a `Linear` weight. That draft is
+    not what landed. `value_clip` is an `AlignmentConfig` field, default
+    `None`, and `>= 0` when set. `None` keeps
+    `value_loss_coefficient * mean((V - R)^2)`. A set radius `c` uses
+    `V_clip = V_old + clip(V - V_old, -c, c)` and
+    `value_loss_coefficient * mean(0.5 * max((V - R)^2, (V_clip - R)^2))`.
+    `c` is not `ppo_epsilon`. `train_step` passes batch `values` as
+    `V_old` and uses them only when `value_clip` is set.
+  - The policy loss was already
+    `-mean(min(r * A, clip(r, 1-eps, 1+eps) * A))` with
+    `r = exp(logp_new - logp_old)` and `eps = ppo_epsilon`. `logp_old`
+    and `A` are detached. The closed form in `tests/test_ppo_loss.py`
+    uses eps 0.25. Ratios 1.5 and 0.5 bind, the second with `A < 0`.
+    The loss is -0.125. Absolute tolerance is 1e-6.
+  - Entropy is the mean of the per-row Shannon entropy. The per-row value
+    matches `trl.trainer.utils.entropy_from_logits` in TRL 1.17.1
+    (`trainer/utils.py`). A uniform row is `log(n)`. A distribution
+    `[0.75, 0.25]` matches `-(p log p).sum()`. TRL 1.17.1 has no PPO
+    trainer and no value-loss helper. A scan of the installed package
+    found none of `cliprange_value`, `vf_loss`, or `class PPOTrainer`.
+  - The loss functions do not take a mask. `train_step` still calls GAE
+    and the losses without one, and it still normalises advantages over
+    the whole tensor. Both stay in S0.7.
+  - Pytest on this branch, `.venv`, torch 2.15.0+cpu: 130 passed, 16.81s.
+    Ruff check and ruff format check pass.
 
 ### [ ] S0.6e KL estimator
 - Depends on: S0.6a.
@@ -881,3 +909,4 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-11-04 · S0.6b · Parity covers seeds 0-5, unequal completion masks, and policy gradients at atol 1e-6. Reference grads stay None. The mock gradient test is gone. Two PPO loss tests remain. · c301a03
 - 2026-11-04 · S0.11 · Notes only. DPO train_step is one pair, shape [1, T]. Batched collation, with the S0.6b parity test on a batch of 4, has to land before S1.2. Drop the max_grad_norm and log_to_wandb fallbacks and read the existing fields. · 81b6834
 - 2026-11-04 · S0.6c · GAE matches the T=4 backward recursion. Padding does not enter the backup. TRL 1.17.1 has no GAE helper. Two PPO loss tests remain. · 3f875cf
+- 2026-11-04 · S0.6d · Clipped surrogate, optional value clip (`value_clip`, with the one-half), and entropy matched to TRL 1.17.1 `entropy_from_logits`. The CPU suite is green: 130 passed. · 0107a29
