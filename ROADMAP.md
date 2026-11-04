@@ -533,11 +533,53 @@ here is a result. S0.6f is optional and does not change the order of S0.6b–e.
   - Pytest on this branch, `.venv`, torch 2.15.0+cpu: 132 passed, 19.34s.
     Ruff check and ruff format check pass.
 
-### [ ] S0.6e KL estimator
+### [x] S0.6e KL estimator
 - Depends on: S0.6a.
-- Name the estimator (k1/k2/k3) and test it. The current penalty is full-vocabulary
+- Name the estimator (k1/k2/k3) and test it. The penalty was full-vocabulary
   KL(reference || policy).
 - Notes:
+  - 2026-11-04: branch `test/S0.6e-kl-estimator` from `origin/main` `3532c95`
+    (merge of PR #23). Code commit `3f0319f`.
+  - `AlignmentConfig.kl_estimator` is `k1`, `k2`, or `k3`, validated, default
+    `k3`. `lr = log p_ref - log p_policy` at the sampled tokens.
+    `k1 = -lr`. `k2 = 0.5 * lr^2`. `k3 = exp(lr) - 1 - lr`.
+    `per_token_kl` detaches `log p_ref`, so the gradient reaches the policy
+    log-probabilities only.
+  - `k3` is the default because it is unbiased for KL(policy || reference)
+    and >= 0 at every token. Unbiased:
+    `E_{a ~ policy}[q(a) / p(a) - 1 - log(q(a) / p(a))] = KL(policy || reference)`.
+    Nonnegative: `f(x) = exp(x) - 1 - x` is convex, `f(0) = 0`, and
+    `f'(0) = 0`, so the minimum is 0. `k1` is the same expectation and can
+    be negative on a token. `k2` is the quadratic term of that expansion.
+    It is always >= 0 and it is biased.
+  - The old penalty was the full-vocabulary mean of
+    `sum_a p_ref(a) (log p_ref(a) - log p_policy(a))`, which is
+    KL(reference || policy). `train_step` now gathers both models with
+    `gather_logprobs` and averages the estimator on those tokens, shape
+    `[B, T-1]`. `compute_kl_divergence` accepts a mask (`1` keeps a token,
+    `0` drops it, all zeros return 0). `train_step` does not pass one.
+    Prompt and padding tokens in that window stay in the mean. That stays
+    in S0.7.
+  - Closed form is `sum_a p(a) (log p(a) - log q(a))` on
+    `p = (0.8, 0.1, 0.1)` and `q = (0.2, 0.2, 0.6)`. Those two directions
+    differ by about 0.076. Monte Carlo draws 1,000,000 tokens from `p`,
+    seed 0. Absolute tolerance is `1e-2`. On that draw the k1 mean missed
+    KL(p || q) by 0.00123 and the k3 mean missed it by 0.00116. Swapping
+    the two arguments misses KL(p || q). The k2 mean on the same draw was
+    0.953 against KL 0.861, a gap of 0.092, outside that tolerance.
+  - TRL 1.17.1 `GRPOTrainer._compute_loss` (`trainer/grpo_trainer.py`) does
+    compute a per-token KL. The assignment is
+    `exp(ref_per_token_logps - per_token_logps) - (ref_per_token_logps - per_token_logps) - 1`,
+    which is k3. There is no k1/k2 switch. On identical log-probabilities,
+    float64 and float32, `per_token_kl(..., "k3")` matches that expression
+    bit for bit. `GRPOConfig.use_bias_correction_kl` defaults to True and
+    then multiplies by the importance ratio `coef_1`. That product is not
+    k3, and this estimator does not apply it. RLOO in the same release
+    uses `old_per_token_logps - ref_per_token_logps`, which is k1. Its
+    comment calls that the first-order log ratio and contrasts it with
+    GRPO's Schulman approximation. RLOO is not the parity target.
+  - Pytest on this branch, `.venv`, torch 2.15.0+cpu: 141 passed, 17.00s.
+    Ruff check and ruff format check pass.
 
 ### [ ] S0.6f fp32 logsumexp gather (optional, before Stage 1)
 - Depends on: S0.6a. Optional. It does not block S0.6b–e or S0.7. Land it before
@@ -596,6 +638,14 @@ Cover:
     `compute` can take a padding mask. `train_step` does not pass one,
     and it still normalises advantages over every position, including
     pads. Those two stay in this item. The closed form is under S0.6c.
+  - 2026-11-04, S0.6e, code commit `3f0319f`. The sentences above that
+    call the KL term a mean over the full logits `[B, T, V]` describe
+    main before this commit. `train_step` now averages the configured
+    per-token estimator on `gather_logprobs` of the policy and the
+    reference, shape `[B, T-1]`. It still passes no mask, so prompt and
+    padding tokens in that window stay inside the KL mean. Entropy is
+    still the mean over the full logits. Which tokens the KL uses, and
+    the advantage normalisation over padding, stay in this item.
 
 ### [ ] S0.8 Determinism and resumable checkpoints
 - Seeding gives identical losses on CPU for 2 runs.
@@ -919,3 +969,4 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-11-04 · S0.6c · GAE matches the T=4 backward recursion. Padding does not enter the backup. TRL 1.17.1 has no GAE helper. Two PPO loss tests remain. · 3f875cf
 - 2026-11-04 · S0.6d · Clipped surrogate, optional value clip (`value_clip`, with the one-half), and entropy matched to TRL 1.17.1 `entropy_from_logits`. The CPU suite is green: 130 passed. · 0107a29
 - 2026-11-04 · S0.6d · Both value modes use the one-half. Non-binding ratios keep r*A, and always clipping that input is a different loss. 132 passed. · a1bb38e
+- 2026-11-04 · S0.6e · Sampled-token KL(policy || reference), default k3. k1 and k3 match the closed form. GRPO 1.17.1's per-token KL is that k3 term. 141 passed. · 3f0319f

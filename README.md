@@ -31,7 +31,7 @@ There is no coverage number in this README. A green coverage run has not been re
 | --- | --- |
 | `src/rlpost/config.py` | Pydantic configs. `TrainingConfig.toy_mode()` and `from_yaml`. Tested in `tests/test_config.py`. |
 | `src/rlpost/ops.py` | `gather_logprobs`: logits at position `t` score token `t+1`. Shape `[B, T, V]` in, `[B, T-1]` out. |
-| `src/rlpost/ppo_engine.py` | The only PPO implementation: `PPOTrainer`. GAE, a clipped policy loss, a value loss (unclipped unless `value_clip` is set), entropy, and a KL term. `train_step` uses `gather_logprobs`. |
+| `src/rlpost/ppo_engine.py` | The only PPO implementation: `PPOTrainer`. GAE, a clipped policy loss, a value loss (unclipped unless `value_clip` is set), entropy, and a per-token KL (default `k3`). `train_step` uses `gather_logprobs`. |
 | `src/rlpost/dpo_engine.py` | `DPOTrainer`. The CLI does not call it. |
 | `src/rlpost/sft_engine.py` | LoRA SFT through the Hugging Face `Trainer`. |
 | `src/rlpost/reward_engine.py` | Preference reward-model trainer. |
@@ -64,9 +64,11 @@ Parity is against TRL 1.17.1 `DPOTrainer._compute_loss` (`loss_type` sigmoid, `l
 
 ## PPO
 
-`PPOTrainer` in `ppo_engine.py` is the only PPO implementation. The step is GAE, then a clipped probability ratio, a value loss, an entropy bonus, and a KL penalty. With `value_clip` unset, the value term is `value_loss_coefficient * mean(0.5 * (V - R)^2)`. With `value_clip = c` (`c >= 0`), it is `value_loss_coefficient * mean(0.5 * max((V - R)^2, (V_clip - R)^2))`, where `V_clip = V_old + clip(V - V_old, -c, c)`. A radius that never binds matches the unset loss. `c` is not `ppo_epsilon`. `compute_kl_divergence(policy_logits, ref_logits)` evaluates the full-vocabulary KL(reference || policy), `sum_a p_ref(a) (log p_ref(a) - log p_policy(a))`. The sampled-token estimators usually called k1, k2, and k3 are not implemented. Naming that estimator is S0.6e.
+`PPOTrainer` in `ppo_engine.py` is the only PPO implementation. The step is GAE, then a clipped probability ratio, a value loss, an entropy bonus, and a KL penalty. With `value_clip` unset, the value term is `value_loss_coefficient * mean(0.5 * (V - R)^2)`. With `value_clip = c` (`c >= 0`), it is `value_loss_coefficient * mean(0.5 * max((V - R)^2, (V_clip - R)^2))`, where `V_clip = V_old + clip(V - V_old, -c, c)`. A radius that never binds matches the unset loss. `c` is not `ppo_epsilon`.
 
-`train_step` calls `gather_logprobs`. Logits at position `t` score token `t+1`, and the policy ratio uses those log-probabilities, shape `[B, T-1]`. The two step tests run on a tiny causal LM. The clipped surrogate, both value losses, and the entropy term are tested. The entropy scalar is the mean of TRL 1.17.1 `entropy_from_logits`.
+The KL penalty estimates KL(policy || reference) on the sampled tokens. It is not a full-vocabulary KL(reference || policy). At each sampled token, `lr = log p_ref - log p_policy`. `AlignmentConfig.kl_estimator` is `k1` (`-lr`), `k2` (`0.5 * lr^2`), or `k3` (`exp(lr) - 1 - lr`). The default is `k3`: that estimator is unbiased for KL(policy || reference) and is >= 0 at every token. `k1` is unbiased and can be negative. `k2` is >= 0 and biased. TRL 1.17.1 `GRPOTrainer._compute_loss` uses the `k3` expression. On identical log-probabilities the values match. GRPO's default `use_bias_correction_kl` then multiplies by an importance ratio. That product is not this estimator.
+
+`train_step` calls `gather_logprobs` for the policy and the reference. Logits at position `t` score token `t+1`. The policy ratio and the KL mean both use those log-probabilities, shape `[B, T-1]`. The KL call does not take a mask. Masking stays in S0.7. The two step tests run on a tiny causal LM. The clipped surrogate, both value losses, the entropy term, and the KL estimators are tested. The entropy scalar is the mean of TRL 1.17.1 `entropy_from_logits`.
 
 ## Command line
 
