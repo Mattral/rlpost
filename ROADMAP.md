@@ -522,6 +522,30 @@ Cover:
     constructs `Trainer`. The reward model is on the same SFT/reward path.
     S0.11 must declare `accelerate` for that path, in the `[lora]` extra or in
     a `[train]` extra. It is not a project dependency today.
+  - 2026-11-04, review of merged PR #20 (`8704671`). Not a blocker.
+    `DPOTrainer.train_step` takes one prompt string, one chosen string, and
+    one rejected string. `_tokenize_for_loss` returns `input_ids`,
+    `attention_mask`, and `completion_mask` with shape `[1, T]`. There is
+    no batched collation. Accuracy is the mean of one comparison, so a
+    per-step accuracy is 0 or 1. `compute_log_probs` and `compute_dpo_loss`
+    already accept a batch. The missing piece is padding several pairs to
+    `[B, T]` with a prompt length and a completion mask on each row.
+    That collation has to exist before S1.2. Reuse the S0.6b parity test
+    on a batch of 4.
+  - Same review. Two silent fallbacks, the same pattern as the old
+    `dpo_beta` getattr. `max_grad_norm or 1.0` turns 0 into 1.0.
+    `getattr(config, "log_to_wandb", True)` turns logging on when the
+    attribute is missing. Both are in `dpo_engine.py` `train_step`,
+    `sft_engine.py`, and `reward_engine.py`. `PPOTrainer` reads
+    `optimization.max_grad_norm` and `log_to_wandb` with no fallback.
+    The fields already exist. `OptimizationConfig.max_grad_norm` defaults
+    to 1.0 and is validated `gt=0`, so a `TrainingConfig` cannot store 0
+    today. `TrainingConfig.log_to_wandb` defaults to True. S0.11 removes
+    the fallbacks and reads the fields.
+    In the same `TrainingArguments` block, `sft_engine.py` also uses
+    `weight_decay or 0.01`, `warmup_ratio or 0.1`, and
+    `gradient_accumulation_steps or 1`. `weight_decay` and `warmup_ratio`
+    allow 0, and those `or` expressions replace a legal 0.
 
 ### [x] S0.9 Delete the orphaned distributed scaffolding
 - Branch: `chore/S0.9-delete-distributed`.
@@ -714,6 +738,8 @@ Write `benchmarks/PREREG.md` **before** any GPU run. It fixes:
   same config.
 - A plotting script that reads JSON only.
 - Notes:
+  - DPO `train_step` is one pair, shape `[1, T]`. Batched collation is an
+    S0.11 note. It has to land before this harness.
 
 ### [ ] S1.3 Evaluation module
 - Held-out reward scoring, a length-controlled win-rate judge, and KL and length statistics.
@@ -791,3 +817,4 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-11-04 · S0.7 · Notes only. PPO train_step applies no mask. Policy loss, entropy, and KL include prompt and padding tokens. The target is response-token-only masking, with tests that fail on that behavior. Added optional S0.6f, an fp32 logsumexp gather before Stage 1. · b1abaff
 - 2026-11-04 · S0.6b · Sigmoid DPO matches TRL 1.17.1 `_compute_loss`: beta-scaled rewards, completion-token sum, `dpo_beta` field. Seven DPO failures pass. Two PPO loss tests remain. · 9cb030b
 - 2026-11-04 · S0.6b · Parity covers seeds 0-5, unequal completion masks, and policy gradients at atol 1e-6. Reference grads stay None. The mock gradient test is gone. Two PPO loss tests remain. · c301a03
+- 2026-11-04 · S0.11 · Notes only. DPO train_step is one pair, shape [1, T]. Batched collation, with the S0.6b parity test on a batch of 4, has to land before S1.2. Drop the max_grad_norm and log_to_wandb fallbacks and read the existing fields. · 81b6834
