@@ -71,7 +71,7 @@ accuracy    = mean(margin > 0)                         # Python float
 
 `beta` is `getattr(config.alignment, "dpo_beta", 0.1)`. `dpo_beta` is not a field, so the value is always the default `0.1` unless someone sets the attribute after construction. Assigning it through the model fails validation. Margin and accuracy are judged in [S0.6](../ROADMAP.md#s06-numerical-parity-tests-core-correctness): both the test and this margin are wrong relative to TRL, and the accuracy convention in the code (`0.75` on that fixture) is the one to keep. Do not change them before the S0.6b parity test.
 
-`compute_log_probs(model, input_ids [B, T], attention_mask [B, T])` shifts by one (logits at `t` score token `t+1`), gathers on the vocabulary axis (`dim=2`), masks with `attention_mask[:, 1:]`, and returns the mean token log-prob per row, shape `[B]`. The usual DPO statistic is the sum, not the mean. Prompt tokens are inside that mean, because `train_step` tokenizes `prompt + response` as one string. That path is untested. The shift-and-gather itself is the pattern S0.6a wants in PPO. It is not what PPO does.
+`compute_log_probs(model, input_ids [B, T], attention_mask [B, T])` calls `gather_logprobs` (logits at `t` score token `t+1`, result `[B, T-1]`), multiplies by `attention_mask[:, 1:]`, and returns the mean token log-prob per row, shape `[B]`. The usual DPO statistic is the sum, not the mean. Prompt tokens are inside that mean, because `train_step` tokenizes `prompt + response` as one string. That path is untested. The gather itself is tested in [S0.6a](../ROADMAP.md).
 
 `DPOMetrics` holds `dpo_loss`, `policy_diff_mean`, `margin_mean`, and `accuracy`. There is no value head, and no explained-variance field.
 
@@ -120,20 +120,13 @@ loss  = -mean(min(ratio * A, clip(ratio, 1-eps, 1+eps) * A))    # scalar
 policy_loss + value_loss - entropy_coefficient * entropy + kl_coefficient * kl
 ```
 
-The known bug, and the only copy of it, is:
-
-```python
-log_probs_new = log_softmax(policy_logits, dim=-1)
-log_probs_action = log_probs_new.gather(1, input_ids.unsqueeze(-1)).squeeze(-1)
-```
-
-`input_ids` is `[B, T]`, so the index is `[B, T, 1]`. `DummyModel` returns logits `[B, V]`. The index rank does not match, and both `test_train_step_*` tests raise `RuntimeError`. A causal LM returns `[B, T, V]`. Dimension 1 is the time axis, not the vocabulary, and there is no shift. S0.6a owns the fix. S0.4 did not change this line's behavior.
+`train_step` calls `gather_logprobs(policy_logits, input_ids)`. Logits at `t` score token `t+1`. The result is `[B, T-1]`. `old_log_probs` must have that shape. GAE advantages stay `[B, T]`, and the policy ratio uses `advantages[:, 1:]`. No mask is applied in this step. The two `test_train_step_*` tests build a tiny random-init Llama and pass.
 
 `value_pred` is used for the value loss. GAE uses the batch's `values` and `next_values`, not `value_pred`.
 
-Status: GAE, entropy, KL-on-identical-inputs, explained variance, and the adaptive coefficient are tested. The clipped loss and the value loss are known-broken only on the test side (no grad). `train_step` is known-broken. See [S0.4](../ROADMAP.md#s04-code-ownership-pass), [S0.6](../ROADMAP.md#s06-numerical-parity-tests-core-correctness), and [S0.7](../ROADMAP.md#s07-classic-rlhf-edge-case-tests).
+Status: GAE, entropy, KL-on-identical-inputs, explained variance, the adaptive coefficient, and `train_step` on a tiny causal LM are tested. The clipped loss and the value loss are known-broken only on the test side (no grad). See [S0.4](../ROADMAP.md#s04-code-ownership-pass), [S0.6](../ROADMAP.md#s06-numerical-parity-tests-core-correctness), and [S0.7](../ROADMAP.md#s07-classic-rlhf-edge-case-tests).
 
-Tests: `tests/test_ppo_engine.py`. Failing, and left failing: `test_policy_loss_computation`, `test_value_loss_computation`, `test_train_step_updates_weights`, `test_train_step_returns_metrics`.
+Tests: `tests/test_ppo_engine.py` and `tests/test_logprob_gather.py`. Still failing: `test_policy_loss_computation`, `test_value_loss_computation`.
 
 ## `src/rlpost/cli.py`
 

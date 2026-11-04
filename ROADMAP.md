@@ -284,17 +284,38 @@ The exit criteria for Stage 0:
     wheels answer HTTP 200). The package floor stays `torch>=2.15`. Tests
     were not re-run on 2.14.1. `docs/DEVELOPMENT.md` names that Pascal install.
 
-### [ ] S0.6 Numerical parity tests (core correctness)
+### S0.6 Numerical parity tests (core correctness)
 For each check below, compare against TRL (pinned version) or a closed-form computation,
-on a tiny model on CPU, with an explicit tolerance:
+on a tiny model on CPU, with an explicit tolerance. Split into S0.6a–e. A bug found
+here is a result.
 
-- **a.** per-token logprob gather (shift / off-by-one, masking)
-- **b.** DPO loss, chosen/rejected rewards and margins vs TRL's DPO loss on identical inputs
-- **c.** GAE advantages and returns vs a hand-computed small example
-- **d.** PPO clipped policy loss, value loss (clipped) and entropy vs a reference implementation
-- **e.** KL estimator: name it (k1/k2/k3) and test it
+### [x] S0.6a Per-token logprob gather
+- Depends on: S0.5b.
+- One `gather_logprobs` in `src/rlpost/ops.py`. Logits `[B, T, V]` in, log-probs
+  `[B, T-1]` out. Position `t` scores token `t+1`. Masking stays outside the gather.
+- PPO `train_step` and DPO `compute_log_probs` both call it. CPU parity against a
+  hand-written `log_softmax` + `gather` and against TRL 1.17.1.
+- Notes:
+  - 2026-11-04: branch `test/S0.6a-logprob-gather` from `origin/main` `4ca23f4`
+    (merge of PR #17).
+  - TRL 1.17.1 helper is `trl.trainer.utils.selective_log_softmax`. It is not
+    exported from `trl.__init__`. It gathers `log_softmax(logits)` at `index`
+    and does not shift. The parity call passes `logits[:, :-1]` and
+    `input_ids[:, 1:]`. `DPOTrainer` in that release does not call the helper.
+    It reads `outputs.log_probs` from `fused_lm_head=True` and shifts the
+    completion mask with `completion_mask[..., 1:]`.
+  - fp32 absolute tolerance is `1e-6` against the hand-written reference and
+    against `selective_log_softmax`. bf16 absolute tolerance is `2e-2` against
+    the fp32 gather. On this CPU, torch 2.15, the tiny Llama, the max absolute
+    gap was 0.0173.
+  - The two `test_train_step_*` tests now build a 2-layer Llama (hidden 32,
+    vocab 128) and pass. The other nine failures listed below are unchanged.
+  - Pytest on this branch: 85 collected, 76 passed, 9 failed. Ruff check and
+    ruff format check pass.
 
-Split into S0.6a–e if needed. Record any discrepancy found in Notes. A bug found here is a result.
+### [ ] S0.6b DPO loss, rewards, and margins
+- Depends on: S0.6a.
+- DPO loss, chosen/rejected rewards and margins vs TRL's DPO loss on identical inputs.
 - Notes:
   - 2026-10-30 judgments on the 11 failures still red after the rollout fixes. Neither side
     was edited to make the other pass.
@@ -323,14 +344,32 @@ Split into S0.6a–e if needed. Record any discrepancy found in Notes. A bug fou
     inputs that do not require grad);
     `test_train_step_updates_weights` and `test_train_step_returns_metrics`
     (`DummyModel` mean-pools the sequence to `[batch, vocab]`). The `train_step` gather
-    in `ppo_engine.py` is still a code bug for S0.6a. S0.4 should treat that gather as a
-    reason not to keep that engine unchanged.
+    was the S0.6a bug. S0.6a replaced it with `gather_logprobs` and rewrote those two
+    tests. The other four test-side failures in this list are still open.
   - S0.6e: the current penalty is full-vocabulary KL(ref || policy); the expected target
     is KL(policy || ref) on sampled tokens with a named estimator.
   - S0.5b pins the parity target at `trl==1.17.1`. That release requires
     `transformers>=4.56.2` (no upper bound; transformers 5.22.0 satisfies it),
-    `torch>=2.6.0`, `datasets>=4.7.0`, and `accelerate>=1.11.0`. Parity in this item
-    is measured against that pin. Not implemented here.
+    `torch>=2.6.0`, `datasets>=4.7.0`, and `accelerate>=1.11.0`. Parity in S0.6a
+    was measured against `selective_log_softmax` from that pin.
+
+### [ ] S0.6c GAE advantages and returns
+- Depends on: S0.6a.
+- GAE advantages and returns vs a hand-computed small example.
+- Notes:
+
+### [ ] S0.6d PPO clipped policy loss and value loss
+- Depends on: S0.6a.
+- PPO clipped policy loss, value loss (clipped) and entropy vs a reference implementation.
+- `test_policy_loss_computation` and `test_value_loss_computation` still fail because
+  `torch.randn` inputs do not require grad. Rewrite them here.
+- Notes:
+
+### [ ] S0.6e KL estimator
+- Depends on: S0.6a.
+- Name the estimator (k1/k2/k3) and test it. The current penalty is full-vocabulary
+  KL(reference || policy).
+- Notes:
 
 ### [ ] S0.7 Classic RLHF edge-case tests
 Cover:
@@ -345,6 +384,9 @@ Cover:
 - Notes:
   - `RolloutGenerator._decode_reward` averages a rank-3 tensor; the reward position test
     must settle what it should be.
+  - The causal logprob shift is tested in S0.6a. This item still owns prompt-token
+    masking, padding in the loss, EOS, reward position, reference gradients, which
+    tokens the KL uses, and advantage normalisation over padding.
 
 ### [ ] S0.8 Determinism and resumable checkpoints
 - Seeding gives identical losses on CPU for 2 runs.

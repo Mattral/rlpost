@@ -18,6 +18,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from rlpost.config import TrainingConfig
 from rlpost.dataset import ToyDatasetLoader
+from rlpost.ops import gather_logprobs
 
 logger = logging.getLogger(__name__)
 
@@ -215,18 +216,9 @@ class DPOTrainer:
             return_dict=True,
         )
 
-        # Compute log probs for non-padding tokens
-        logits = outputs.logits
-
-        # Get log prob of actual next token
-        shift_logits = logits[..., :-1, :].contiguous()
-        shift_labels = input_ids[..., 1:].contiguous()
-        shift_log_probs = log_softmax(shift_logits, dim=-1)
-
-        # Gather log probs for actual tokens
-        token_log_probs = torch.gather(shift_log_probs, 2, shift_labels.unsqueeze(-1)).squeeze(-1)
-
-        # Mask out padding tokens
+        # gather_logprobs shifts: index t scores token t+1, shape [B, T-1].
+        # The mask is applied after the gather, on the scored tokens.
+        token_log_probs = gather_logprobs(outputs.logits, input_ids)
         shift_mask = attention_mask[..., 1:].contiguous()
         token_log_probs = token_log_probs * shift_mask
 
@@ -319,19 +311,6 @@ class DPOTrainer:
         self.policy_model.save_pretrained(output_dir)
         self.tokenizer.save_pretrained(output_dir)
         logger.info(f"Model saved to {output_dir}")
-
-
-def log_softmax(logits: torch.Tensor, dim: int = -1) -> torch.Tensor:
-    """Compute log softmax with numerical stability.
-
-    Args:
-        logits: Unnormalized scores
-        dim: Dimension to normalize over
-
-    Returns:
-        Log softmax values
-    """
-    return F.log_softmax(logits, dim=dim)
 
 
 if __name__ == "__main__":
