@@ -89,15 +89,15 @@ Tests: `tests/test_dpo_engine.py`. The two PPO loss tests in `tests/test_ppo_eng
 
 The only PPO implementation. `PPOTrainer` holds a policy, a value model, a frozen reference, and one optimizer.
 
-`GeneralizedAdvantageEstimation.compute(rewards, values, next_values, dones)` requires rank-2 tensors of the same shape `[B, T]`.
+`GeneralizedAdvantageEstimation.compute(rewards, values, next_values, dones, mask=None)` requires rank-2 tensors of the same shape `[B, T]`. Axis 1 is time. Index `t` is the token at that position. `rewards[:, t]` is the reward for that token. `next_values[:, t]` is `V_{t+1}`, supplied by the caller, not read from `values[:, t+1]`.
 
 ```
 delta_t = reward_t + gamma * next_value_t * (1 - done_t) - value_t
 A_t     = delta_t + gamma * lambda * (1 - done_t) * A_{t+1}     # backward
-return  = A + value
+return  = A + value                                             # real tokens
 ```
 
-Outputs are `[B, T]`. There is no padding mask. `gamma == 0` and zero values make `A == reward`. That case is tested.
+`mask[:, t] == 0` is padding, not a timestep. That index's advantage and return are 0. Its reward, value, and advantage do not enter any other index, and the token before a pad does not bootstrap from the pad's value. `mask is None` means every position is real. `done_t == 1` still stops the backup when the next index is real. `gamma == 0` and zero values make `A == reward` when nothing is padded. That case is tested. The T=4 closed form, done, lambda 0, lambda 1, gamma 1, and padding are in `tests/test_gae.py`. TRL 1.17.1 has no GAE helper.
 
 `compute_policy_loss(log_probs_new, log_probs_old, advantages)` uses matching shapes (the tests pass `[B]`):
 
@@ -118,19 +118,19 @@ loss  = -mean(min(ratio * A, clip(ratio, 1-eps, 1+eps) * A))    # scalar
 
 `adaptive_kl_penalty(kl: float)` multiplies `kl_coefficient` by 2 when `kl > 1.5 * target_kl`, by `0.5` when `kl < target_kl / 1.5`, and clips the coefficient to `[0.001, 10]`. Tested.
 
-`train_step(batch, old_log_probs)` reads `input_ids`, `rewards`, `values`, `next_values`, and `dones`. The tests pass `[B, T]` for each. The reference forward is under `no_grad`. Advantages are normalized over the whole tensor when `advantage_normalization` is true, including positions that would be padding. The total loss is
+`train_step(batch, old_log_probs)` reads `input_ids`, `rewards`, `values`, `next_values`, and `dones`, each `[B, T]`. It calls `compute` without a mask. The reference forward is under `no_grad`. Advantages are normalized over the whole tensor when `advantage_normalization` is true, including positions that would be padding. The total loss is
 
 ```
 policy_loss + value_loss - entropy_coefficient * entropy + kl_coefficient * kl
 ```
 
-`train_step` calls `gather_logprobs(policy_logits, input_ids)`. Logits at `t` score token `t+1`. The result is `[B, T-1]`. `old_log_probs` must have that shape. GAE advantages stay `[B, T]`, and the policy ratio uses `advantages[:, 1:]`. No mask is applied in this step. The two `test_train_step_*` tests build a tiny random-init Llama and pass.
+`train_step` calls `gather_logprobs(policy_logits, input_ids)`. Logits at `t` score token `t+1`. The result is `[B, T-1]`. `old_log_probs` must have that shape. GAE stays `[B, T]`. The policy ratio uses `advantages[:, 1:]`, so the weight on token `t` (`t >= 1`) is `advantages[:, t]`. A reward at index `t` therefore enters the policy term for that same token. No padding mask is applied in this step. That mask, and advantage normalisation over padding, are [S0.7](../ROADMAP.md#s07-classic-rlhf-edge-case-tests). The two `test_train_step_*` tests build a tiny random-init Llama and pass.
 
 `value_pred` is used for the value loss. GAE uses the batch's `values` and `next_values`, not `value_pred`.
 
-Status: GAE, entropy, KL-on-identical-inputs, explained variance, the adaptive coefficient, and `train_step` on a tiny causal LM are tested. The clipped loss and the value loss are known-broken only on the test side (no grad). See [S0.4](../ROADMAP.md#s04-code-ownership-pass), [S0.6](../ROADMAP.md#s06-numerical-parity-tests-core-correctness), and [S0.7](../ROADMAP.md#s07-classic-rlhf-edge-case-tests).
+Status: GAE is checked against the backward recursion, including a padding mask. Entropy, KL-on-identical-inputs, explained variance, the adaptive coefficient, and `train_step` on a tiny causal LM are tested. The clipped loss and the value loss are known-broken only on the test side (no grad). See [S0.4](../ROADMAP.md#s04-code-ownership-pass), [S0.6](../ROADMAP.md#s06-numerical-parity-tests-core-correctness), and [S0.7](../ROADMAP.md#s07-classic-rlhf-edge-case-tests).
 
-Tests: `tests/test_ppo_engine.py` and `tests/test_logprob_gather.py`. Still failing: `test_policy_loss_computation`, `test_value_loss_computation`.
+Tests: `tests/test_ppo_engine.py`, `tests/test_gae.py`, and `tests/test_logprob_gather.py`. Still failing: `test_policy_loss_computation`, `test_value_loss_computation`.
 
 ## `src/rlpost/cli.py`
 

@@ -430,10 +430,65 @@ here is a result. S0.6f is optional and does not change the order of S0.6b–e.
     16.86s. The two failures are the same S0.6d PPO loss tests. Ruff
     check and ruff format check pass.
 
-### [ ] S0.6c GAE advantages and returns
+### [x] S0.6c GAE advantages and returns
 - Depends on: S0.6a.
 - GAE advantages and returns vs a hand-computed small example.
 - Notes:
+  - 2026-11-04: branch `test/S0.6c-gae` from `origin/main` `8704671`
+    (merge of PR #20). Code commit `3f875cf`.
+  - TRL 1.17.1 has no PPO trainer and no GAE helper. A scan of the
+    installed package's `.py` files found none of `generalized advantage`,
+    `compute_gae`, `lastgaelam`, or `gae_lambda`. `trl.trainer` exports
+    DPO, GRPO, RLOO, KTO, SFT, reward, and distillation. GRPO's advantage
+    is `reward - group mean` (optional divide by the group std). RLOO's
+    is leave-one-out. Neither is the delta recursion. There is no TRL
+    parity test. The reference is `backward_gae` in `tests/test_gae.py`,
+    plus the literal T=4 values in that file. `tests/test_gae.py` repeats
+    the scan and fails if one of those strings appears.
+  - Time is axis 1 of `[B, T]`. The backward pass starts at `t = T - 1`.
+    The advantage after the last index is 0. S0.7 depends on this layout.
+  - A token-level reward sits on the token it scores. `rewards[:, t]`,
+    `values[:, t]`, and `dones[:, t]` belong to `input_ids[:, t]`.
+    `next_values[:, t]` is `V_{t+1}`. The caller supplies it. It is not
+    read from `values[:, t+1]`. For a token sequence,
+    `next_values[:, t]` should be `values[:, t+1]` when `t < T - 1`, and
+    `next_values[:, T - 1]` is the bootstrap after the last token.
+  - `gather_logprobs` index `t` is the log-prob of token `t + 1`.
+    `train_step` multiplies that by `advantages[:, 1:]`. The weight on
+    the action "emit token t" is `advantages[:, t]`, for `t >= 1`. A
+    reward written at index `t` enters the policy term for that same
+    token, through the logit at `t - 1`. Token 0 is not an action in
+    that gather.
+  - `mask[:, t] == 0` is padding, not a timestep. That position's
+    advantage and return are 0. Its reward and value do not enter any
+    other position's delta, and its advantage does not enter the backup.
+    The real token before a pad does not bootstrap from the pad's value.
+    `done` is separate: `done_t == 1` stops the backup after a real
+    token even when the next index is real. On real tokens,
+    `returns = advantages + values`. The parameter is spelled `lam`
+    because `lambda` is a Python keyword.
+  - The T=4 example uses gamma 0.5, lambda 0.5, rewards `[1, 2, 3, 4]`,
+    values `[0.5, 1, 0.5, 0]`, next values `[1, 0.5, 0, 0]`, dones 0.
+    Advantages are `[1.53125, 2.125, 3.5, 4]`. Absolute tolerance is
+    1e-6. Those values are dyadic and match to the bit in float32.
+    Done at t=1 gives `[1.25, 1, 3.5, 4]`. Lambda 0 gives the deltas
+    `[1, 1.25, 2.5, 4]`. Lambda 1 gives the discounted return minus V,
+    `[2.75, 3.5, 4.5, 4]`. Gamma 1 with lambda 0.5 gives
+    `[3.375, 3.75, 4.5, 4]`.
+  - A right-pad suffix whose value is 80, with dones left at 0, leaves
+    the real prefix on those same advantages. An internal pad splits
+    the backup: the token before the pad does not see the pad's value
+    or the token after it. Without the mask, that suffix moves the last
+    real advantage from 4 to 60.25.
+  - `train_step` still calls `compute` without a mask, and it still
+    normalises advantages over the whole `[B, T]` tensor. Both stay in
+    S0.7. The rollout reward is still one score per sequence.
+    `RolloutCollator` stacks `rewards` of shape `[B]`. Nothing here
+    scatters that score onto a token index.
+  - Pytest on this branch, `.venv`, torch 2.15.0+cpu: 121 collected,
+    119 passed, 2 failed, 16.27s. The two failures are
+    `test_policy_loss_computation` and `test_value_loss_computation`
+    (S0.6d). Ruff check and ruff format check pass.
 
 ### [ ] S0.6d PPO clipped policy loss and value loss
 - Depends on: S0.6a.
@@ -498,6 +553,13 @@ Cover:
     `DPOTrainer._tokenize_for_loss` assumes right padding: the prompt ids
     are a prefix of `prompt + response`. The PPO `train_step` mask is still
     this item.
+  - 2026-11-04, S0.6c, code commit `3f875cf`. Time is axis 1 of `[B, T]`.
+    A token-level reward at index `t` is `r_t` for `input_ids[:, t]`.
+    The policy ratio uses `advantages[:, 1:]`, so that reward weights
+    the log-prob of token `t`, gathered from logits at `t - 1`.
+    `compute` can take a padding mask. `train_step` does not pass one,
+    and it still normalises advantages over every position, including
+    pads. Those two stay in this item. The closed form is under S0.6c.
 
 ### [ ] S0.8 Determinism and resumable checkpoints
 - Seeding gives identical losses on CPU for 2 runs.
@@ -818,3 +880,4 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-11-04 · S0.6b · Sigmoid DPO matches TRL 1.17.1 `_compute_loss`: beta-scaled rewards, completion-token sum, `dpo_beta` field. Seven DPO failures pass. Two PPO loss tests remain. · 9cb030b
 - 2026-11-04 · S0.6b · Parity covers seeds 0-5, unequal completion masks, and policy gradients at atol 1e-6. Reference grads stay None. The mock gradient test is gone. Two PPO loss tests remain. · c301a03
 - 2026-11-04 · S0.11 · Notes only. DPO train_step is one pair, shape [1, T]. Batched collation, with the S0.6b parity test on a batch of 4, has to land before S1.2. Drop the max_grad_norm and log_to_wandb fallbacks and read the existing fields. · 81b6834
+- 2026-11-04 · S0.6c · GAE matches the T=4 backward recursion. Padding does not enter the backup. TRL 1.17.1 has no GAE helper. Two PPO loss tests remain. · 3f875cf
