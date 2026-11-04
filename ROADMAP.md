@@ -497,22 +497,30 @@ here is a result. S0.6f is optional and does not change the order of S0.6b–e.
   require grad. Gradients reach `logp_new` and `V` only.
 - Notes:
   - 2026-11-04: branch `test/S0.6d-ppo-loss` from `origin/main` `a3cc67a`
-    (merge of PR #22). Code commit `0107a29`.
+    (merge of PR #22). Code commit `0107a29`. Follow-up `a1bb38e`
+    puts the one-half on both value modes and adds the non-binding
+    ratio test.
   - The recovered stash clipped the value loss with `ppo_epsilon` and no
     one-half, and its grad tests checked a `Linear` weight. That draft is
     not what landed. `value_clip` is an `AlignmentConfig` field, default
-    `None`, and `>= 0` when set. `None` keeps
-    `value_loss_coefficient * mean((V - R)^2)`. A set radius `c` uses
-    `V_clip = V_old + clip(V - V_old, -c, c)` and
-    `value_loss_coefficient * mean(0.5 * max((V - R)^2, (V_clip - R)^2))`.
+    `None`, and `>= 0` when set. Both modes use the same one-half:
+    `value_loss_coefficient * mean(0.5 * squared error)`. `None` uses
+    `(V - R)^2`. A set radius `c` uses
+    `V_clip = V_old + clip(V - V_old, -c, c)` and the max of the two
+    squares. `c = 1e9` matches the unset loss on the hand sample.
     `c` is not `ppo_epsilon`. `train_step` passes batch `values` as
     `V_old` and uses them only when `value_clip` is set.
   - The policy loss was already
     `-mean(min(r * A, clip(r, 1-eps, 1+eps) * A))` with
     `r = exp(logp_new - logp_old)` and `eps = ppo_epsilon`. `logp_old`
     and `A` are detached. The closed form in `tests/test_ppo_loss.py`
-    uses eps 0.25. Ratios 1.5 and 0.5 bind, the second with `A < 0`.
-    The loss is -0.125. Absolute tolerance is 1e-6.
+    uses eps 0.25. Ratios 1.5 and 0.5 bind when the clipped product is
+    the smaller one (`A > 0` on the high ratio, `A < 0` on the low
+    ratio). That loss is -0.125. The same ratios with the signs
+    swapped do not bind: `1.5 * (-1) = -1.5` and `0.5 * 1 = 0.5` are
+    the min terms, and the loss is 0.5. Always using the clipped ratio
+    on that input gives 0.25, and the test requires those two losses
+    to differ. Absolute tolerance is 1e-6.
   - Entropy is the mean of the per-row Shannon entropy. The per-row value
     matches `trl.trainer.utils.entropy_from_logits` in TRL 1.17.1
     (`trainer/utils.py`). A uniform row is `log(n)`. A distribution
@@ -522,7 +530,7 @@ here is a result. S0.6f is optional and does not change the order of S0.6b–e.
   - The loss functions do not take a mask. `train_step` still calls GAE
     and the losses without one, and it still normalises advantages over
     the whole tensor. Both stay in S0.7.
-  - Pytest on this branch, `.venv`, torch 2.15.0+cpu: 130 passed, 16.81s.
+  - Pytest on this branch, `.venv`, torch 2.15.0+cpu: 132 passed, 19.34s.
     Ruff check and ruff format check pass.
 
 ### [ ] S0.6e KL estimator
@@ -910,3 +918,4 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-11-04 · S0.11 · Notes only. DPO train_step is one pair, shape [1, T]. Batched collation, with the S0.6b parity test on a batch of 4, has to land before S1.2. Drop the max_grad_norm and log_to_wandb fallbacks and read the existing fields. · 81b6834
 - 2026-11-04 · S0.6c · GAE matches the T=4 backward recursion. Padding does not enter the backup. TRL 1.17.1 has no GAE helper. Two PPO loss tests remain. · 3f875cf
 - 2026-11-04 · S0.6d · Clipped surrogate, optional value clip (`value_clip`, with the one-half), and entropy matched to TRL 1.17.1 `entropy_from_logits`. The CPU suite is green: 130 passed. · 0107a29
+- 2026-11-04 · S0.6d · Both value modes use the one-half. Non-binding ratios keep r*A, and always clipping that input is a different loss. 132 passed. · a1bb38e

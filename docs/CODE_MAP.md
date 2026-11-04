@@ -106,9 +106,9 @@ ratio = exp(log_probs_new - log_probs_old)
 loss  = -mean(min(ratio * A, clip(ratio, 1-eps, 1+eps) * A))    # scalar
 ```
 
-`eps` is `ppo_epsilon`. `log_probs_old` and `advantages` are detached, so the gradient reaches `log_probs_new` only. `ratio` has the same shape as the inputs. The closed form, including a clip on both sides and a negative advantage, is in `tests/test_ppo_loss.py`.
+`eps` is `ppo_epsilon`. `log_probs_old` and `advantages` are detached, so the gradient reaches `log_probs_new` only. `ratio` has the same shape as the inputs. The closed form in `tests/test_ppo_loss.py` clips on both sides, including `A < 0`. It also keeps `1.5 * A` when `A < 0` and `0.5 * A` when `A > 0`, and checks that always using the clipped ratio is a different loss on that input.
 
-`compute_value_loss(value_pred, returns, old_values=None)` returns a scalar. `returns` and `old_values` are detached, so the gradient reaches `value_pred` only. When `alignment.value_clip` is `None`, the loss is `value_loss_coefficient * mean((V - R)^2)` and `old_values` is ignored. When `value_clip` is `c >= 0`, `old_values` is required:
+`compute_value_loss(value_pred, returns, old_values=None)` returns a scalar. `returns` and `old_values` are detached, so the gradient reaches `value_pred` only. Both modes use `value_loss_coefficient * mean(0.5 * squared error)`. When `alignment.value_clip` is `None`, the squared error is `(V - R)^2` and `old_values` is ignored. When `value_clip` is `c >= 0`, `old_values` is required:
 
 ```
 V_clip = V_old + clip(V - V_old, -c, c)
@@ -116,7 +116,7 @@ L_v    = mean(0.5 * max((V - R)^2, (V_clip - R)^2))
 loss   = value_loss_coefficient * L_v
 ```
 
-`c` is not `ppo_epsilon`. Both forms are checked against a closed form in `tests/test_ppo_loss.py`. No mask is applied. Masking is [S0.7](../ROADMAP.md#s07-classic-rlhf-edge-case-tests).
+`c` is not `ppo_epsilon`. A radius of `1e9` does not bind on the hand sample, and that loss equals the unset loss. Both forms are checked against a closed form in `tests/test_ppo_loss.py`. No mask is applied. Masking is [S0.7](../ROADMAP.md#s07-classic-rlhf-edge-case-tests).
 
 `compute_entropy_bonus(logits [..., A])` is the mean of the per-row Shannon entropy. Each row matches `trl.trainer.utils.entropy_from_logits` in TRL 1.17.1. A uniform row is `log(n)`. A `[0.75, 0.25]` row is checked by hand. Scalar. No mask.
 
