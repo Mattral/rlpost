@@ -165,6 +165,25 @@ class TestAlignmentConfig:
         with pytest.raises(ValueError):
             AlignmentConfig(target_kl=-0.1)
 
+    def test_dpo_beta_positive(self) -> None:
+        """dpo_beta is its own field and must be > 0. It is not kl_coefficient."""
+        config = AlignmentConfig()
+        assert config.dpo_beta == 0.1
+        assert config.kl_coefficient == 0.1
+
+        config = AlignmentConfig(dpo_beta=0.5, kl_coefficient=0.05)
+        assert config.dpo_beta == 0.5
+        assert config.kl_coefficient == 0.05
+
+        with pytest.raises(ValueError):
+            AlignmentConfig(dpo_beta=0.0)
+        with pytest.raises(ValueError):
+            AlignmentConfig(dpo_beta=-0.1)
+
+        config = AlignmentConfig()
+        with pytest.raises(ValueError):
+            config.dpo_beta = 0.0
+
     def test_alignment_method_literal(self) -> None:
         """Verify alignment method is restricted to valid values."""
         for method in ["ppo", "dpo"]:

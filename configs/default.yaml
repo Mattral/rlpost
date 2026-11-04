@@ -41,6 +41,7 @@ alignment:
   ppo_num_epochs: 4
   target_kl: 0.1
   kl_coefficient: 0.1
+  dpo_beta: 0.1
   gamma: 0.99
   gae_lambda: 0.95
   entropy_coefficient: 0.01
