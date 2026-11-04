@@ -16,7 +16,7 @@ Pydantic models for a run: `ModelConfig`, `OptimizationConfig`, `AlignmentConfig
 
 `PPOTrainer` reads `alignment.gamma`, `gae_lambda`, `kl_coefficient`, `target_kl`, `ppo_epsilon`, `entropy_coefficient`, `value_loss_coefficient`, `advantage_normalization`, and `optimization.max_grad_norm`, plus `log_to_wandb`. It does not read `alignment.ppo_num_epochs`. SFT and the reward trainer read learning rate, weight decay, warmup, grad norm, mixed precision, and batch size. They also read `model.lora_target_modules`, which is not a field on `ModelConfig`. `PreferencePairDataset` reads `dataset.dataset_size`, which is not a field on `DatasetConfig`. Those two attributes raise `AttributeError` if that line runs. `model.use_peft_lora` and `model.attn_implementation` are stored. `tests/test_config.py` checks both. No loader reads `attn_implementation`, and the trainers apply LoRA without reading `use_peft_lora`.
 
-Status: tested for construction, validation, and YAML load. The missing attributes are known-broken and untested. See [S0.6](../ROADMAP.md#s06-numerical-parity-tests-core-correctness) for `dpo_beta` (it is not a field yet) and [S0.11](../ROADMAP.md#s011-cli-actually-runs-sftrmdpoppo-end-to-end-on-a-tiny-model-on-cpu) for a real trainer run.
+Status: tested for construction, validation, and YAML load. `AlignmentConfig.dpo_beta` is a field, default `0.1`, and it must be `> 0`. It is not `kl_coefficient`. `model.lora_target_modules` and `dataset.dataset_size` are still missing. See [S0.11](../ROADMAP.md#s011-cli-actually-runs-sftrmdpoppo-end-to-end-on-a-tiny-model-on-cpu).
 
 Tests: `tests/test_config.py`.
 
@@ -58,28 +58,32 @@ Tests: none. `train-reward` calls `train` and reads `result["loss"]` and `result
 
 Reward-model-free DPO with a frozen reference policy. The module used to say "reference-free". That was the wrong term. The reference model is loaded and frozen with `requires_grad_(False)`.
 
-`compute_dpo_loss` takes four tensors the signature calls logits. The body treats them as sequence scores of shape `[B]` (the tests pass `[B]`):
+`compute_dpo_loss` takes four sequence log-probabilities of shape `[B]`. The parameter names still say logits.
 
 ```
-policy_diff = policy_chosen - policy_rejected          # [B]
-ref_diff    = ref_chosen - ref_rejected                # [B]
-logits      = beta * (policy_diff - ref_diff)          # [B]
-loss        = -logsigmoid(logits).mean()               # scalar
-margin      = policy_diff - ref_diff                   # [B], beta is not applied
-accuracy    = mean(margin > 0)                         # Python float
+chosen_reward   = beta * (policy_chosen - ref_chosen)       # [B]
+rejected_reward = beta * (policy_rejected - ref_rejected)   # [B]
+logits          = chosen_reward - rejected_reward           # [B]
+loss            = -logsigmoid(logits).mean()                # scalar
+margin          = mean(logits)                              # Python float
+accuracy        = mean(chosen_reward > rejected_reward)     # Python float
 ```
 
-`beta` is `getattr(config.alignment, "dpo_beta", 0.1)`. `dpo_beta` is not a field, so the value is always the default `0.1` unless someone sets the attribute after construction. Assigning it through the model fails validation. Margin and accuracy are judged in [S0.6](../ROADMAP.md#s06-numerical-parity-tests-core-correctness): both the test and this margin are wrong relative to TRL, and the accuracy convention in the code (`0.75` on that fixture) is the one to keep. Do not change them before the S0.6b parity test.
+`beta` is `config.alignment.dpo_beta`. `policy_diff_mean` is the mean of `policy_chosen - policy_rejected`. That one is not scaled by beta and does not subtract the reference.
 
-`compute_log_probs(model, input_ids [B, T], attention_mask [B, T])` calls `gather_logprobs` (logits at `t` score token `t+1`, result `[B, T-1]`), multiplies by `attention_mask[:, 1:]`, and returns the mean token log-prob per row, shape `[B]`. The usual DPO statistic is the sum, not the mean. Prompt tokens are inside that mean, because `train_step` tokenizes `prompt + response` as one string. That path is untested. The gather itself is tested in [S0.6a](../ROADMAP.md).
+`compute_log_probs(model, input_ids [B, T], attention_mask [B, T], completion_mask [B, T])` calls `gather_logprobs` (logits at `t` score token `t+1`, result `[B, T-1]`), multiplies by `completion_mask[:, 1:]`, and sums over that axis. The result is `[B]`. Prompt tokens and padding are 0 in the shifted mask, so they add nothing. This is a sum, not a mean. `attention_mask` is passed to the model. It is not the reduction mask. The method is not wrapped in `no_grad`. `train_step` calls the reference inside `torch.no_grad`.
+
+TRL 1.17.1 `DPOTrainer._compute_loss`, sigmoid loss, `label_smoothing` 0, `ld_alpha` None, sums the same completion tokens. The fused head writes 0 where `completion_mask` is 0. The parity test calls that method. Loss absolute tolerance is `1e-6`. The logged batch mean of the sums uses absolute tolerance `1e-5`. On CPU, torch 2.15, the tiny Llama, the largest gap on that mean was 1.907e-6. See [S0.6b](../ROADMAP.md#s06b-dpo-loss-rewards-and-margins).
+
+`_tokenize_for_loss` marks the shared prefix of the prompt ids and `prompt + response` as prompt, and marks padding as 0. It assumes right padding. A left-padded prompt is not a prefix. Padding side is [S0.7](../ROADMAP.md#s07-classic-rlhf-edge-case-tests).
 
 `DPOMetrics` holds `dpo_loss`, `policy_diff_mean`, `margin_mean`, and `accuracy`. There is no value head, and no explained-variance field.
 
-`train_step` runs the policy forward with gradients, the reference forward under `no_grad`, then `loss.backward()`. It is untested. Several tests fail earlier, on an empty parameter list, because the stand-in model has no parameters.
+`train_step` tokenizes one pair, runs the policy forward with gradients, the reference forward under `no_grad`, then `loss.backward()`. No test calls `train_step`.
 
-Status: `compute_dpo_loss` is tested and known-broken on the margin and on `beta`. `compute_log_probs` and `train_step` are untested. See [S0.6](../ROADMAP.md#s06-numerical-parity-tests-core-correctness) and [S0.7](../ROADMAP.md#s07-classic-rlhf-edge-case-tests).
+Status: the loss, the margin, the accuracy, `dpo_beta`, the completion-token sum, and construction on the tiny Llama are tested. `train_step` is untested.
 
-Tests: `tests/test_dpo_engine.py`. Failing there, and left failing: `test_init_creates_trainer`, `test_reference_model_frozen`, `test_margin_computation`, `test_beta_affects_loss`, `test_metrics_batch_aggregation`, `test_config_integration`, `test_custom_beta_from_config`.
+Tests: `tests/test_dpo_engine.py`. The two PPO loss tests in `tests/test_ppo_engine.py` still fail. That is [S0.6d](../ROADMAP.md#s06d-ppo-clipped-policy-loss-and-value-loss).
 
 ## `src/rlpost/ppo_engine.py`
 
@@ -196,7 +200,7 @@ From Kyle, still unexplained as an API:
 
 From thitsarhmwe-commits:
 
-- The seven failing DPO tests are explained in the S0.6 notes (margin, beta, accuracy, and empty stand-in modules). I am not adding a second theory here.
+- The DPO margin, beta, and empty stand-in failures were the S0.6 triage. S0.6b implemented them and those tests pass. The two PPO loss tests that still fail are S0.6d.
 
 S0.9 deleted the process-group module, the communication hooks, the async checkpoint writer, and the multi-rank script. Those entries are gone with the files.
 
