@@ -632,7 +632,7 @@ here is a result. S0.6f is optional and does not change the order of S0.6b–e.
     tolerance for the logsumexp gather, and the peak-memory difference against
     this gather. Those two numbers are not measured yet.
 
-### [ ] S0.7 Classic RLHF edge-case tests
+### [x] S0.7 Classic RLHF edge-case tests
 Cover:
 - prompt-token masking in the loss
 - logprob gather off-by-one
@@ -684,6 +684,131 @@ Cover:
     `compute_kl_divergence` raises when `kl_estimator` is `k1`. `train_step`
     still passes no mask. Prompt and padding tokens in the gathered window
     stay inside the KL mean for `k2` and `k3`.
+  - 2026-11-06: branch `test/S0.7-response-mask` from `origin/main`
+    `625dc58` (merge of PR #24, S0.6e). Code commit `28dcdfb`.
+    Docs commit `8b3afc3`. Opened as PR #25.
+  - One mask per batch. `response_token_mask` in `src/rlpost/ops.py`
+    reads `prompt_lengths` and `response_lengths`. It does not read an
+    attention mask. An attention mask is 1 on the prompt, and that would
+    keep prompt tokens in the loss.
+  - Right padding lays a row out as `[prompt | response | pad ...]`.
+    Left padding lays it out as `[pad ... | prompt | response]`. The
+    response is contiguous. On the right it starts at `prompt_lengths`.
+    On the left it is a suffix of length `response_lengths`.
+  - `token_mask` is float 0/1, shape `[B, T]`. Index `t` is 1 when
+    `input_ids[:, t]` is a generated response token. GAE and the value
+    loss use it. A 0 is not a timestep, same rule as the S0.6c padding
+    mask, now also on prompt tokens.
+  - `gathered_mask` is float 0/1, shape `[B, T-1]`. It equals
+    `token_mask[:, 1:]`. Index `t` is 1 when token `t+1` is a response
+    token. That is the `gather_logprobs` alignment: logits at `t` score
+    token `t+1`. Policy loss, entropy, and the KL use this mask.
+    Entropy is the masked mean of the per-row Shannon entropy on
+    `logits[:, :-1]`, the rows that score a token inside the sequence.
+    Token 0 is not an action in the gather, so it has no column.
+  - `train_step` builds the pair once and passes it through. Every
+    reduction is `sum(x * mask) / sum(mask)`. An all-zero mask returns
+    0. Advantage normalisation uses that mean and the square root of
+    the masked mean of squared deviations, so the divisor is
+    `sum(mask)` and not `sum(mask) - 1`. Whitening divides by
+    `std + 1e-8`. Positions outside the mask stay 0.
+    `advantage_mean` is the masked mean before whitening. `gae_mean`
+    is the masked mean after it. `reward_mean` is the masked mean of
+    the token rewards.
+  - gamma 0 and values 0 make the advantage equal the reward. Two
+    scores of 4 on 5 response tokens give `advantage_mean` 1.6. The
+    mean over the full `[2, 6]` tensor is 2/3. The test requires 1.6,
+    so prompt zeros and pad zeros are not in the denominator.
+  - Changing prompt ids, padding ids, or the rewards, values, next
+    values, value predictions, and logits that sit on prompt and
+    padding does not change policy loss, value loss, entropy, the KL,
+    `advantage_mean`, `gae_mean`, or `reward_mean`. Changing one
+    response-scoring logit moves the KL, the policy loss, and the
+    entropy. Adding to the reward on the last response token moves
+    `advantage_mean`. Left and right padding are both tested. Those
+    checks fail when `train_step` ignores the mask: the unmasked
+    policy loss moved (right padding, about 0.095 versus -0.128), and
+    the unmasked advantage mean was 2/3 instead of 1.6.
+  - Sequence reward. `_decode_reward` does not average a rank-3 tensor
+    over time. `logits` `[B, T, K]` reduce `K` at the last real
+    response token only. `logits` `[B, 1]` are already a sequence
+    score. `pooler_output` `[B, H]` is still the mean over `H`, which
+    has no time axis. The score is written on the last 1 in
+    `token_mask` and is 0 elsewhere, for a left-padded batch and a
+    right-padded batch. `generate_rollout` stores that scalar. It does
+    not pad, so on a length-7 row the last token is 6 and the old time
+    mean was 3.
+  - `AlignmentConfig` rejects `kl_estimator="k1"` with the message
+    `compute_kl_divergence` already raised. `per_token_kl(..., "k1")`
+    still returns the value. `k2` stays the default. `k3` stays legal.
+  - EOS handling and truncation are not in this change. A test that
+    the reference parameters receive no gradient is not in this
+    change. The reference forward was already under `no_grad`. Both
+    are S0.7b. DPO `_tokenize_for_loss` still assumes right padding.
+    That stays on the S0.11 collation note.
+  - Pytest on this branch, `.venv`, torch 2.15.0+cpu: 151 passed,
+    16.95s. Ruff check and ruff format check pass.
+  - 2026-11-06, before merge of PR #25. Two alignment fixes on this
+    branch. The notes above describe `28dcdfb`. This note describes the
+    follow-up.
+  - Mixed layout. A padded generate batch is
+    `[pad | prompt | response | pad]`. Prompts are left-padded to one
+    width `P = max(prompt_lengths)`, so every response starts at column
+    `P` and ends at `P + response_length`, where that row hit EOS. The
+    tail is a right pad. `padding_side="mixed"` builds that mask.
+    `"right"` is unchanged: `[prompt | response | pad]`, response
+    starting at `prompt_lengths`. The suffix layout
+    `[pad | prompt | response]`, response flush with the end of the
+    row, was only read by the tests added in `28dcdfb`. Nothing in the
+    rollout or the trainers generates it, so `padding_side="left"` now
+    raises. A row can satisfy `prompt_length + response_length <= T`
+    and still not fit, because every response starts at `P`. That case
+    raises. `test_mixed_layout_rejects_a_response_past_the_common_prompt_width`
+    uses prompts `[1, 4]`, responses `[4, 1]`, and `T = 6`.
+  - Value alignment. `value_out[:, t]` is the critic after it has read
+    token `t` and before it has read token `t + 1`. The action at index
+    `t` emits token `t + 1` and was scored by the logits at `t`, so its
+    baseline is `value_out[:, t]`. `28dcdfb` ran GAE on the token axis
+    and fed `advantages[:, 1:]` to the policy. The baseline of the
+    action that emitted token `t + 1` was therefore `V[:, t + 1]`, the
+    value after that token had been read. A baseline has to be a
+    function of the state. `E[∇ log π(a|s) b(s)] = 0` because
+    `Σ_a ∇π(a|s) = 0`. If `b` depends on `a`, that term does not
+    vanish. A higher value on the token that was just sampled makes
+    `A = r - V` smaller, so the surrogate reinforces that token less
+    and punishes it more. Tokens the critic scores low get the opposite
+    push. The advantage is no longer an unbiased weight for the state
+    that produced the action.
+  - The check is `gamma = 0` and rewards 0, so `A = -V(s)`. Editing
+    `input_ids[:, t + 1]` must not change the advantage of action
+    `t + 1`. `test_action_advantage_does_not_see_its_own_token` is that
+    test. On `28dcdfb` it failed: the advantage was `-V` at the sampled
+    token (`-8`) instead of `-V` at the state (`-7`).
+  - PPO now uses the action layout `[B, T - 1]`.
+    `values = value_out[:, :-1]`, `next_values = value_out[:, 1:]`, and
+    the reward written on token `t + 1` is read at index `t`. GAE, the
+    value loss, whitening, explained variance, and `reward_mean` use
+    `gathered_mask`. The policy ratio is not `advantages[:, 1:]`.
+    `token_mask` still marks response tokens so the rollout can place
+    the sequence score. The PPO step does not read it.
+    `batch["values"][:, :-1]` is `V_old` for the clip only. There is no
+    `next_values` input. The bootstrap is the shifted value head.
+    TRL's PPO trainer, removed before 1.17.1, returned
+    `values[:, :-1]` beside `logprobs_from_logits(logits[:, :-1], input_ids[:, 1:])`
+    in the 0.7 `batched_forward_pass`. Same shift. Not a numeric match
+    to a PPO loss 1.17.1 does not ship. The T=4 GAE numbers are
+    unchanged. Those tests now describe the index as the action index.
+    The recursion is the same.
+  - Pytest on this branch after those two fixes, `.venv`, torch
+    2.15.0+cpu: 154 passed, 17.12s. Ruff check and ruff format check
+    pass. The 151 passed line above is the count on `28dcdfb`.
+
+### [ ] S0.7b EOS, truncation, and the reference gradient
+- Depends on: S0.7.
+- EOS and truncation in the response mask.
+- A test that `train_step` leaves the reference parameters with no
+  gradient. The forward is already under `torch.no_grad`.
+- Notes:
 
 ### [ ] S0.8 Determinism and resumable checkpoints
 - Seeding gives identical losses on CPU for 2 runs.
@@ -1009,3 +1134,5 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-11-04 · S0.6d · Both value modes use the one-half. Non-binding ratios keep r*A, and always clipping that input is a different loss. 132 passed. · a1bb38e
 - 2026-11-04 · S0.6e · Sampled-token KL(policy || reference), default k3. k1 and k3 match the closed form. GRPO 1.17.1's per-token KL is that k3 term. 141 passed. · 3f0319f
 - 2026-11-06 · S0.6e · Loss default is k2. Its gradient matches KL(policy || reference). k3 stays and its gradient is the reverse KL. The loss rejects k1. 142 passed. · d4bd358
+- 2026-11-06 · S0.7 · One response-token mask in the gather layout, masked means in the PPO losses and in GAE, advantage stats over response tokens only. The sequence reward sits on the last response token. Config rejects k1. 151 passed. · 28dcdfb
+- 2026-11-06 · S0.7 · Action-layout values (`value_out[:, :-1]`) and the mixed `[pad | prompt | response | pad]` mask. The value at the sampled token was an action-dependent baseline. 154 passed. · 5806e22

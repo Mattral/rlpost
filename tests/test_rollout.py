@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import pytest
 import torch
 import torch.nn as nn
 
@@ -112,3 +113,30 @@ def test_rollout_generator_creates_valid_rollouts():
     assert rollouts[0].logits_policy.shape == (3, 16)
     assert rollouts[0].logits_reference.shape == (3, 16)
     assert rollouts[0].reward.shape == () or rollouts[0].reward.shape == (1,)
+
+
+def test_rank3_reward_is_the_last_token_not_the_time_mean():
+    """generate_rollout does not pad, so the last index is the last response token."""
+
+    class Rank3Reward(nn.Module):
+        def forward(self, input_ids: torch.Tensor) -> SimpleNamespace:
+            batch, length = input_ids.shape
+            scores = torch.arange(length, dtype=torch.float32).view(1, length, 1)
+            return SimpleNamespace(logits=scores.expand(batch, length, 1).clone())
+
+    generator = RolloutGenerator(
+        policy_model=DummyCausalLM(vocab_size=16),
+        reference_model=DummyCausalLM(vocab_size=16),
+        reward_model=Rank3Reward(),
+        tokenizer=None,
+        max_response_length=3,
+        temperature=1.0,
+        top_p=1.0,
+    )
+    query = torch.randint(low=0, high=16, size=(2, 4))
+    rollouts = generator.generate_rollout(query)
+
+    # cat(query, response) has length 7. The time mean of 0..6 is 3.
+    assert rollouts[0].reward.item() == pytest.approx(6.0)
+    assert rollouts[0].reward.item() != pytest.approx(3.0)
+    assert rollouts[1].reward.shape == ()
