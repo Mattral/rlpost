@@ -17,16 +17,18 @@ assigns the k3 expression to ``per_token_kl``. ``use_bias_correction_kl``
 defaults to True and then multiplies by the importance ratio. That product
 is not k3. Parity is the uncorrected term on identical log-probabilities.
 RLOO in the same release uses the k1 log ratio instead. It is not the
-parity target. The loss rejects k1.
+parity target. Config validation rejects k1, and the loss rejects it
+with the same message.
 """
 
+import re
 from pathlib import Path
 
 import pytest
 import torch
 from trl.trainer.grpo_config import GRPOConfig
 
-from rlpost.config import TrainingConfig
+from rlpost.config import K1_LOSS_REJECTED, AlignmentConfig, TrainingConfig
 from rlpost.ppo_engine import PPOTrainer, per_token_kl
 
 SAMPLE_SIZE = 1_000_000
@@ -110,14 +112,20 @@ def test_k3_nonnegative_and_k1_can_be_negative() -> None:
 
 
 def test_k1_value_is_negative_and_the_loss_rejects_it() -> None:
-    """k1's value can be negative. The loss term refuses to use it."""
+    """k1's value can be negative. Config and the loss refuse to use it."""
     logp_policy = torch.tensor([0.0, 0.0])
     logp_ref = torch.tensor([1.0, 1.0])
 
     assert per_token_kl(logp_policy, logp_ref, "k1").mean() < 0
     assert _trainer("k3").compute_kl_divergence(logp_policy, logp_ref) > 0
-    with pytest.raises(ValueError, match="k1"):
-        _trainer("k1").compute_kl_divergence(logp_policy, logp_ref)
+    with pytest.raises(ValueError, match=re.escape(K1_LOSS_REJECTED)):
+        AlignmentConfig(kl_estimator="k1")
+
+    # The loss still raises if a config object was built past validation.
+    trainer = _trainer("k2")
+    trainer.alignment_config.__dict__["kl_estimator"] = "k1"
+    with pytest.raises(ValueError, match=re.escape(K1_LOSS_REJECTED)):
+        trainer.compute_kl_divergence(logp_policy, logp_ref)
 
 
 @pytest.mark.parametrize("estimator", ["k1", "k2", "k3"])
@@ -196,13 +204,12 @@ def test_loss_gradient_matches_the_named_kl() -> None:
 def test_optional_mask_drops_tokens() -> None:
     """A keep-mask changes the mean. The all-zero mask is 0. None keeps all.
 
-    ``train_step`` calls the estimator with no mask argument.
+    ``train_step`` passes the gathered response mask into this mean.
     """
     import inspect
 
     step = inspect.getsource(PPOTrainer.train_step)
-    assert "compute_kl_divergence(token_logprobs, ref_token_logprobs)" in step
-    assert "compute_kl_divergence(token_logprobs, ref_token_logprobs," not in step
+    assert "compute_kl_divergence(token_logprobs, ref_token_logprobs, gathered_mask)" in step
     trainer = _trainer("k3")
     logp_policy = torch.tensor([0.0, -1.0, -2.0])
     logp_ref = torch.tensor([-1.0, -1.0, 0.0])

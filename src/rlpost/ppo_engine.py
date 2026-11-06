@@ -15,8 +15,17 @@ logits at position ``t`` score token ``t + 1``, and the result has shape
 ``[B, T - 1]``. Rewards, values, dones, and advantages are ``[B, T]``.
 Axis 1 is time, and ``rewards[:, t]`` is the reward for token ``t``.
 The policy ratio uses ``advantages[:, 1:]``, so that reward weights the
-log-prob of token ``t``. A padding mask of 0 removes that index from the
-backup. ``train_step`` does not pass one.
+log-prob of token ``t``.
+
+One response mask is built per batch from ``prompt_lengths`` and
+``response_lengths``. ``response_token_mask`` documents the layout.
+``gathered_mask[:, t]`` is 1 when token ``t + 1`` is a generated response
+token, and 0 for prompt and padding. That is the gather alignment.
+``token_mask[:, 1:]`` is the same tensor, and ``token_mask[:, t]`` is 1
+when token ``t`` itself is a response token. Policy loss, entropy, and
+KL use ``gathered_mask``. GAE and the value loss use ``token_mask``.
+Every reduction is ``sum(x * mask) / sum(mask)``. Advantage
+normalisation uses that mean and the matching std on ``token_mask`` only.
 
 The KL term is added to the loss and differentiated with the sampled
 token held fixed. ``gather_logprobs`` supplies ``log p`` at those tokens,
@@ -29,19 +38,17 @@ and ``lr = log p_ref - log p_policy``. ``kl_estimator`` selects
 The default is ``k2``, because the loss is meant to follow
 KL(policy || reference). ``k3`` stays available; its gradient is the
 reverse KL, which is what TRL GRPO differentiates. ``k1`` is rejected
-by the loss. Its value belongs in the reward (reward minus beta * k1),
-and this trainer does not shape rewards that way. ``train_step``
-averages every gathered token. It does not pass a mask. That mask
-stays in S0.7.
+by config validation and again by the loss. Its value belongs in the
+reward (reward minus beta * k1), and this trainer does not shape
+rewards that way.
 
 ``V_clip`` is ``V_old + clip(V - V_old, -c, c)``. ``eps`` in the policy
 clip is ``ppo_epsilon``. ``c`` is the ``value_clip`` config field, not
 ``ppo_epsilon``. Both value modes use the same one-half. When
-``value_clip`` is set, ``L_v`` is the mean of
+``value_clip`` is set, ``L_v`` is the masked mean of
 ``0.5 * max((V - R)^2, (V_clip - R)^2)`` and ``train_step`` passes the
 batch values as ``V_old``. When ``value_clip`` is unset, ``L_v`` is
-``mean(0.5 * (V - R)^2)``. The loss functions do not take a padding
-mask. ``train_step`` still does not pass one. That mask stays in S0.7.
+the masked mean of ``0.5 * (V - R)^2``.
 """
 
 import logging
@@ -58,10 +65,49 @@ try:
 except ImportError:
     wandb = None
 
-from rlpost.config import AlignmentConfig, OptimizationConfig, TrainingConfig
-from rlpost.ops import gather_logprobs
+from rlpost.config import (
+    K1_LOSS_REJECTED,
+    AlignmentConfig,
+    OptimizationConfig,
+    TrainingConfig,
+)
+from rlpost.ops import gather_logprobs, response_token_mask
 
 logger = logging.getLogger(__name__)
+
+
+def masked_mean(values: Tensor, mask: Tensor | None = None) -> Tensor:
+    """``sum(values * mask) / sum(mask)``.
+
+    ``mask is None`` is the ordinary mean. ``mask`` must match ``values``.
+    A 1 keeps an element and a 0 drops it. An all-zero mask returns 0.
+    The denominator is clamped at 1 only so that empty mask stays 0
+    instead of dividing by 0.
+    """
+    if mask is None:
+        return values.mean()
+    if mask.shape != values.shape:
+        raise ValueError(f"shape mismatch: values {tuple(values.shape)}, mask {tuple(mask.shape)}")
+    weight = mask.to(dtype=values.dtype)
+    return (values * weight).sum() / weight.sum().clamp(min=1)
+
+
+def masked_whiten(values: Tensor, mask: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+    """Whiten ``values`` on the masked positions. Elsewhere the result is 0.
+
+    The mean is ``masked_mean``. The variance is the masked mean of squared
+    deviations from that mean, so the divisor is ``sum(mask)`` and not
+    ``sum(mask) - 1``. The returned std is the square root of that variance,
+    before the ``1e-8`` stability term. Whitening divides by ``std + 1e-8``.
+    """
+    if mask.shape != values.shape:
+        raise ValueError(f"shape mismatch: values {tuple(values.shape)}, mask {tuple(mask.shape)}")
+    weight = mask.to(dtype=values.dtype)
+    mean = masked_mean(values, weight)
+    var = masked_mean((values - mean).square(), weight)
+    std = var.sqrt()
+    whitened = (values - mean) / (std + 1e-8) * weight
+    return whitened, mean, std
 
 
 @dataclass
@@ -75,8 +121,10 @@ class PPOMetrics:
         kl_divergence: Mean per-token KL(policy || reference) under kl_estimator.
         explained_variance: Fraction of value function explained.
         adaptive_kl_coefficient: Current KL penalty coefficient (beta).
-        reward_mean: Mean reward in batch.
-        advantage_mean: Mean advantage estimate.
+        reward_mean: Masked mean of token rewards over response tokens.
+        advantage_mean: Masked mean of advantages before normalisation.
+            The mask is the response-token mask.
+        gae_mean: Masked mean of advantages after normalisation.
     """
 
     policy_loss: float
@@ -113,8 +161,8 @@ def per_token_kl(
         That makes k1 useless as a loss term. It is the InstructGPT
         penalty inside the reward, ``reward - beta * k1``, which needs
         the score-function gradient rather than this backward. This
-        trainer does not implement that reward. ``compute_kl_divergence``
-        rejects k1.
+        trainer does not implement that reward. Config validation and
+        ``compute_kl_divergence`` both reject k1.
 
     k2 = ``0.5 * lr^2``.
         Value: always >= 0, and biased for KL(p || q).
@@ -320,6 +368,7 @@ class PPOTrainer:
         log_probs_new: Tensor,
         log_probs_old: Tensor,
         advantages: Tensor,
+        mask: Tensor | None = None,
     ) -> Tuple[Tensor, Tensor]:
         """Compute the clipped surrogate.
 
@@ -327,15 +376,18 @@ class PPOTrainer:
 
             L = -mean(min(r * A, clip(r, 1-eps, 1+eps) * A))
 
-        ``eps`` is ``ppo_epsilon``. ``log_probs_old`` and ``advantages`` are
-        detached, so the gradient reaches ``log_probs_new`` only. No mask is
-        applied. Masking stays in S0.7.
+        The mean is ``masked_mean`` when ``mask`` is set. ``eps`` is
+        ``ppo_epsilon``. ``log_probs_old`` and ``advantages`` are detached,
+        so the gradient reaches ``log_probs_new`` only.
 
         Args:
             log_probs_new: Current action log-probs. Any shape that matches the
                 other two arguments.
             log_probs_old: Rollout action log-probs, same shape.
             advantages: Advantages for those actions, same shape.
+            mask: 1 keeps an action and 0 drops it. Same shape. ``None``
+                averages every element. ``train_step`` passes the gathered
+                response mask.
 
         Returns:
             loss: Scalar to minimize.
@@ -354,18 +406,19 @@ class PPOTrainer:
         epsilon = self.alignment_config.ppo_epsilon
         unclipped = ratio * advantages
         clipped = ratio.clamp(1.0 - epsilon, 1.0 + epsilon) * advantages
-        return -torch.min(unclipped, clipped).mean(), ratio
+        return masked_mean(-torch.min(unclipped, clipped), mask), ratio
 
     def compute_value_loss(
         self: "PPOTrainer",
         value_pred: Tensor,
         returns: Tensor,
         old_values: Tensor | None = None,
+        mask: Tensor | None = None,
     ) -> Tensor:
         """Compute the critic loss.
 
         ``returns`` and ``old_values`` are detached, so the gradient reaches
-        ``value_pred`` only. No mask is applied.
+        ``value_pred`` only. The mean is ``masked_mean`` when ``mask`` is set.
 
         Both modes return ``value_loss_coefficient * L_v``. ``L_v`` always
         includes the one-half. When ``value_clip`` is unset, ``old_values``
@@ -387,6 +440,9 @@ class PPOTrainer:
             returns: Targets ``R``, same shape as ``value_pred``.
             old_values: Rollout values ``V_old``. Required when ``value_clip``
                 is set. Same shape as ``value_pred``.
+            mask: 1 keeps a token and 0 drops it. Same shape as ``value_pred``.
+                ``None`` averages every element. ``train_step`` passes the
+                token-level response mask.
 
         Returns:
             loss: Scalar to minimize.
@@ -413,26 +469,34 @@ class PPOTrainer:
             value_clipped = old_values + (value_pred - old_values).clamp(-clip, clip)
             clipped = (value_clipped - returns).square()
             squared_error = torch.maximum(squared_error, clipped)
-        return squared_error.mean() * 0.5 * coefficient
+        return masked_mean(squared_error, mask) * 0.5 * coefficient
 
-    def compute_entropy_bonus(self: "PPOTrainer", logits: Tensor) -> Tensor:
+    def compute_entropy_bonus(
+        self: "PPOTrainer",
+        logits: Tensor,
+        mask: Tensor | None = None,
+    ) -> Tensor:
         """Mean per-row Shannon entropy of the action distribution.
 
         For each row, ``H = -sum_a softmax(logits)_a * log_softmax(logits)_a``.
         The scalar is the mean of those rows. That per-row value is the same
         quantity as ``trl.trainer.utils.entropy_from_logits`` in TRL 1.17.1.
-        This module does not import TRL. No mask is applied.
+        This module does not import TRL. ``mask`` selects rows. It must have
+        the same shape as ``logits`` without the last axis. ``train_step``
+        passes logits ``[:, :-1]`` and the gathered response mask, so only
+        distributions that score a response token are averaged.
 
         Args:
             logits: Action logits, shape ``[..., num_actions]``.
+            mask: 1 keeps a row and 0 drops it. ``None`` averages every row.
 
         Returns:
             entropy: Mean entropy (scalar, nats).
         """
         log_probs = F.log_softmax(logits, dim=-1)
         probs = torch.exp(log_probs)
-        entropy = -(probs * log_probs).sum(dim=-1).mean()
-        return entropy
+        per_row = -(probs * log_probs).sum(dim=-1)
+        return masked_mean(per_row, mask)
 
     def compute_kl_divergence(
         self: "PPOTrainer",
@@ -457,9 +521,8 @@ class PPOTrainer:
         same shape as the log-probabilities. ``1`` keeps a token and ``0``
         drops it. The mean divides by the sum of ``mask``. An all-zero
         mask returns 0. ``mask is None`` averages every token.
-        ``train_step`` does not pass a mask, so prompt and padding tokens
-        that were gathered still enter the mean. Which tokens those are
-        stays in S0.7.
+        ``train_step`` passes the gathered response mask, so prompt and
+        padding tokens stay out of the mean.
 
         Args:
             logp_policy: Log-probability of each sampled token under the policy.
@@ -471,44 +534,40 @@ class PPOTrainer:
         """
         estimator = self.alignment_config.kl_estimator
         if estimator == "k1":
-            raise ValueError(
-                "k1 cannot be the PPO loss term. Under samples from the policy "
-                "the expected gradient of mean(k1) w.r.t. the policy logits is 0. "
-                "k1 belongs in the reward, as reward minus beta * k1 (InstructGPT). "
-                "This trainer does not implement that. Use kl_estimator k2 for "
-                "KL(policy || reference)."
-            )
+            raise ValueError(K1_LOSS_REJECTED)
         values = per_token_kl(logp_policy, logp_ref, estimator)
-        if mask is None:
-            return values.mean()
-        if mask.shape != values.shape:
-            raise ValueError(
-                f"shape mismatch: kl values {tuple(values.shape)}, mask {tuple(mask.shape)}"
-            )
-        weight = mask.to(dtype=values.dtype)
-        # An all-zero mask has nothing to average. The clamp yields 0.
-        return (values * weight).sum() / weight.sum().clamp(min=1.0)
+        return masked_mean(values, mask)
 
     def compute_explained_variance(
         self: "PPOTrainer",
         value_pred: Tensor,
         returns: Tensor,
+        mask: Tensor | None = None,
     ) -> float:
         """Compute fraction of variance in returns explained by value function.
 
         EV = 1 - Var(returns - values) / Var(returns)
 
-        Range: (-∞, 1], where 1 = perfect fit, 0 = mean baseline, <0 = worse than mean
+        Range: (-∞, 1], where 1 = perfect fit, 0 = mean baseline, <0 = worse than mean.
+        Without ``mask``, variance is ``torch.var`` (divide by N - 1). With
+        ``mask``, variance is the masked mean of squared deviations (divide
+        by ``sum(mask)``), on the response tokens only.
 
         Args:
-            value_pred: Predicted values, shape (batch_size,)
-            returns: Returns (targets), shape (batch_size,)
+            value_pred: Predicted values.
+            returns: Returns (targets), same shape as ``value_pred``.
+            mask: Optional response mask, same shape. ``None`` uses every element.
 
         Returns:
             explained_variance: Scalar in (-∞, 1]
         """
-        variance_pred = torch.var(returns - value_pred)
-        variance_returns = torch.var(returns)
+        if mask is None:
+            variance_pred = torch.var(returns - value_pred)
+            variance_returns = torch.var(returns)
+        else:
+            residual = returns - value_pred
+            variance_pred = masked_mean((residual - masked_mean(residual, mask)).square(), mask)
+            variance_returns = masked_mean((returns - masked_mean(returns, mask)).square(), mask)
 
         if variance_returns.item() == 0.0:
             return 0.0
@@ -540,26 +599,34 @@ class PPOTrainer:
 
     def train_step(
         self: "PPOTrainer",
-        batch: dict[str, Tensor],
+        batch: dict[str, Tensor | str],
         old_log_probs: Tensor,
     ) -> PPOMetrics:
         """Perform single PPO training step.
 
         This function computes:
-        1. Policy loss (clipped surrogate objective)
-        2. Value loss (critic training)
-        3. Entropy bonus (exploration)
-        4. KL penalty (``k2`` or ``k3`` on the gathered tokens; ``k1`` raises; no mask)
+        1. Policy loss (clipped surrogate on response tokens)
+        2. Value loss (critic, response tokens)
+        3. Entropy bonus (distributions that score a response token)
+        4. KL penalty (``k2`` or ``k3`` on those tokens; ``k1`` raises)
         5. Combined loss = policy_loss + value_loss - entropy_coef * entropy + beta * KL
+
+        The response mask is built once, from ``prompt_lengths`` and
+        ``response_lengths``. See ``response_token_mask``. Reductions use
+        ``sum(x * mask) / sum(mask)``.
 
         Args:
             batch: Dict with keys, time on axis 1:
                 - "input_ids": Tokens, shape ``[B, T]``.
                 - "rewards": Token reward ``r_t`` for ``input_ids[:, t]``,
-                  shape ``[B, T]``.
+                  shape ``[B, T]``. The sequence score sits on the last
+                  real response token.
                 - "values": Critic ``V_t``, shape ``[B, T]``.
                 - "next_values": Critic ``V_{t+1}``, shape ``[B, T]``.
                 - "dones": 1 stops the backup after that token, shape ``[B, T]``.
+                - "prompt_lengths": Real prompt tokens per row, int64 ``[B]``.
+                - "response_lengths": Real response tokens per row, int64 ``[B]``.
+                - "padding_side": ``"right"`` (default) or ``"left"``.
             old_log_probs: Log-probs of tokens ``1 .. T-1`` under the old policy,
                 shape ``[B, T - 1]``, matching ``gather_logprobs``.
 
@@ -573,11 +640,28 @@ class PPOTrainer:
         next_values = batch["next_values"].to(self.device)
         dones = batch["dones"].to(self.device)
         old_log_probs = old_log_probs.to(self.device)
+        if "prompt_lengths" not in batch or "response_lengths" not in batch:
+            raise KeyError(
+                "batch needs prompt_lengths and response_lengths to build the response mask"
+            )
+        prompt_lengths = batch["prompt_lengths"].to(self.device)
+        response_lengths = batch["response_lengths"].to(self.device)
+        padding_side = batch.get("padding_side", "right")
+        if not isinstance(padding_side, str):
+            raise TypeError(f"padding_side must be a str, got {type(padding_side)}")
+        # One mask for the batch. gathered_mask aligns with gather_logprobs.
+        # token_mask aligns with rewards[:, t] and with GAE.
+        token_mask, gathered_mask = response_token_mask(
+            prompt_lengths,
+            response_lengths,
+            input_ids.shape[1],
+            padding_side,
+        )
 
         # Forward passes (should not compute gradients for reference model)
         with torch.no_grad():
             # Reference log-probs of the sampled tokens. The shift matches
-            # the policy gather below. No mask is applied. S0.7 owns that.
+            # the policy gather below. The KL mean uses gathered_mask.
             ref_outputs = self.reference_model(input_ids)
             ref_logits = ref_outputs.logits if hasattr(ref_outputs, "logits") else ref_outputs
             ref_token_logprobs = gather_logprobs(ref_logits, input_ids)
@@ -594,37 +678,42 @@ class PPOTrainer:
             value_outputs.value if hasattr(value_outputs, "value") else value_outputs.squeeze()
         )
 
-        # Compute advantages using GAE
-        advantages, returns = self.gae.compute(rewards, values, next_values, dones)
+        # Compute advantages using GAE. Prompt and padding are not timesteps.
+        advantages, returns = self.gae.compute(rewards, values, next_values, dones, token_mask)
+        advantage_mean = masked_mean(advantages, token_mask)
 
-        # Normalize advantages (for stability)
+        # Normalise on response tokens only. Pads and prompt tokens stay 0.
         if self.alignment_config.advantage_normalization:
-            adv_mean = advantages.mean()
-            adv_std = advantages.std() + 1e-8
-            advantages = (advantages - adv_mean) / adv_std
+            advantages, _, _ = masked_whiten(advantages, token_mask)
+        gae_mean = masked_mean(advantages, token_mask)
 
         # Token log-probs, shape [B, T-1]. Index t scores input_ids[:, t+1].
         # GAE stays on input positions [B, T]. rewards[:, t] is r_t for token t,
         # and the ratio weight for that token is advantages[:, t], which sits
-        # in advantages[:, 1:] for t >= 1. No padding mask is passed here.
+        # in advantages[:, 1:] for t >= 1. gathered_mask[:, t] is 1 when that
+        # token is a response token.
         token_logprobs = gather_logprobs(policy_logits, input_ids)
         if old_log_probs.shape != token_logprobs.shape:
             raise ValueError(
                 f"old_log_probs shape {tuple(old_log_probs.shape)} must match "
                 f"gathered logprobs {tuple(token_logprobs.shape)}"
             )
+        if gathered_mask.shape != token_logprobs.shape:
+            raise ValueError(
+                f"gathered response mask {tuple(gathered_mask.shape)} must match "
+                f"logprobs {tuple(token_logprobs.shape)}"
+            )
         action_advantages = advantages[:, 1:]
 
-        # Compute all losses
-        policy_loss, ratio = self.compute_policy_loss(
-            token_logprobs, old_log_probs, action_advantages
+        # Compute all losses. The same gathered mask goes to policy, entropy, and KL.
+        policy_loss, _ratio = self.compute_policy_loss(
+            token_logprobs, old_log_probs, action_advantages, gathered_mask
         )
         # batch["values"] is V_old. compute_value_loss uses it only when
-        # value_clip is set. No padding mask is passed. That stays in S0.7.
-        value_loss = self.compute_value_loss(value_pred, returns, values)
-        entropy = self.compute_entropy_bonus(policy_logits)
-        # Same gathered tokens as the policy ratio. No mask. S0.7.
-        kl_div = self.compute_kl_divergence(token_logprobs, ref_token_logprobs)
+        # value_clip is set. token_mask drops prompt and padding.
+        value_loss = self.compute_value_loss(value_pred, returns, values, token_mask)
+        entropy = self.compute_entropy_bonus(policy_logits[:, :-1, :], gathered_mask)
+        kl_div = self.compute_kl_divergence(token_logprobs, ref_token_logprobs, gathered_mask)
 
         # KL penalty term
         kl_penalty = self.kl_coefficient * kl_div
@@ -646,8 +735,8 @@ class PPOTrainer:
         torch.nn.utils.clip_grad_norm_(self.value_model.parameters(), self.opt_config.max_grad_norm)
         self.optimizer.step()
 
-        # Compute metrics
-        explained_var = self.compute_explained_variance(value_pred, returns)
+        # Compute metrics. Means are over response tokens, not the padded tensor.
+        explained_var = self.compute_explained_variance(value_pred, returns, token_mask)
         self.adaptive_kl_penalty(kl_div.item())
 
         metrics = PPOMetrics(
@@ -657,9 +746,9 @@ class PPOTrainer:
             kl_divergence=kl_div.item(),
             explained_variance=explained_var,
             adaptive_kl_coefficient=self.kl_coefficient,
-            reward_mean=rewards.mean().item(),
-            advantage_mean=advantages.mean().item(),
-            gae_mean=advantages.mean().item(),
+            reward_mean=masked_mean(rewards, token_mask).item(),
+            advantage_mean=advantage_mean.item(),
+            gae_mean=gae_mean.item(),
         )
 
         # Log to W&B
