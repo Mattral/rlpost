@@ -30,8 +30,8 @@ There is no coverage number in this README. A green coverage run has not been re
 | Path | What it is |
 | --- | --- |
 | `src/rlpost/config.py` | Pydantic configs. `TrainingConfig.toy_mode()` and `from_yaml`. Tested in `tests/test_config.py`. |
-| `src/rlpost/ops.py` | `gather_logprobs`: logits at position `t` score token `t+1`. Shape `[B, T, V]` in, `[B, T-1]` out. |
-| `src/rlpost/ppo_engine.py` | The only PPO implementation: `PPOTrainer`. GAE, a clipped policy loss, a value loss (unclipped unless `value_clip` is set), entropy, and a per-token KL (default `k2`). `train_step` uses `gather_logprobs`. |
+| `src/rlpost/ops.py` | `gather_logprobs`: logits at position `t` score token `t+1`. Shape `[B, T, V]` in, `[B, T-1]` out. `response_token_mask` marks generated response tokens in that layout. |
+| `src/rlpost/ppo_engine.py` | The only PPO implementation: `PPOTrainer`. GAE, a clipped policy loss, a value loss (unclipped unless `value_clip` is set), entropy, and a per-token KL (default `k2`). Losses and advantages use the response-token mask. `train_step` uses `gather_logprobs`. |
 | `src/rlpost/dpo_engine.py` | `DPOTrainer`. The CLI does not call it. |
 | `src/rlpost/sft_engine.py` | LoRA SFT through the Hugging Face `Trainer`. |
 | `src/rlpost/reward_engine.py` | Preference reward-model trainer. |
@@ -76,7 +76,7 @@ The KL penalty is a per-token estimator on the sampled tokens. The loss differen
 
 The value and the gradient name different KLs for `k1` and `k3` because the backward does not differentiate through which token was sampled.
 
-`train_step` calls `gather_logprobs` for the policy and the reference. Logits at position `t` score token `t+1`. The policy ratio and the KL mean both use those log-probabilities, shape `[B, T-1]`. The KL call does not take a mask. Masking stays in S0.7. The two step tests run on a tiny causal LM. The clipped surrogate, both value losses, the entropy term, and the KL estimators are tested. The entropy scalar is the mean of TRL 1.17.1 `entropy_from_logits`.
+`train_step` calls `gather_logprobs` for the policy and the reference. Logits at position `t` score token `t+1`. The policy ratio and the KL mean both use those log-probabilities, shape `[B, T-1]`. One response mask is built from the rollout lengths. Index `t` of the gathered mask is 1 when token `t+1` is a generated response token, and 0 for prompt and padding. Policy loss, entropy, and KL use that mask. GAE and the value loss use the same marks on `[B, T]`. Each mean is `sum(x * mask) / sum(mask)`. Advantage normalisation uses only those positions. The sequence reward sits on the last response token. `kl_estimator="k1"` is rejected when the config is built. The two step tests run on a tiny causal LM. The clipped surrogate, both value losses, the entropy term, and the KL estimators are tested. The entropy scalar is the mean of TRL 1.17.1 `entropy_from_logits` on the rows the mask keeps.
 
 ## Command line
 
