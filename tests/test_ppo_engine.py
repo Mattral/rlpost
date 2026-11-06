@@ -241,7 +241,7 @@ class TestPPOLosses:
         assert entropy < math.log(num_actions)  # Upper bound: log(|A|)
 
     def test_kl_divergence_computation(self) -> None:
-        """Default k3 on sampled-token log-probs is a nonnegative scalar."""
+        """Default k2 on sampled-token log-probs is a nonnegative scalar."""
         config = TrainingConfig.toy_mode()
         policy = DummyModel()
         value = DummyValueModel()
@@ -249,7 +249,7 @@ class TestPPOLosses:
         optimizer = torch.optim.Adam(list(policy.parameters()) + list(value.parameters()))
 
         trainer = PPOTrainer(config, policy, value, reference, optimizer)
-        assert trainer.alignment_config.kl_estimator == "k3"
+        assert trainer.alignment_config.kl_estimator == "k2"
 
         logp_policy = torch.tensor([[-0.2, -1.5], [-0.7, -2.0]])
         logp_ref = torch.tensor([[-1.0, -0.4], [-0.7, -0.5]])

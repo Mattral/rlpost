@@ -185,9 +185,9 @@ class TestAlignmentConfig:
             config.dpo_beta = 0.0
 
     def test_kl_estimator_is_k1_k2_or_k3(self) -> None:
-        """kl_estimator names the PPO penalty. The default is k3."""
+        """kl_estimator names the PPO penalty. The loss default is k2."""
         config = AlignmentConfig()
-        assert config.kl_estimator == "k3"
+        assert config.kl_estimator == "k2"
         assert config.kl_coefficient == 0.1
 
         for name in ("k1", "k2", "k3"):
@@ -388,7 +388,7 @@ class TestConfigYAMLLoading:
             config = TrainingConfig.from_yaml(toy_yaml_path)
             assert config.model.policy_model_id == "distilgpt2"
             assert config.dataset.batch_size == 8
-            assert config.alignment.kl_estimator == "k3"
+            assert config.alignment.kl_estimator == "k2"
 
     def test_load_default_yaml(self) -> None:
         """Verify default.yaml can be loaded from configs directory."""
@@ -397,7 +397,7 @@ class TestConfigYAMLLoading:
             config = TrainingConfig.from_yaml(default_yaml_path)
             assert config.model.policy_model_id == "meta-llama/Llama-2-7b"
             assert config.optimization.mixed_precision == "bf16"
-            assert config.alignment.kl_estimator == "k3"
+            assert config.alignment.kl_estimator == "k2"
 
 
 class TestConfigConsistency:

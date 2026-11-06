@@ -243,7 +243,7 @@ class AlignmentConfig(BaseConfig):
         ppo_num_epochs: Number of epochs to train on each batch of rollouts.
         target_kl: Target KL divergence between policy and reference (soft constraint).
         kl_coefficient: Initial coefficient for the PPO KL penalty.
-        kl_estimator: Which per-token estimator of KL(policy || reference) PPO adds.
+        kl_estimator: Which per-token KL estimator the PPO loss adds. Default k2.
         dpo_beta: DPO temperature. Scales the implicit reward. Not the PPO KL coefficient.
         gamma: Discount factor for advantage estimation.
         gae_lambda: Smoothing parameter for GAE (lambda in GAE-lambda).
@@ -279,13 +279,14 @@ class AlignmentConfig(BaseConfig):
         description="Initial coefficient for the PPO KL penalty. Not used by DPO.",
     )
     kl_estimator: Literal["k1", "k2", "k3"] = Field(
-        default="k3",
+        default="k2",
         description=(
-            "Per-token estimator of KL(policy || reference) on the sampled tokens. "
-            "lr = log p_ref - log p_policy. k1 = -lr (unbiased, can be negative). "
-            "k2 = 0.5 * lr^2 (always >= 0, biased). "
-            "k3 = exp(lr) - 1 - lr. Default is k3 because it is unbiased for that KL "
-            "and >= 0 at every token."
+            "Per-token KL estimator on sampled tokens. lr = log p_ref - log p_policy. "
+            "k1 = -lr: unbiased value, expected loss gradient 0. The PPO loss rejects it. "
+            "It belongs in the reward (reward minus beta * k1), which is not implemented. "
+            "k2 = 0.5 * lr^2: biased value, gradient of KL(policy || reference). Default. "
+            "k3 = exp(lr) - 1 - lr: unbiased nonnegative value, gradient of "
+            "KL(reference || policy), the reverse direction GRPO uses."
         ),
     )
     dpo_beta: float = Field(
@@ -593,7 +594,7 @@ class TrainingConfig(BaseConfig):
                 ppo_num_epochs=2,
                 target_kl=0.1,
                 kl_coefficient=0.05,
-                kl_estimator="k3",
+                kl_estimator="k2",
                 dpo_beta=0.1,
                 gamma=0.99,
                 gae_lambda=0.95,
@@ -670,7 +671,7 @@ class TrainingConfig(BaseConfig):
                 ppo_num_epochs=4,
                 target_kl=0.1,
                 kl_coefficient=0.1,
-                kl_estimator="k3",
+                kl_estimator="k2",
                 dpo_beta=0.1,
                 gamma=0.99,
                 gae_lambda=0.95,

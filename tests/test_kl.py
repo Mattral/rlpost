@@ -1,16 +1,23 @@
-"""Per-token KL(policy || reference) estimators k1, k2, and k3.
+"""Per-token KL estimators k1, k2, and k3. Value and loss-term gradient.
 
-The closed form is ``sum_a p(a) * (log p(a) - log q(a))``. Monte Carlo
-draws ``a ~ p`` and averages k1 and k3. Sample size is 1_000_000, seed 0,
-absolute tolerance 1e-2. p = (0.8, 0.1, 0.1), q = (0.2, 0.2, 0.6). Those
-two directions differ, so a swapped estimator misses KL(p || q).
+Value. The closed form is ``sum_a p(a) * (log p(a) - log q(a))``. Monte
+Carlo draws ``a ~ p`` and averages k1 and k3. Sample size is 1_000_000,
+seed 0, absolute tolerance 1e-2. p = (0.8, 0.1, 0.1), q = (0.2, 0.2, 0.6).
+Those two directions differ, so a swapped estimator misses KL(p || q).
+
+Gradient. A second categorical uses policy logits ``(1, 0, -0.5, 0.2)`` and
+reference logits ``(-0.4, 0.8, 0.3, -0.2)``, float64. The token is drawn
+from the policy and held fixed. Sample size is 1_000_000, seed 0, absolute
+tolerance 1e-2 on the logit gradient. mean(k2) matches the analytic
+gradient of KL(policy || reference). mean(k3) matches the analytic
+gradient of KL(reference || policy). mean(k1) matches 0.
 
 TRL 1.17.1 ``GRPOTrainer._compute_loss`` (``trainer/grpo_trainer.py``)
 assigns the k3 expression to ``per_token_kl``. ``use_bias_correction_kl``
 defaults to True and then multiplies by the importance ratio. That product
 is not k3. Parity is the uncorrected term on identical log-probabilities.
 RLOO in the same release uses the k1 log ratio instead. It is not the
-parity target.
+parity target. The loss rejects k1.
 """
 
 from pathlib import Path
@@ -25,6 +32,14 @@ from rlpost.ppo_engine import PPOTrainer, per_token_kl
 SAMPLE_SIZE = 1_000_000
 SEED = 0
 ATOL = 1e-2
+
+# Loss-term gradient. The two KL gradients differ by about 0.09, so 1e-2
+# cannot accept the wrong direction.
+GRAD_SAMPLE_SIZE = 1_000_000
+GRAD_SEED = 0
+GRAD_ATOL = 1e-2
+POLICY_LOGITS = torch.tensor([1.0, 0.0, -0.5, 0.2], dtype=torch.float64)
+REF_LOGITS = torch.tensor([-0.4, 0.8, 0.3, -0.2], dtype=torch.float64)
 
 # Not a swap of each other, so KL(p || q) and KL(q || p) differ.
 POLICY = torch.tensor([0.8, 0.1, 0.1], dtype=torch.float64)
@@ -94,30 +109,88 @@ def test_k3_nonnegative_and_k1_can_be_negative() -> None:
     assert torch.all(per_token_kl(logp_policy_mc, logp_ref_mc, "k3") >= 0)
 
 
-def test_configured_k1_scalar_can_be_negative() -> None:
-    """The trainer reads kl_estimator. k1's mean can be negative. k3's cannot."""
+def test_k1_value_is_negative_and_the_loss_rejects_it() -> None:
+    """k1's value can be negative. The loss term refuses to use it."""
     logp_policy = torch.tensor([0.0, 0.0])
     logp_ref = torch.tensor([1.0, 1.0])
 
-    k3 = _trainer("k3").compute_kl_divergence(logp_policy, logp_ref)
-    k1 = _trainer("k1").compute_kl_divergence(logp_policy, logp_ref)
-
-    assert k3 > 0
-    assert k1 < 0
+    assert per_token_kl(logp_policy, logp_ref, "k1").mean() < 0
+    assert _trainer("k3").compute_kl_divergence(logp_policy, logp_ref) > 0
+    with pytest.raises(ValueError, match="k1"):
+        _trainer("k1").compute_kl_divergence(logp_policy, logp_ref)
 
 
 @pytest.mark.parametrize("estimator", ["k1", "k2", "k3"])
 def test_gradient_reaches_policy_logprobs_only(estimator: str) -> None:
-    """Backprop through the mean reaches logp_policy and stops at logp_ref."""
+    """One backward reaches logp_policy and stops at logp_ref.
+
+    This is a single realization. The expected gradient of k1 is a
+    different statement and is tested against the analytic zero.
+    """
     logp_policy = torch.tensor([0.0, -1.0, -0.5], dtype=torch.float64, requires_grad=True)
     logp_ref = torch.tensor([-1.0, -1.0, 0.5], dtype=torch.float64, requires_grad=True)
 
-    loss = _trainer(estimator).compute_kl_divergence(logp_policy, logp_ref)
+    loss = per_token_kl(logp_policy, logp_ref, estimator).mean()
     loss.backward()
 
     assert logp_policy.grad is not None
     assert logp_policy.grad.abs().sum() > 0
     assert logp_ref.grad is None
+
+
+def _analytic_logit_grads() -> tuple[torch.Tensor, torch.Tensor]:
+    """Gradients of KL(p || q) and KL(q || p) w.r.t. the policy logits."""
+    p = torch.softmax(POLICY_LOGITS, dim=-1)
+    q = torch.softmax(REF_LOGITS, dim=-1)
+    kl_pq = (p * (p.log() - q.log())).sum()
+    # d softmax turns dKL/dp into p * (log(p/q) - KL(p || q)).
+    grad_forward = p * (p.log() - q.log() - kl_pq)
+    # KL(q || p) differentiates to p - q.
+    grad_reverse = p - q
+    return grad_forward, grad_reverse
+
+
+def _monte_carlo_logit_grad(estimator: str) -> torch.Tensor:
+    """Gradient of mean(k) through log p(a), with the sampled index fixed."""
+    logits = POLICY_LOGITS.detach().clone().requires_grad_(True)
+    probabilities = torch.softmax(logits.detach(), dim=-1)
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(GRAD_SEED)
+    index = torch.multinomial(
+        probabilities, GRAD_SAMPLE_SIZE, replacement=True, generator=generator
+    )
+    logp_policy = torch.log_softmax(logits, dim=-1)[index]
+    logp_ref = torch.log_softmax(REF_LOGITS, dim=-1)[index]
+    per_token_kl(logp_policy, logp_ref, estimator).mean().backward()
+    assert logits.grad is not None
+    return logits.grad
+
+
+def test_loss_gradient_matches_the_named_kl() -> None:
+    """k2 follows KL(p || q). k3 follows KL(q || p). k1 stays near 0."""
+    grad_forward, grad_reverse = _analytic_logit_grads()
+    assert (grad_forward - grad_reverse).abs().max() > 5e-2
+
+    # The closed form, differentiated, agrees with the hand formula.
+    logits = POLICY_LOGITS.detach().clone().requires_grad_(True)
+    p = torch.softmax(logits, dim=-1)
+    q = torch.softmax(REF_LOGITS, dim=-1)
+    (p * (p.log() - q.log())).sum().backward()
+    torch.testing.assert_close(logits.grad, grad_forward, atol=1e-12, rtol=0)
+    logits_rev = POLICY_LOGITS.detach().clone().requires_grad_(True)
+    p_rev = torch.softmax(logits_rev, dim=-1)
+    (q * (q.log() - p_rev.log())).sum().backward()
+    torch.testing.assert_close(logits_rev.grad, grad_reverse, atol=1e-12, rtol=0)
+
+    grad_k1 = _monte_carlo_logit_grad("k1")
+    grad_k2 = _monte_carlo_logit_grad("k2")
+    grad_k3 = _monte_carlo_logit_grad("k3")
+    zeros = torch.zeros_like(grad_forward)
+    torch.testing.assert_close(grad_k1, zeros, atol=GRAD_ATOL, rtol=0)
+    torch.testing.assert_close(grad_k2, grad_forward, atol=GRAD_ATOL, rtol=0)
+    torch.testing.assert_close(grad_k3, grad_reverse, atol=GRAD_ATOL, rtol=0)
+    assert (grad_k2 - grad_reverse).abs().max() > GRAD_ATOL
+    assert (grad_k3 - grad_forward).abs().max() > GRAD_ATOL
 
 
 def test_optional_mask_drops_tokens() -> None:
