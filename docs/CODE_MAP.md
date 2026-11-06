@@ -14,9 +14,9 @@ Status: untested. The version string is `"0.1.0"`.
 
 Pydantic models for a run: `ModelConfig`, `OptimizationConfig`, `AlignmentConfig`, `DatasetConfig`, `TrainingConfig`. No tensors. YAML and JSON round-trip through `from_yaml`, `to_yaml`, `from_json_file`, and `to_json_file`. `TrainingConfig.toy_mode()` builds a small config the unit tests use.
 
-`PPOTrainer` reads `alignment.gamma`, `gae_lambda`, `kl_coefficient`, `target_kl`, `ppo_epsilon`, `entropy_coefficient`, `value_loss_coefficient`, `value_clip`, `advantage_normalization`, and `optimization.max_grad_norm`, plus `log_to_wandb`. It does not read `alignment.ppo_num_epochs`. SFT and the reward trainer read learning rate, weight decay, warmup, grad norm, mixed precision, and batch size. They also read `model.lora_target_modules`, which is not a field on `ModelConfig`. `PreferencePairDataset` reads `dataset.dataset_size`, which is not a field on `DatasetConfig`. Those two attributes raise `AttributeError` if that line runs. `model.use_peft_lora` and `model.attn_implementation` are stored. `tests/test_config.py` checks both. No loader reads `attn_implementation`, and the trainers apply LoRA without reading `use_peft_lora`.
+`PPOTrainer` reads `alignment.gamma`, `gae_lambda`, `kl_coefficient`, `kl_estimator`, `target_kl`, `ppo_epsilon`, `entropy_coefficient`, `value_loss_coefficient`, `value_clip`, `advantage_normalization`, and `optimization.max_grad_norm`, plus `log_to_wandb`. It does not read `alignment.ppo_num_epochs`. SFT and the reward trainer read learning rate, weight decay, warmup, grad norm, mixed precision, and batch size. They also read `model.lora_target_modules`, which is not a field on `ModelConfig`. `PreferencePairDataset` reads `dataset.dataset_size`, which is not a field on `DatasetConfig`. Those two attributes raise `AttributeError` if that line runs. `model.use_peft_lora` and `model.attn_implementation` are stored. `tests/test_config.py` checks both. No loader reads `attn_implementation`, and the trainers apply LoRA without reading `use_peft_lora`.
 
-Status: tested for construction, validation, and YAML load. `AlignmentConfig.dpo_beta` is a field, default `0.1`, and it must be `> 0`. It is not `kl_coefficient`. `AlignmentConfig.value_clip` defaults to `None` and, when set, must be `>= 0`. It is not `ppo_epsilon`. `model.lora_target_modules` and `dataset.dataset_size` are still missing. See [S0.11](../ROADMAP.md#s011-cli-actually-runs-sftrmdpoppo-end-to-end-on-a-tiny-model-on-cpu).
+Status: tested for construction, validation, and YAML load. `AlignmentConfig.dpo_beta` is a field, default `0.1`, and it must be `> 0`. It is not `kl_coefficient`. `AlignmentConfig.kl_estimator` is `k1`, `k2`, or `k3`, default `k2`. `AlignmentConfig.value_clip` defaults to `None` and, when set, must be `>= 0`. It is not `ppo_epsilon`. `model.lora_target_modules` and `dataset.dataset_size` are still missing. See [S0.11](../ROADMAP.md#s011-cli-actually-runs-sftrmdpoppo-end-to-end-on-a-tiny-model-on-cpu).
 
 Tests: `tests/test_config.py`.
 
@@ -120,7 +120,15 @@ loss   = value_loss_coefficient * L_v
 
 `compute_entropy_bonus(logits [..., A])` is the mean of the per-row Shannon entropy. Each row matches `trl.trainer.utils.entropy_from_logits` in TRL 1.17.1. A uniform row is `log(n)`. A `[0.75, 0.25]` row is checked by hand. Scalar. No mask.
 
-`compute_kl_divergence(logits_new, logits_old)` is the full-vocabulary categorical KL(old || new), then a mean. Scalar. `train_step` calls it as `(policy_logits, ref_logits)`, so the penalty is KL(reference || policy), not KL(policy || reference). k1, k2, and k3 are not implemented. Tested only for non-negativity and for identical inputs (about 0). Naming the estimator is [S0.6e](../ROADMAP.md#s06-numerical-parity-tests-core-correctness). The direction was not changed in S0.4.
+`per_token_kl(logp_policy, logp_ref, estimator)` is the per-token estimator. The two log-probability tensors share a shape. `logp_ref` is detached, so one backward reaches `logp_policy` only. The sampled index is held fixed, so the value and the loss gradient can name different KLs. `lr = logp_ref - logp_policy`.
+
+`k1 = -lr`. Value: unbiased for KL(policy || reference), and a token can be negative. Gradient: the expected gradient w.r.t. the policy logits is 0. The loss does not use it. The value is the InstructGPT penalty inside the reward, `reward - beta * k1`. Reward shaping is not implemented.
+
+`k2 = 0.5 * lr^2`. Value: always >= 0, biased for the KL. Gradient: expected gradient of KL(policy || reference). This is the loss default.
+
+`k3 = exp(lr) - 1 - lr`. Value: unbiased for KL(policy || reference), and >= 0 at every token, because `exp(x) - 1 - x` is convex with minimum 0 at 0. Gradient: expected gradient of KL(reference || policy). TRL 1.17.1 `GRPOTrainer._compute_loss` assigns this expression before it multiplies by the importance ratio when `use_bias_correction_kl` is set. That flag defaults to True. The product is not this estimator. `tests/test_kl.py` checks the values, the sign, the direction, and both gradients.
+
+`compute_kl_divergence(logp_policy, logp_ref, mask=None)` returns the mean of `per_token_kl` for `k2` or `k3`. Scalar, added to the loss. `k1` raises. `mask` has the same shape. `1` keeps a token and `0` drops it. An all-zero mask returns 0. `None` averages every token. `train_step` calls it as `(token_logprobs, ref_token_logprobs)` and does not pass a mask. Both tensors come from `gather_logprobs`, shape `[B, T-1]`. Prompt and padding tokens in that window stay in the mean. That mask is [S0.7](../ROADMAP.md#s07-classic-rlhf-edge-case-tests).
 
 `compute_explained_variance(value_pred, returns)` returns a Python float, `1 - Var(returns - values) / Var(returns)`, or `0` when the return variance is 0. Tested.
 
@@ -132,11 +140,11 @@ loss   = value_loss_coefficient * L_v
 policy_loss + value_loss - entropy_coefficient * entropy + kl_coefficient * kl
 ```
 
-`train_step` calls `gather_logprobs(policy_logits, input_ids)`. Logits at `t` score token `t+1`. The result is `[B, T-1]`. `old_log_probs` must have that shape. GAE stays `[B, T]`. The policy ratio uses `advantages[:, 1:]`, so the weight on token `t` (`t >= 1`) is `advantages[:, t]`. A reward at index `t` therefore enters the policy term for that same token. No padding mask is applied in this step. That mask, and advantage normalisation over padding, are [S0.7](../ROADMAP.md#s07-classic-rlhf-edge-case-tests). The two `test_train_step_*` tests build a tiny random-init Llama and pass.
+`train_step` calls `gather_logprobs` on the policy logits and, under `no_grad`, on the reference logits. Logits at `t` score token `t+1`. Each result is `[B, T-1]`. `old_log_probs` must have that shape. GAE stays `[B, T]`. The policy ratio uses `advantages[:, 1:]`, so the weight on token `t` (`t >= 1`) is `advantages[:, t]`. A reward at index `t` therefore enters the policy term for that same token. The KL mean uses those same gathered tokens and no mask. No padding mask is applied in this step. That mask, and advantage normalisation over padding, are [S0.7](../ROADMAP.md#s07-classic-rlhf-edge-case-tests). The two `test_train_step_*` tests build a tiny random-init Llama and pass.
 
 `value_pred` is the current critic and is what the value loss trains. GAE uses the batch's `values` and `next_values`. `train_step` passes `values` into the value loss as `V_old`. That argument is used only when `value_clip` is set. No padding mask is passed to GAE or to the losses.
 
-Status: GAE, the clipped surrogate, both value losses, entropy against the TRL helper, KL-on-identical-inputs, explained variance, the adaptive coefficient, and `train_step` on a tiny causal LM are tested. See [S0.4](../ROADMAP.md#s04-code-ownership-pass), [S0.6](../ROADMAP.md#s06-numerical-parity-tests-core-correctness), and [S0.7](../ROADMAP.md#s07-classic-rlhf-edge-case-tests).
+Status: GAE, the clipped surrogate, both value losses, entropy against the TRL helper, the k1/k2/k3 estimators (k3 matched to TRL 1.17.1 GRPO on identical log-probabilities), explained variance, the adaptive coefficient, and `train_step` on a tiny causal LM are tested. See [S0.4](../ROADMAP.md#s04-code-ownership-pass), [S0.6](../ROADMAP.md#s06-numerical-parity-tests-core-correctness), and [S0.7](../ROADMAP.md#s07-classic-rlhf-edge-case-tests).
 
 Tests: `tests/test_ppo_engine.py`, `tests/test_ppo_loss.py`, `tests/test_gae.py`, and `tests/test_logprob_gather.py`.
 

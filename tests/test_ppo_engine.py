@@ -241,7 +241,7 @@ class TestPPOLosses:
         assert entropy < math.log(num_actions)  # Upper bound: log(|A|)
 
     def test_kl_divergence_computation(self) -> None:
-        """Verify KL divergence computation."""
+        """Default k2 on sampled-token log-probs is a nonnegative scalar."""
         config = TrainingConfig.toy_mode()
         policy = DummyModel()
         value = DummyValueModel()
@@ -249,18 +249,17 @@ class TestPPOLosses:
         optimizer = torch.optim.Adam(list(policy.parameters()) + list(value.parameters()))
 
         trainer = PPOTrainer(config, policy, value, reference, optimizer)
+        assert trainer.alignment_config.kl_estimator == "k2"
 
-        batch_size, num_actions = 8, 50257
-        logits_new = torch.randn(batch_size, num_actions)
-        logits_old = torch.randn(batch_size, num_actions)
+        logp_policy = torch.tensor([[-0.2, -1.5], [-0.7, -2.0]])
+        logp_ref = torch.tensor([[-1.0, -0.4], [-0.7, -0.5]])
+        kl = trainer.compute_kl_divergence(logp_policy, logp_ref)
 
-        kl = trainer.compute_kl_divergence(logits_new, logits_old)
-
-        assert kl.shape == torch.Size([])  # Scalar
-        assert kl >= 0  # KL divergence is non-negative
+        assert kl.shape == torch.Size([])
+        assert kl >= 0
 
     def test_kl_divergence_same_distribution(self) -> None:
-        """Verify KL divergence is ~0 for identical distributions."""
+        """Identical sampled-token log-probs have KL 0 under the default estimator."""
         config = TrainingConfig.toy_mode()
         policy = DummyModel()
         value = DummyValueModel()
@@ -269,12 +268,10 @@ class TestPPOLosses:
 
         trainer = PPOTrainer(config, policy, value, reference, optimizer)
 
-        batch_size, num_actions = 8, 50257
-        logits = torch.randn(batch_size, num_actions)
+        logp = torch.tensor([[-0.2, -1.5], [-0.7, -2.0]])
+        kl = trainer.compute_kl_divergence(logp, logp)
 
-        kl = trainer.compute_kl_divergence(logits, logits)
-
-        assert kl.item() < 1e-5  # Should be ~0
+        assert kl.item() == 0.0
 
 
 class TestAdaptiveKL:
