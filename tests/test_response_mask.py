@@ -27,17 +27,20 @@ RESPONSE = torch.tensor([3, 2], dtype=torch.long)
 SEQ_LEN = 6
 VOCAB = 6
 
-# Right padding: [prompt | response | pad]. Left: [pad | prompt | response].
+# Right: [prompt | response | pad].
+# Mixed: prompts left-padded to P = max(prompt_lengths) = 2, then response, then pad.
+# Row 1 is the one that distinguishes them: right starts the response at column 1,
+# mixed starts every response at column 2.
 RIGHT_TOKEN = torch.tensor(
     [
         [0.0, 0.0, 1.0, 1.0, 1.0, 0.0],
         [0.0, 1.0, 1.0, 0.0, 0.0, 0.0],
     ]
 )
-LEFT_TOKEN = torch.tensor(
+MIXED_TOKEN = torch.tensor(
     [
-        [0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
-        [0.0, 0.0, 0.0, 0.0, 1.0, 1.0],
+        [0.0, 0.0, 1.0, 1.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0, 1.0, 0.0, 0.0],
     ]
 )
 RIGHT_GATHERED = torch.tensor(
@@ -46,10 +49,10 @@ RIGHT_GATHERED = torch.tensor(
         [1.0, 1.0, 0.0, 0.0, 0.0],
     ]
 )
-LEFT_GATHERED = torch.tensor(
+MIXED_GATHERED = torch.tensor(
     [
-        [0.0, 0.0, 1.0, 1.0, 1.0],
-        [0.0, 0.0, 0.0, 1.0, 1.0],
+        [0.0, 1.0, 1.0, 1.0, 0.0],
+        [0.0, 1.0, 1.0, 0.0, 0.0],
     ]
 )
 
@@ -80,7 +83,26 @@ class _FixedValue(nn.Module):
 def _expected(padding_side: str) -> tuple[torch.Tensor, torch.Tensor]:
     if padding_side == "right":
         return RIGHT_TOKEN, RIGHT_GATHERED
-    return LEFT_TOKEN, LEFT_GATHERED
+    return MIXED_TOKEN, MIXED_GATHERED
+
+
+def _value_columns_in_use(gathered: torch.Tensor) -> torch.Tensor:
+    """1 where ``value_out[:, t]`` is a response-action state or its bootstrap.
+
+    The state for the action that emits token ``t + 1`` is column ``t``, which
+    can be the last prompt token. The bootstrap is column ``t + 1``, and only
+    when the next action index is real. Other columns, including the value
+    written on the action's own token when the backup stops, are unused.
+    """
+    actions = gathered.shape[1]
+    used = torch.zeros(gathered.shape[0], actions + 1)
+    used[:, :-1] = gathered
+    next_real = torch.ones_like(gathered)
+    if actions > 1:
+        next_real[:, :-1] = gathered[:, 1:]
+    continues = gathered * next_real
+    used[:, 1:] = torch.maximum(used[:, 1:], continues)
+    return used
 
 
 def _ids(token_mask: torch.Tensor, prompt_id: int, pad_id: int) -> torch.Tensor:
@@ -136,7 +158,7 @@ def _batch(
     }
 
 
-@pytest.mark.parametrize("padding_side", ["right", "left"])
+@pytest.mark.parametrize("padding_side", ["right", "mixed"])
 def test_gathered_mask_matches_the_rollout_layout(padding_side: str) -> None:
     """Index t of the gathered mask marks token t+1, and only response tokens."""
     token_mask, gathered = response_token_mask(PROMPT, RESPONSE, SEQ_LEN, padding_side)
@@ -146,11 +168,29 @@ def test_gathered_mask_matches_the_rollout_layout(padding_side: str) -> None:
     assert torch.equal(gathered, token_mask[:, 1:])
 
 
-@pytest.mark.parametrize("padding_side", ["right", "left"])
-def test_prompt_and_padding_do_not_change_losses_advantages_or_kl(padding_side: str) -> None:
-    """Corrupting prompt tokens or padding leaves the PPO step unchanged.
+def test_suffix_left_layout_is_rejected() -> None:
+    """A response flush with the end of the row is not a generation layout."""
+    with pytest.raises(ValueError, match="right"):
+        response_token_mask(PROMPT, RESPONSE, SEQ_LEN, "left")
 
-    A response-scoring logit and the last-token reward do change it. An
+
+def test_mixed_layout_rejects_a_response_past_the_common_prompt_width() -> None:
+    """Each row fits on its own. The shared prompt width pushes row 0 off the end."""
+    prompts = torch.tensor([1, 4], dtype=torch.long)
+    responses = torch.tensor([4, 1], dtype=torch.long)
+    token_mask, _ = response_token_mask(prompts, responses, 6, "right")
+    assert token_mask.shape == (2, 6)
+    with pytest.raises(ValueError, match="max\\(prompt_lengths\\)"):
+        response_token_mask(prompts, responses, 6, "mixed")
+
+
+@pytest.mark.parametrize("padding_side", ["right", "mixed"])
+def test_prompt_and_padding_do_not_change_losses_advantages_or_kl(padding_side: str) -> None:
+    """Corrupting prompt ids, padding, or an unused value column leaves the step unchanged.
+
+    The state for the first response action sits on the last prompt token, so
+    that value column is in use and this test does not corrupt it. A
+    response-scoring logit and the last-token reward do change the step. An
     unmasked mean fails the first check. An empty mask fails the second.
     """
     token_mask, gathered = response_token_mask(PROMPT, RESPONSE, SEQ_LEN, padding_side)
@@ -194,7 +234,9 @@ def test_prompt_and_padding_do_not_change_losses_advantages_or_kl(padding_side: 
 
     value_pred = torch.full((2, SEQ_LEN), 0.25)
     corrupt_pred = value_pred.clone()
-    corrupt_pred[token_mask == 0] = 9
+    # The last prompt column is the state of the first response action.
+    # Corrupting every token_mask == 0 column would move that baseline.
+    corrupt_pred[_value_columns_in_use(gathered) == 0] = 9
 
     offset = torch.linspace(-0.3, 0.3, SEQ_LEN - 1).view(1, -1)
     old_log_probs = gather_logprobs(policy_logits, base_ids).detach() - offset
@@ -286,12 +328,12 @@ def test_advantage_mean_uses_response_tokens_only() -> None:
     assert metrics.gae_mean == pytest.approx(0.0, abs=1e-5)
 
 
-@pytest.mark.parametrize("padding_side", ["right", "left"])
+@pytest.mark.parametrize("padding_side", ["right", "mixed"])
 def test_sequence_reward_sits_on_the_last_response_token(padding_side: str) -> None:
     """A rank-3 head is not averaged over time. The score lands on the last 1.
 
-    A sequence-level ``[B, 1]`` logit uses that same index. Left padding and
-    right padding disagree about which column that is.
+    A sequence-level ``[B, 1]`` logit uses that same index. Right padding and
+    the mixed layout disagree about which column that is.
     """
     token_mask, _ = response_token_mask(PROMPT, RESPONSE, SEQ_LEN, padding_side)
     expected, _ = _expected(padding_side)
@@ -323,6 +365,82 @@ def test_sequence_reward_sits_on_the_last_response_token(padding_side: str) -> N
     assert placed_featured[0, int(last[0])] == pytest.approx(60.0)
     assert placed_featured[1, int(last[1])] == pytest.approx(10.0)
     assert torch.count_nonzero(placed_featured) == 2
+
+
+class _CausalValue(nn.Module):
+    """``V[:, t]`` is the sum of token ids through ``t``. Later tokens are invisible."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.bias = nn.Parameter(torch.zeros(()))
+
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return input_ids.to(dtype=torch.float32).cumsum(dim=-1) + self.bias
+
+
+def test_action_advantage_does_not_see_its_own_token() -> None:
+    """gamma=0 and rewards=0 make ``A = -V(s)``.
+
+    The action at index ``t`` emits ``input_ids[:, t + 1]``. Its state was
+    read at position ``t``, so editing that token must not move the advantage.
+    A baseline that has already seen the token is an action-dependent baseline.
+    """
+    seq_len = SEQ_LEN
+    prompt = torch.tensor([2, 2], dtype=torch.long)
+    response = torch.tensor([3, 3], dtype=torch.long)
+    ids = torch.tensor(
+        [
+            [2, 5, 1, 4, 3, 0],
+            [2, 5, 1, 4, 3, 0],
+        ],
+        dtype=torch.long,
+    )
+    edited = ids.clone()
+    edited[:, 2] = 0
+    action_index = 1  # logits here score token 2
+
+    def run(token_ids: torch.Tensor) -> torch.Tensor:
+        values = token_ids.to(dtype=torch.float32).cumsum(dim=-1)
+        config = TrainingConfig.toy_mode()
+        config.log_to_wandb = False
+        config.alignment.gamma = 0.0
+        config.alignment.advantage_normalization = False
+        policy_logits = torch.zeros(2, seq_len, VOCAB)
+        policy = _FixedLogits(policy_logits)
+        reference = _FixedLogits(policy_logits)
+        value = _CausalValue()
+        optimizer = torch.optim.Adam(list(policy.parameters()) + list(value.parameters()))
+        trainer = PPOTrainer(config, policy, value, reference, optimizer)
+        seen: dict[str, torch.Tensor] = {}
+        compute_policy_loss = trainer.compute_policy_loss
+
+        def capture(log_probs_new, log_probs_old, advantages, mask=None):
+            seen["advantages"] = advantages.detach().clone()
+            return compute_policy_loss(log_probs_new, log_probs_old, advantages, mask)
+
+        trainer.compute_policy_loss = capture
+        batch = {
+            "input_ids": token_ids,
+            "rewards": torch.zeros(2, seq_len),
+            "values": values,
+            "next_values": torch.zeros(2, seq_len),
+            "dones": torch.zeros(2, seq_len),
+            "prompt_lengths": prompt,
+            "response_lengths": response,
+            "padding_side": "right",
+        }
+        trainer.train_step(batch, torch.zeros(2, seq_len - 1))
+        return seen["advantages"]
+
+    base = run(ids)
+    moved = run(edited)
+    state_value = ids.to(dtype=torch.float32).cumsum(dim=-1)[:, action_index]
+    token_value = ids.to(dtype=torch.float32).cumsum(dim=-1)[:, action_index + 1]
+    edited_token_value = edited.to(dtype=torch.float32).cumsum(dim=-1)[:, action_index + 1]
+
+    assert not torch.equal(token_value, edited_token_value)
+    assert torch.allclose(base[:, action_index], -state_value, atol=1e-6)
+    assert torch.allclose(moved[:, action_index], base[:, action_index], atol=1e-6)
 
 
 def test_masked_whiten_divides_by_the_response_count() -> None:

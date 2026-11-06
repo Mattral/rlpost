@@ -12,20 +12,40 @@ This is the only PPO implementation. The step is:
 
 ``train_step`` reads token log-probabilities from ``gather_logprobs``:
 logits at position ``t`` score token ``t + 1``, and the result has shape
-``[B, T - 1]``. Rewards, values, dones, and advantages are ``[B, T]``.
-Axis 1 is time, and ``rewards[:, t]`` is the reward for token ``t``.
-The policy ratio uses ``advantages[:, 1:]``, so that reward weights the
-log-prob of token ``t``.
+``[B, T - 1]``. The value head has the same shift. ``value_out[:, t]`` is
+the critic after it has read token ``t`` and before it has read token
+``t + 1``, so the tensors that enter GAE, the value loss, and whitening
+are the action layout ``[B, T - 1]``:
+
+    values[:, t]       = value_out[:, t]      # V(s) for the action at t
+    next_values[:, t]  = value_out[:, t + 1]  # V(s') after that action
+    rewards[:, t]      = token_reward[:, t + 1]
+
+Index ``t`` is the action that emits token ``t + 1``. The reward written
+on a token moves back one column with it. TRL's PPO trainer (removed
+before 1.17.1; the 0.7 ``batched_forward_pass`` is the one that returned
+this) used the same shift: ``values[:, :-1]`` beside
+``logprobs_from_logits(logits[:, :-1], input_ids[:, 1:])``. This is that
+alignment, not a numeric match to a PPO loss TRL 1.17.1 does not ship.
+
+Using ``value_out[:, t + 1]`` as the baseline for that action is wrong.
+That position has already read the sampled token, so the baseline depends
+on the action. A state-only baseline drops out of the policy gradient
+because ``sum_a ∇π(a|s) = 0``. An action-dependent baseline does not.
+A higher value on the token that was just sampled makes ``A = r - V``
+smaller, so the surrogate reinforces that token less and punishes it
+more. Tokens the critic scores low get the opposite push. With
+``gamma = 0`` and zero rewards the advantage is ``-V(s)``, and editing
+the sampled token must leave it unchanged.
 
 One response mask is built per batch from ``prompt_lengths`` and
 ``response_lengths``. ``response_token_mask`` documents the layout.
 ``gathered_mask[:, t]`` is 1 when token ``t + 1`` is a generated response
-token, and 0 for prompt and padding. That is the gather alignment.
-``token_mask[:, 1:]`` is the same tensor, and ``token_mask[:, t]`` is 1
-when token ``t`` itself is a response token. Policy loss, entropy, and
-KL use ``gathered_mask``. GAE and the value loss use ``token_mask``.
-Every reduction is ``sum(x * mask) / sum(mask)``. Advantage
-normalisation uses that mean and the matching std on ``token_mask`` only.
+token, and 0 for prompt and padding. Policy loss, entropy, KL, GAE, the
+value loss, and advantage whitening all use that mask. The token-level
+mask is only how the rollout finds the last response token. Every
+reduction is ``sum(x * mask) / sum(mask)``. Advantage normalisation uses
+that mean and the matching std on ``gathered_mask`` only.
 
 The KL term is added to the loss and differentiated with the sampled
 token held fixed. ``gather_logprobs`` supplies ``log p`` at those tokens,
@@ -121,9 +141,10 @@ class PPOMetrics:
         kl_divergence: Mean per-token KL(policy || reference) under kl_estimator.
         explained_variance: Fraction of value function explained.
         adaptive_kl_coefficient: Current KL penalty coefficient (beta).
-        reward_mean: Masked mean of token rewards over response tokens.
+        reward_mean: Masked mean of action rewards. Index ``t`` is the
+            reward for the action that emitted token ``t + 1``.
         advantage_mean: Masked mean of advantages before normalisation.
-            The mask is the response-token mask.
+            The mask is the gathered response mask.
         gae_mean: Masked mean of advantages after normalisation.
     """
 
@@ -236,27 +257,32 @@ class GeneralizedAdvantageEstimation:
     ) -> Tuple[Tensor, Tensor]:
         """Compute advantages and returns using GAE.
 
-        Axis 1 of every ``[B, T]`` tensor is time. Index ``t`` is the token
-        ``input_ids[:, t]``. ``rewards[:, t]`` is that token's reward.
-        ``values[:, t]`` is ``V_t``. ``next_values[:, t]`` is ``V_{t+1}`` and
+        Axis 1 of every ``[B, T]`` tensor is time. The recursion does not
+        know about tokens. PPO calls it on the action layout ``[B, T - 1]``:
+        index ``t`` is the action that emits token ``t + 1``,
+        ``rewards[:, t]`` is that action's reward, and ``values[:, t]`` is
+        ``V(s)`` before the action. ``next_values[:, t]`` is ``V(s')`` and
         is not read from ``values``. The advantage after the last index is 0.
 
-        ``mask[:, t] == 0`` is padding, not a timestep. That index's advantage
-        and return are 0. Its reward, value, and advantage do not enter any
-        other index. ``dones[:, t] == 1`` stops the backup after a real token
-        whose next index is also real. On real tokens, ``returns = A + V``.
+        ``mask[:, t] == 0`` is not a timestep. That index's advantage and
+        return are 0. Its reward, value, and advantage do not enter any
+        other index. ``dones[:, t] == 1`` stops the backup after a real
+        index whose next index is also real. On real indices,
+        ``returns = A + V``.
 
         Args:
-            rewards: Token rewards ``r_t``, shape ``[B, T]``.
-            values: Critic estimates ``V_t``, shape ``[B, T]``.
-            next_values: Critic estimates ``V_{t+1}``, shape ``[B, T]``.
-            dones: 1 stops the backup after this token, shape ``[B, T]``.
-            mask: 1 for a real token and 0 for padding, shape ``[B, T]``.
-                ``None`` means every position is real.
+            rewards: Reward at each time index, shape ``[B, T]``.
+            values: Critic estimates ``V`` at that index, shape ``[B, T]``.
+            next_values: Critic estimates of the next state, shape ``[B, T]``.
+            dones: 1 stops the backup after this index, shape ``[B, T]``.
+            mask: 1 for a real index and 0 for one to drop, shape ``[B, T]``.
+                ``None`` means every position is real. PPO passes the
+                gathered response mask.
 
         Returns:
             advantages: GAE advantages, shape ``[B, T]``.
-            returns: ``A + V`` on real tokens and 0 on padding, shape ``[B, T]``.
+            returns: ``A + V`` on real indices and 0 where the mask is 0,
+                shape ``[B, T]``.
         """
         if rewards.shape != values.shape:
             raise ValueError(
@@ -270,30 +296,30 @@ class GeneralizedAdvantageEstimation:
                 f"dones {tuple(dones.shape)}"
             )
         if mask is None:
-            token_mask = torch.ones_like(values)
+            active = torch.ones_like(values)
         else:
             if mask.shape != values.shape:
                 raise ValueError(
                     f"mask and values shape mismatch: {tuple(mask.shape)} vs {tuple(values.shape)}"
                 )
-            token_mask = mask.to(dtype=values.dtype)
+            active = mask.to(dtype=values.dtype)
 
         batch_size, seq_len = values.shape
-        # V_{t+1} is a real token only when the next index is real. The value
-        # after the last index is the caller's bootstrap, not a pad token.
-        next_real = torch.ones_like(token_mask)
+        # The next state counts only when the next index is real. The value
+        # after the last index is the caller's bootstrap, not a dropped index.
+        next_real = torch.ones_like(active)
         if seq_len > 1:
-            next_real[:, :-1] = token_mask[:, 1:]
+            next_real[:, :-1] = active[:, 1:]
         continues = (1 - dones.to(dtype=values.dtype)) * next_real
-        deltas = (rewards + self.gamma * next_values * continues - values) * token_mask
+        deltas = (rewards + self.gamma * next_values * continues - values) * active
 
         advantages = torch.zeros_like(values)
         gae = torch.zeros(batch_size, device=values.device, dtype=values.dtype)
         for t in reversed(range(seq_len)):
-            gae = (deltas[:, t] + self.gamma * self.lam * continues[:, t] * gae) * token_mask[:, t]
+            gae = (deltas[:, t] + self.gamma * self.lam * continues[:, t] * gae) * active[:, t]
             advantages[:, t] = gae
 
-        returns = (advantages + values) * token_mask
+        returns = (advantages + values) * active
         return advantages, returns
 
 
@@ -440,9 +466,9 @@ class PPOTrainer:
             returns: Targets ``R``, same shape as ``value_pred``.
             old_values: Rollout values ``V_old``. Required when ``value_clip``
                 is set. Same shape as ``value_pred``.
-            mask: 1 keeps a token and 0 drops it. Same shape as ``value_pred``.
+            mask: 1 keeps an action and 0 drops it. Same shape as ``value_pred``.
                 ``None`` averages every element. ``train_step`` passes the
-                token-level response mask.
+                gathered response mask, shape ``[B, T - 1]``.
 
         Returns:
             loss: Scalar to minimize.
@@ -551,7 +577,7 @@ class PPOTrainer:
         Range: (-∞, 1], where 1 = perfect fit, 0 = mean baseline, <0 = worse than mean.
         Without ``mask``, variance is ``torch.var`` (divide by N - 1). With
         ``mask``, variance is the masked mean of squared deviations (divide
-        by ``sum(mask)``), on the response tokens only.
+        by ``sum(mask)``). ``train_step`` passes the gathered response mask.
 
         Args:
             value_pred: Predicted values.
@@ -612,21 +638,28 @@ class PPOTrainer:
         5. Combined loss = policy_loss + value_loss - entropy_coef * entropy + beta * KL
 
         The response mask is built once, from ``prompt_lengths`` and
-        ``response_lengths``. See ``response_token_mask``. Reductions use
+        ``response_lengths``. See ``response_token_mask``. Losses, GAE, and
+        whitening use ``gathered_mask``. Reductions use
         ``sum(x * mask) / sum(mask)``.
 
         Args:
-            batch: Dict with keys, time on axis 1:
+            batch: Dict with keys:
                 - "input_ids": Tokens, shape ``[B, T]``.
-                - "rewards": Token reward ``r_t`` for ``input_ids[:, t]``,
-                  shape ``[B, T]``. The sequence score sits on the last
-                  real response token.
-                - "values": Critic ``V_t``, shape ``[B, T]``.
-                - "next_values": Critic ``V_{t+1}``, shape ``[B, T]``.
-                - "dones": 1 stops the backup after that token, shape ``[B, T]``.
+                - "rewards": Reward for the token at that index, shape
+                  ``[B, T]``. The sequence score sits on the last real
+                  response token. The action layout reads ``rewards[:, 1:]``,
+                  so index ``t`` there is the reward for emitting token
+                  ``t + 1``.
+                - "values": Rollout value head at each token, shape ``[B, T]``.
+                  ``values[:, t]`` was computed after reading token ``t``.
+                  The clip uses ``values[:, :-1]`` as ``V_old``. GAE does not
+                  read this tensor. It reads the live value head, shifted
+                  the same way.
+                - "dones": 1 stops the backup after that token, shape
+                  ``[B, T]``. The action layout reads ``dones[:, 1:]``.
                 - "prompt_lengths": Real prompt tokens per row, int64 ``[B]``.
                 - "response_lengths": Real response tokens per row, int64 ``[B]``.
-                - "padding_side": ``"right"`` (default) or ``"left"``.
+                - "padding_side": ``"right"`` (default) or ``"mixed"``.
             old_log_probs: Log-probs of tokens ``1 .. T-1`` under the old policy,
                 shape ``[B, T - 1]``, matching ``gather_logprobs``.
 
@@ -636,8 +669,7 @@ class PPOTrainer:
         # Extract batch data
         input_ids = batch["input_ids"].to(self.device)
         rewards = batch["rewards"].to(self.device)
-        values = batch["values"].to(self.device)
-        next_values = batch["next_values"].to(self.device)
+        old_values_full = batch["values"].to(self.device)
         dones = batch["dones"].to(self.device)
         old_log_probs = old_log_probs.to(self.device)
         if "prompt_lengths" not in batch or "response_lengths" not in batch:
@@ -649,9 +681,8 @@ class PPOTrainer:
         padding_side = batch.get("padding_side", "right")
         if not isinstance(padding_side, str):
             raise TypeError(f"padding_side must be a str, got {type(padding_side)}")
-        # One mask for the batch. gathered_mask aligns with gather_logprobs.
-        # token_mask aligns with rewards[:, t] and with GAE.
-        token_mask, gathered_mask = response_token_mask(
+        # The token half places the rollout reward. PPO keeps the gathered half.
+        _, gathered_mask = response_token_mask(
             prompt_lengths,
             response_lengths,
             input_ids.shape[1],
@@ -672,26 +703,56 @@ class PPOTrainer:
             policy_outputs.logits if hasattr(policy_outputs, "logits") else policy_outputs
         )
 
-        # Value forward pass
+        # Value head at each token. Position t has read tokens 0..t and has
+        # not read token t+1. The action that emits token t+1 is judged by
+        # position t. Position t+1 has already seen that token, so it is an
+        # action-dependent baseline and is not the value used here.
         value_outputs = self.value_model(input_ids)
-        value_pred = (
-            value_outputs.value if hasattr(value_outputs, "value") else value_outputs.squeeze()
+        value_out = value_outputs.value if hasattr(value_outputs, "value") else value_outputs
+        if value_out.ndim == input_ids.ndim + 1 and value_out.shape[-1] == 1:
+            value_out = value_out.squeeze(-1)
+        if value_out.shape != input_ids.shape:
+            raise ValueError(
+                f"value head shape {tuple(value_out.shape)} must match input_ids "
+                f"{tuple(input_ids.shape)}"
+            )
+        if rewards.shape != input_ids.shape or dones.shape != input_ids.shape:
+            raise ValueError(
+                "rewards and dones must match input_ids, got "
+                f"rewards {tuple(rewards.shape)}, dones {tuple(dones.shape)}, "
+                f"input_ids {tuple(input_ids.shape)}"
+            )
+        if old_values_full.shape != input_ids.shape:
+            raise ValueError(
+                "batch values must be the value head at each token, shape "
+                f"{tuple(input_ids.shape)}, got {tuple(old_values_full.shape)}"
+            )
+
+        # Action layout [B, T-1]. Index t emits token t+1.
+        action_values = value_out[:, :-1]
+        next_action_values = value_out[:, 1:]
+        action_rewards = rewards[:, 1:]
+        action_dones = dones[:, 1:]
+        old_action_values = old_values_full[:, :-1]
+
+        # Detach the baseline. The value loss trains action_values; the
+        # advantage must not carry that gradient into the policy term.
+        advantages, returns = self.gae.compute(
+            action_rewards,
+            action_values.detach(),
+            next_action_values.detach(),
+            action_dones,
+            gathered_mask,
         )
+        advantage_mean = masked_mean(advantages, gathered_mask)
 
-        # Compute advantages using GAE. Prompt and padding are not timesteps.
-        advantages, returns = self.gae.compute(rewards, values, next_values, dones, token_mask)
-        advantage_mean = masked_mean(advantages, token_mask)
-
-        # Normalise on response tokens only. Pads and prompt tokens stay 0.
+        # Normalise on response actions only. Prompt and padding stay 0.
         if self.alignment_config.advantage_normalization:
-            advantages, _, _ = masked_whiten(advantages, token_mask)
-        gae_mean = masked_mean(advantages, token_mask)
+            advantages, _, _ = masked_whiten(advantages, gathered_mask)
+        gae_mean = masked_mean(advantages, gathered_mask)
 
-        # Token log-probs, shape [B, T-1]. Index t scores input_ids[:, t+1].
-        # GAE stays on input positions [B, T]. rewards[:, t] is r_t for token t,
-        # and the ratio weight for that token is advantages[:, t], which sits
-        # in advantages[:, 1:] for t >= 1. gathered_mask[:, t] is 1 when that
-        # token is a response token.
+        # Token log-probs, shape [B, T-1]. Index t scores input_ids[:, t+1]
+        # and is weighted by advantages[:, t], the return of that same action.
         token_logprobs = gather_logprobs(policy_logits, input_ids)
         if old_log_probs.shape != token_logprobs.shape:
             raise ValueError(
@@ -703,15 +764,15 @@ class PPOTrainer:
                 f"gathered response mask {tuple(gathered_mask.shape)} must match "
                 f"logprobs {tuple(token_logprobs.shape)}"
             )
-        action_advantages = advantages[:, 1:]
 
-        # Compute all losses. The same gathered mask goes to policy, entropy, and KL.
+        # One mask for every reduction. batch values are V_old, and the loss
+        # reads them only when value_clip is set.
         policy_loss, _ratio = self.compute_policy_loss(
-            token_logprobs, old_log_probs, action_advantages, gathered_mask
+            token_logprobs, old_log_probs, advantages, gathered_mask
         )
-        # batch["values"] is V_old. compute_value_loss uses it only when
-        # value_clip is set. token_mask drops prompt and padding.
-        value_loss = self.compute_value_loss(value_pred, returns, values, token_mask)
+        value_loss = self.compute_value_loss(
+            action_values, returns, old_action_values, gathered_mask
+        )
         entropy = self.compute_entropy_bonus(policy_logits[:, :-1, :], gathered_mask)
         kl_div = self.compute_kl_divergence(token_logprobs, ref_token_logprobs, gathered_mask)
 
@@ -735,8 +796,8 @@ class PPOTrainer:
         torch.nn.utils.clip_grad_norm_(self.value_model.parameters(), self.opt_config.max_grad_norm)
         self.optimizer.step()
 
-        # Compute metrics. Means are over response tokens, not the padded tensor.
-        explained_var = self.compute_explained_variance(value_pred, returns, token_mask)
+        # Means are over response actions, not the padded token tensor.
+        explained_var = self.compute_explained_variance(action_values, returns, gathered_mask)
         self.adaptive_kl_penalty(kl_div.item())
 
         metrics = PPOMetrics(
@@ -746,7 +807,7 @@ class PPOTrainer:
             kl_divergence=kl_div.item(),
             explained_variance=explained_var,
             adaptive_kl_coefficient=self.kl_coefficient,
-            reward_mean=masked_mean(rewards, token_mask).item(),
+            reward_mean=masked_mean(action_rewards, gathered_mask).item(),
             advantage_mean=advantage_mean.item(),
             gae_mean=gae_mean.item(),
         )

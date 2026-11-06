@@ -178,6 +178,8 @@ def place_sequence_reward(scores: torch.Tensor, token_mask: torch.Tensor) -> tor
 
     This is the standard PPO placement: the reward model scores the whole
     sequence, and that scalar is the return of the action that ended it.
+    The tensor is token-aligned. ``PPOTrainer.train_step`` reads index
+    ``t - 1`` as the reward for the action that emitted token ``t``.
     """
     if scores.ndim != 1 or scores.shape[0] != token_mask.shape[0]:
         raise ValueError(
@@ -308,8 +310,8 @@ class RolloutGenerator:
         mask anyway.
 
         With ``token_mask`` ``[B, T]`` (1 on response tokens), the return is
-        ``[B, T]``: the sequence score at the last 1, and 0 elsewhere. Left
-        padding and right padding both end the response at that 1.
+        ``[B, T]``: the sequence score at the last 1, and 0 elsewhere. Right
+        padding and the mixed layout both end the response at that 1.
 
         Without ``token_mask`` the return is the score ``[B]``.
         """

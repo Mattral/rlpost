@@ -21,9 +21,9 @@ def gather_logprobs(logits: torch.Tensor, input_ids: torch.Tensor) -> torch.Tens
         ``log p(input_ids[:, t + 1] | logits[:, t, :])``.
 
     Masking is not applied. The caller multiplies by the mask of the tokens
-    that should count. For PPO that mask is the gathered half of
-    ``response_token_mask``: index ``t`` is 1 when ``input_ids[:, t + 1]``
-    is a generated response token, and 0 when it is prompt or padding.
+    that should count. For PPO that mask is ``response_token_mask``'s
+    gathered half: index ``t`` is 1 when ``input_ids[:, t + 1]`` is a
+    generated response token, and 0 when it is prompt or padding.
     """
     if logits.ndim != 3:
         raise ValueError(f"logits must have shape [B, T, V], got {tuple(logits.shape)}")
@@ -53,29 +53,37 @@ def response_token_mask(
     mask is 1 on the prompt as well, and that would keep prompt tokens in
     the loss.
 
-    Right padding lays each row out as ``[prompt | response | pad ...]``.
-    Left padding lays each row out as ``[pad ... | prompt | response]``.
-    The response is contiguous. On the left it is a suffix of length
-    ``response_lengths``. On the right it starts at ``prompt_lengths``.
+    ``"right"`` lays each row out as ``[prompt | response | pad ...]``.
+    The response starts at ``prompt_lengths`` and ends at
+    ``prompt_lengths + response_lengths``.
+
+    ``"mixed"`` is what a padded ``generate`` batch actually is:
+    ``[pad | prompt | response | pad]``. Prompts are left-padded to one
+    common width ``P = max(prompt_lengths)``, so the longest prompt has
+    no leading pad and every response starts at column ``P``. The response
+    ends at ``P + response_lengths``, which is where that row hit EOS, and
+    the rest of the row is a right pad. A suffix layout
+    ``[pad | prompt | response]`` (response flush with the end of the
+    tensor) is not produced by that generation, and nothing in this
+    repository reads it.
 
     ``token_mask`` has shape ``[B, seq_len]``. Index ``t`` is 1 when
-    ``input_ids[:, t]`` is a response token. GAE and the value loss are
-    indexed the same way: ``rewards[:, t]`` is the reward for that token.
+    ``input_ids[:, t]`` is a response token. The rollout writes the
+    sequence score on the last 1. PPO does not reduce with this mask.
 
     ``gathered_mask`` has shape ``[B, seq_len - 1]``. Index ``t`` is 1 when
-    ``input_ids[:, t + 1]`` is a response token. That is the same alignment
-    as ``gather_logprobs``: logits at ``t`` score token ``t + 1``, and the
-    policy ratio, the KL, and the entropy of that distribution all sit on
-    this index. ``gathered_mask`` equals ``token_mask[:, 1:]``. Token 0 is
-    not an action in the gather, so it has no column. A non-empty prompt
-    puts a prompt token or left padding at index 0, and ``token_mask[:, 0]``
-    is 0 there.
+    ``input_ids[:, t + 1]`` is a response token. That is the action layout,
+    the same alignment as ``gather_logprobs``: logits at ``t`` score token
+    ``t + 1``, and the value at ``t`` is the state before that token.
+    Policy loss, entropy, KL, GAE, the value loss, and advantage whitening
+    all use this mask. It equals ``token_mask[:, 1:]``. Token 0 is not an
+    action in the gather, so it has no column.
 
     Args:
         prompt_lengths: Real prompt tokens per row, int64, shape ``[B]``.
         response_lengths: Real response tokens per row, int64, shape ``[B]``.
         seq_len: ``T``, the padded length of ``input_ids``.
-        padding_side: ``"right"`` or ``"left"``.
+        padding_side: ``"right"`` or ``"mixed"``.
 
     Returns:
         token_mask: float 0/1, shape ``[B, T]``.
@@ -93,8 +101,8 @@ def response_token_mask(
         )
     if seq_len < 1:
         raise ValueError(f"seq_len must be >= 1, got {seq_len}")
-    if padding_side not in ("left", "right"):
-        raise ValueError(f"padding_side must be 'left' or 'right', got {padding_side!r}")
+    if padding_side not in ("right", "mixed"):
+        raise ValueError(f"padding_side must be 'right' or 'mixed', got {padding_side!r}")
     if torch.any(prompt_lengths < 0) or torch.any(response_lengths < 0):
         raise ValueError("prompt_lengths and response_lengths must be >= 0")
     if torch.any(prompt_lengths + response_lengths > seq_len):
@@ -105,7 +113,11 @@ def response_token_mask(
     if padding_side == "right":
         response_start = prompt_lengths
     else:
-        response_start = seq_len - response_lengths
+        # One prompt width for the batch. A shorter prompt has leading pads.
+        prompt_width = prompt_lengths.max()
+        if torch.any(prompt_width + response_lengths > seq_len):
+            raise ValueError("mixed layout needs max(prompt_lengths) + response_length <= seq_len")
+        response_start = prompt_width.expand_as(prompt_lengths)
     response_end = response_start + response_lengths
     token_mask = (positions >= response_start.unsqueeze(1)) & (
         positions < response_end.unsqueeze(1)
