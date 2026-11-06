@@ -748,6 +748,60 @@ Cover:
     That stays on the S0.11 collation note.
   - Pytest on this branch, `.venv`, torch 2.15.0+cpu: 151 passed,
     16.95s. Ruff check and ruff format check pass.
+  - 2026-11-06, before merge of PR #25. Two alignment fixes on this
+    branch. The notes above describe `28dcdfb`. This note describes the
+    follow-up.
+  - Mixed layout. A padded generate batch is
+    `[pad | prompt | response | pad]`. Prompts are left-padded to one
+    width `P = max(prompt_lengths)`, so every response starts at column
+    `P` and ends at `P + response_length`, where that row hit EOS. The
+    tail is a right pad. `padding_side="mixed"` builds that mask.
+    `"right"` is unchanged: `[prompt | response | pad]`, response
+    starting at `prompt_lengths`. The suffix layout
+    `[pad | prompt | response]`, response flush with the end of the
+    row, was only read by the tests added in `28dcdfb`. Nothing in the
+    rollout or the trainers generates it, so `padding_side="left"` now
+    raises. A row can satisfy `prompt_length + response_length <= T`
+    and still not fit, because every response starts at `P`. That case
+    raises. `test_mixed_layout_rejects_a_response_past_the_common_prompt_width`
+    uses prompts `[1, 4]`, responses `[4, 1]`, and `T = 6`.
+  - Value alignment. `value_out[:, t]` is the critic after it has read
+    token `t` and before it has read token `t + 1`. The action at index
+    `t` emits token `t + 1` and was scored by the logits at `t`, so its
+    baseline is `value_out[:, t]`. `28dcdfb` ran GAE on the token axis
+    and fed `advantages[:, 1:]` to the policy. The baseline of the
+    action that emitted token `t + 1` was therefore `V[:, t + 1]`, the
+    value after that token had been read. A baseline has to be a
+    function of the state. `E[∇ log π(a|s) b(s)] = 0` because
+    `Σ_a ∇π(a|s) = 0`. If `b` depends on `a`, that term does not
+    vanish. A higher value on the token that was just sampled makes
+    `A = r - V` smaller, so the surrogate reinforces that token less
+    and punishes it more. Tokens the critic scores low get the opposite
+    push. The advantage is no longer an unbiased weight for the state
+    that produced the action.
+  - The check is `gamma = 0` and rewards 0, so `A = -V(s)`. Editing
+    `input_ids[:, t + 1]` must not change the advantage of action
+    `t + 1`. `test_action_advantage_does_not_see_its_own_token` is that
+    test. On `28dcdfb` it failed: the advantage was `-V` at the sampled
+    token (`-8`) instead of `-V` at the state (`-7`).
+  - PPO now uses the action layout `[B, T - 1]`.
+    `values = value_out[:, :-1]`, `next_values = value_out[:, 1:]`, and
+    the reward written on token `t + 1` is read at index `t`. GAE, the
+    value loss, whitening, explained variance, and `reward_mean` use
+    `gathered_mask`. The policy ratio is not `advantages[:, 1:]`.
+    `token_mask` still marks response tokens so the rollout can place
+    the sequence score. The PPO step does not read it.
+    `batch["values"][:, :-1]` is `V_old` for the clip only. There is no
+    `next_values` input. The bootstrap is the shifted value head.
+    TRL's PPO trainer, removed before 1.17.1, returned
+    `values[:, :-1]` beside `logprobs_from_logits(logits[:, :-1], input_ids[:, 1:])`
+    in the 0.7 `batched_forward_pass`. Same shift. Not a numeric match
+    to a PPO loss 1.17.1 does not ship. The T=4 GAE numbers are
+    unchanged. Those tests now describe the index as the action index.
+    The recursion is the same.
+  - Pytest on this branch after those two fixes, `.venv`, torch
+    2.15.0+cpu: 154 passed, 17.12s. Ruff check and ruff format check
+    pass. The 151 passed line above is the count on `28dcdfb`.
 
 ### [ ] S0.7b EOS, truncation, and the reference gradient
 - Depends on: S0.7.
@@ -1081,3 +1135,4 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-11-04 · S0.6e · Sampled-token KL(policy || reference), default k3. k1 and k3 match the closed form. GRPO 1.17.1's per-token KL is that k3 term. 141 passed. · 3f0319f
 - 2026-11-06 · S0.6e · Loss default is k2. Its gradient matches KL(policy || reference). k3 stays and its gradient is the reverse KL. The loss rejects k1. 142 passed. · d4bd358
 - 2026-11-06 · S0.7 · One response-token mask in the gather layout, masked means in the PPO losses and in GAE, advantage stats over response tokens only. The sequence reward sits on the last response token. Config rejects k1. 151 passed. · 28dcdfb
+- 2026-11-06 · S0.7 · Action-layout values (`value_out[:, :-1]`) and the mixed `[pad | prompt | response | pad]` mask. The value at the sampled token was an action-dependent baseline. 154 passed. · 5806e22

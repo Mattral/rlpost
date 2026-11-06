@@ -89,15 +89,15 @@ Tests: `tests/test_dpo_engine.py`.
 
 The only PPO implementation. `PPOTrainer` holds a policy, a value model, a frozen reference, and one optimizer.
 
-`GeneralizedAdvantageEstimation.compute(rewards, values, next_values, dones, mask=None)` requires rank-2 tensors of the same shape `[B, T]`. Axis 1 is time. Index `t` is the token at that position. `rewards[:, t]` is the reward for that token. `next_values[:, t]` is `V_{t+1}`, supplied by the caller, not read from `values[:, t+1]`.
+`GeneralizedAdvantageEstimation.compute(rewards, values, next_values, dones, mask=None)` requires rank-2 tensors of the same shape `[B, T]`. Axis 1 is time. The recursion does not know about tokens. PPO calls it on the action layout `[B, T-1]`: index `t` is the action that emits token `t+1`, `rewards[:, t]` is that action's reward, and `values[:, t]` is `V` before the action. `next_values[:, t]` is `V` of the next state, supplied by the caller, not read from `values[:, t+1]`.
 
 ```
 delta_t = reward_t + gamma * next_value_t * (1 - done_t) - value_t
 A_t     = delta_t + gamma * lambda * (1 - done_t) * A_{t+1}     # backward
-return  = A + value                                             # real tokens
+return  = A + value                                             # real indices
 ```
 
-`mask[:, t] == 0` is not a timestep. That index's advantage and return are 0. Its reward, value, and advantage do not enter any other index, and the token before a 0 does not bootstrap from that index. In the GAE tests the 0s are padding. `train_step` also puts 0 on prompt tokens. `mask is None` means every position is real. `done_t == 1` still stops the backup when the next index is real. `gamma == 0` and zero values make `A == reward` when nothing is padded. That case is tested. The T=4 closed form, done, lambda 0, lambda 1, gamma 1, and padding are in `tests/test_gae.py`. TRL 1.17.1 has no GAE helper.
+`mask[:, t] == 0` is not a timestep. That index's advantage and return are 0. Its reward, value, and advantage do not enter any other index, and the index before a 0 does not bootstrap from that index. In the GAE tests the 0s are padding. `train_step` passes the gathered response mask, so prompt tokens and padding are 0 there too. `mask is None` means every position is real. `done_t == 1` still stops the backup when the next index is real. `gamma == 0` and zero values make `A == reward` when nothing is masked. That case is tested. The T=4 closed form, done, lambda 0, lambda 1, gamma 1, and padding are in `tests/test_gae.py`. The numbers are the recursion. They do not depend on the token alignment. TRL 1.17.1 has no GAE helper.
 
 `compute_policy_loss(log_probs_new, log_probs_old, advantages, mask=None)` uses matching shapes (the closed-form tests pass `[B]`). `mask` has that same shape. The mean is `sum(x * mask) / sum(mask)`. `None` averages every element.
 
@@ -116,7 +116,7 @@ L_v    = mean(0.5 * max((V - R)^2, (V_clip - R)^2))
 loss   = value_loss_coefficient * L_v
 ```
 
-`c` is not `ppo_epsilon`. A radius of `1e9` does not bind on the hand sample, and that loss equals the unset loss. Both forms are checked against a closed form in `tests/test_ppo_loss.py`. `compute_value_loss(..., mask=None)` uses the same masked mean. `train_step` passes the token-level response mask, shape `[B, T]`.
+`c` is not `ppo_epsilon`. A radius of `1e9` does not bind on the hand sample, and that loss equals the unset loss. Both forms are checked against a closed form in `tests/test_ppo_loss.py`. `compute_value_loss(..., mask=None)` uses the same masked mean. `train_step` passes the gathered response mask, shape `[B, T-1]`.
 
 `compute_entropy_bonus(logits [..., A], mask=None)` is the mean of the per-row Shannon entropy. Each row matches `trl.trainer.utils.entropy_from_logits` in TRL 1.17.1. A uniform row is `log(n)`. A `[0.75, 0.25]` row is checked by hand. Scalar. `mask` selects rows and must match `logits` without the last axis. `None` averages every row. `train_step` passes `logits[:, :-1]` and the gathered response mask.
 
@@ -130,19 +130,29 @@ loss   = value_loss_coefficient * L_v
 
 `compute_kl_divergence(logp_policy, logp_ref, mask=None)` returns the mean of `per_token_kl` for `k2` or `k3`. Scalar, added to the loss. `k1` raises, and `AlignmentConfig` raises the same message when `kl_estimator` is `k1`. `mask` has the same shape. `1` keeps a token and `0` drops it. An all-zero mask returns 0. `None` averages every token. `train_step` passes the gathered response mask, so prompt and padding tokens stay out of the mean. Both log-probability tensors come from `gather_logprobs`, shape `[B, T-1]`.
 
-`compute_explained_variance(value_pred, returns, mask=None)` returns a Python float, `1 - Var(returns - values) / Var(returns)`, or `0` when the return variance is 0. Without `mask`, variance is `torch.var`. With `mask`, variance is the masked mean of squared deviations. `train_step` passes the token mask. Tested.
+`compute_explained_variance(value_pred, returns, mask=None)` returns a Python float, `1 - Var(returns - values) / Var(returns)`, or `0` when the return variance is 0. Without `mask`, variance is `torch.var`. With `mask`, variance is the masked mean of squared deviations. `train_step` passes the gathered response mask. Tested.
 
 `adaptive_kl_penalty(kl: float)` multiplies `kl_coefficient` by 2 when `kl > 1.5 * target_kl`, by `0.5` when `kl < target_kl / 1.5`, and clips the coefficient to `[0.001, 10]`. Tested.
 
-`train_step(batch, old_log_probs)` reads `input_ids`, `rewards`, `values`, `next_values`, and `dones`, each `[B, T]`, plus `prompt_lengths` and `response_lengths` (int64 `[B]`) and optional `padding_side` (`"right"` or `"left"`, default `"right"`). It builds one response mask and passes `token_mask` into GAE. The reference forward is under `no_grad`. When `advantage_normalization` is true, the mean and the std are taken over response tokens only. The total loss is
+`train_step(batch, old_log_probs)` reads `input_ids`, `rewards`, `values`, and `dones`, each `[B, T]`, plus `prompt_lengths` and `response_lengths` (int64 `[B]`) and optional `padding_side` (`"right"` or `"mixed"`, default `"right"`). `"right"` is `[prompt | response | pad]`, and the response starts at `prompt_lengths`. `"mixed"` is a padded generate batch, `[pad | prompt | response | pad]`: prompts are left-padded to `P = max(prompt_lengths)`, and every response occupies `[P, P + response_length)`. A response flush with the end of the row is rejected. It builds one response mask and passes `gathered_mask` into GAE, the value loss, whitening, and the other reductions. The token-level mask is not used on this path. The reference forward is under `no_grad`. When `advantage_normalization` is true, the mean and the std are taken over response actions only. The total loss is
 
 ```
 policy_loss + value_loss - entropy_coefficient * entropy + kl_coefficient * kl
 ```
 
-`train_step` calls `gather_logprobs` on the policy logits and, under `no_grad`, on the reference logits. Logits at `t` score token `t+1`. Each result is `[B, T-1]`. `old_log_probs` must have that shape. GAE stays `[B, T]`. The policy ratio uses `advantages[:, 1:]`, so the weight on token `t` (`t >= 1`) is `advantages[:, t]`. A reward at index `t` therefore enters the policy term for that same token. `gathered_mask` is `[B, T-1]` and is 1 at that index when token `t+1` is a response token. Policy loss, entropy, and KL all use it. The mask is [S0.7](../ROADMAP.md#s07-classic-rlhf-edge-case-tests). The two `test_train_step_*` tests build a tiny random-init Llama whose whole row is the response, and pass.
+`train_step` calls `gather_logprobs` on the policy logits and, under `no_grad`, on the reference logits. Logits at `t` score token `t+1`. Each result is `[B, T-1]`. `old_log_probs` must have that shape. The value head is shifted the same way: `value_out[:, t]` is the critic after it has read token `t` and before it has read token `t+1`. GAE, the value loss, and whitening run on that action layout, not on `[B, T]` followed by `advantages[:, 1:]`.
 
-`value_pred` is the current critic and is what the value loss trains. GAE uses the batch's `values` and `next_values`. `train_step` passes `values` into the value loss as `V_old`. That argument is used only when `value_clip` is set. The value loss and GAE both receive `token_mask`.
+```
+values[:, t]      = value_out[:, t]         # V(s) for the action at t
+next_values[:, t] = value_out[:, t + 1]     # V(s') after that action
+rewards[:, t]     = token_reward[:, t + 1]  # reward for emitting token t+1
+```
+
+The sequence score is still written on the last response token. In the action layout that column is index `last - 1`. `gathered_mask[:, t]` is 1 when token `t+1` is a response token. Policy loss, entropy, KL, GAE, the value loss, and whitening all use it. The mask is [S0.7](../ROADMAP.md#s07-classic-rlhf-edge-case-tests). The two `test_train_step_*` tests build a tiny random-init Llama whose whole row is the response, and pass.
+
+`value_out[:, t+1]` is the wrong baseline for the action that emitted token `t+1`. That position has already read the sampled token, so the baseline depends on the action. A state-only baseline drops out of the policy gradient because the sum of `∇π(a|s)` over actions is zero. An action-dependent baseline does not. A higher value on the token that was just sampled makes `A = r - V` smaller, so the surrogate reinforces that token less and punishes it more. Tokens the critic scores low get the opposite push. With `gamma = 0` and rewards 0 the advantage is `-V(s)`, and editing `input_ids[:, t+1]` must leave the advantage of action `t+1` unchanged. That is `test_action_advantage_does_not_see_its_own_token`. TRL's PPO trainer, removed before 1.17.1, returned `values[:, :-1]` beside logprobs from `logits[:, :-1]` (the 0.7 `batched_forward_pass`). This is that shift. It is not a numeric match to a PPO loss 1.17.1 does not ship.
+
+`action_values` is the current critic on `[B, T-1]` and is what the value loss trains. GAE reads the same tensor, detached. `batch["values"]` is the rollout value head at each token, shape `[B, T]`. `train_step` passes `values[:, :-1]` into the value loss as `V_old`. That argument is used only when `value_clip` is set. There is no `next_values` batch entry. The bootstrap is `value_out[:, 1:]`.
 
 Status: GAE, the clipped surrogate, both value losses, entropy against the TRL helper, the k1/k2/k3 estimators (k3 matched to TRL 1.17.1 GRPO on identical log-probabilities), explained variance, the adaptive coefficient, and `train_step` on a tiny causal LM are tested. See [S0.4](../ROADMAP.md#s04-code-ownership-pass), [S0.6](../ROADMAP.md#s06-numerical-parity-tests-core-correctness), and [S0.7](../ROADMAP.md#s07-classic-rlhf-edge-case-tests).
 
@@ -181,7 +191,7 @@ Status: untested as an import. The rollout pieces below are what the tests impor
 - `logits` `[B, 1]` are the sequence score.
 - `logits` `[B, T]` or `[B, T, K]` are per-token scores. The sequence score is the value at the last real response token. `K` is averaged at that token only. Time is not averaged.
 - `pooler_output` `[B, H]` has no time axis. The score is the mean over `H`.
-- With `token_mask` `[B, T]`, the return is `[B, T]`: the score at the last 1, and 0 elsewhere. Left and right padding both use that index.
+- With `token_mask` `[B, T]`, the return is `[B, T]`: the score at the last 1, and 0 elsewhere. Right padding and the mixed layout both use that index. `train_step` then reads it at index `last - 1`.
 - Without `token_mask`, the return is the score `[B]`. Per-token scores then use the last index, which is the last response token only when the row is not right-padded.
 
 Status: buffer, collator, generator, and the reward index are tested on CPU with stand-in modules. See [S0.9](../ROADMAP.md#s09-delete-the-orphaned-distributed-scaffolding) for the CPU pin fix, and [S0.7](../ROADMAP.md#s07-classic-rlhf-edge-case-tests) for the reward position.
