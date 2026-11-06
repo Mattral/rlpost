@@ -686,6 +686,7 @@ Cover:
     stay inside the KL mean for `k2` and `k3`.
   - 2026-11-06: branch `test/S0.7-response-mask` from `origin/main`
     `625dc58` (merge of PR #24, S0.6e). Code commit `28dcdfb`.
+    Docs commit `8b3afc3`. Opened as PR #25.
   - One mask per batch. `response_token_mask` in `src/rlpost/ops.py`
     reads `prompt_lengths` and `response_lengths`. It does not read an
     attention mask. An attention mask is 1 on the prompt, and that would
