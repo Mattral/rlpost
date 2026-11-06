@@ -539,46 +539,80 @@ here is a result. S0.6f is optional and does not change the order of S0.6b–e.
   KL(reference || policy).
 - Notes:
   - 2026-11-04: branch `test/S0.6e-kl-estimator` from `origin/main` `3532c95`
-    (merge of PR #23). Code commit `3f0319f`.
-  - `AlignmentConfig.kl_estimator` is `k1`, `k2`, or `k3`, validated, default
-    `k3`. `lr = log p_ref - log p_policy` at the sampled tokens.
+    (merge of PR #23). Code commit `3f0319f` added the sampled-token
+    estimators and defaulted `kl_estimator` to `k3`, because that value is
+    unbiased for KL(policy || reference) and >= 0. The loss holds the
+    sampled token fixed, so the gradient of that default is the reverse KL.
+    Code commit `d4bd358` changes the loss default to `k2`.
+  - `AlignmentConfig.kl_estimator` is `k1`, `k2`, or `k3`, validated.
+    Default is `k2`. `lr = log p_ref - log p_policy` at the sampled tokens.
     `k1 = -lr`. `k2 = 0.5 * lr^2`. `k3 = exp(lr) - 1 - lr`.
-    `per_token_kl` detaches `log p_ref`, so the gradient reaches the policy
-    log-probabilities only.
-  - `k3` is the default because it is unbiased for KL(policy || reference)
-    and >= 0 at every token. Unbiased:
+    `per_token_kl` detaches `log p_ref`. The sampled index is held fixed,
+    so the backward does not go through which token was drawn. The value
+    and the gradient can name different KLs.
+  - Value, under samples from the policy. `k1` is unbiased for
+    KL(policy || reference), and a token can be negative. `k2` is always
+    >= 0 and biased for that KL. It is the quadratic term of the expansion
+    of `k3`. `k3` is unbiased for KL(policy || reference) and >= 0 at every
+    token:
     `E_{a ~ policy}[q(a) / p(a) - 1 - log(q(a) / p(a))] = KL(policy || reference)`.
-    Nonnegative: `f(x) = exp(x) - 1 - x` is convex, `f(0) = 0`, and
-    `f'(0) = 0`, so the minimum is 0. `k1` is the same expectation and can
-    be negative on a token. `k2` is the quadratic term of that expansion.
-    It is always >= 0 and it is biased.
+    `f(x) = exp(x) - 1 - x` is convex, `f(0) = 0`, and `f'(0) = 0`, so the
+    minimum is 0.
+  - Gradient of the mean, same samples, token index held fixed, with
+    respect to the policy logits. `k1`: the expected gradient is 0, so it
+    does nothing as a loss term. `k2`: the expected gradient equals the
+    gradient of KL(policy || reference). `k3`: the expected gradient equals
+    the gradient of KL(reference || policy), the reverse direction. That is
+    what GRPO differentiates.
+  - The loss default is `k2`, because the loss is meant to follow
+    KL(policy || reference). `k3` stays a legal config value. `k1` raises
+    inside `compute_kl_divergence`. `per_token_kl(..., "k1")` still returns
+    the value. That value belongs in the reward, as reward minus beta * k1
+    (InstructGPT). This trainer does not implement that reward. Chosen
+    policy: raise when `k1` is the loss term.
   - The old penalty was the full-vocabulary mean of
     `sum_a p_ref(a) (log p_ref(a) - log p_policy(a))`, which is
-    KL(reference || policy). `train_step` now gathers both models with
+    KL(reference || policy). `train_step` gathers both models with
     `gather_logprobs` and averages the estimator on those tokens, shape
     `[B, T-1]`. `compute_kl_divergence` accepts a mask (`1` keeps a token,
     `0` drops it, all zeros return 0). `train_step` does not pass one.
     Prompt and padding tokens in that window stay in the mean. That stays
     in S0.7.
-  - Closed form is `sum_a p(a) (log p(a) - log q(a))` on
-    `p = (0.8, 0.1, 0.1)` and `q = (0.2, 0.2, 0.6)`. Those two directions
-    differ by about 0.076. Monte Carlo draws 1,000,000 tokens from `p`,
-    seed 0. Absolute tolerance is `1e-2`. On that draw the k1 mean missed
-    KL(p || q) by 0.00123 and the k3 mean missed it by 0.00116. Swapping
-    the two arguments misses KL(p || q). The k2 mean on the same draw was
-    0.953 against KL 0.861, a gap of 0.092, outside that tolerance.
+  - Value Monte Carlo. Closed form is `sum_a p(a) (log p(a) - log q(a))`
+    on `p = (0.8, 0.1, 0.1)` and `q = (0.2, 0.2, 0.6)`. KL(p || q) is
+    0.86054 and KL(q || p) is 0.93643, a gap of 0.07588. Draws 1,000,000
+    tokens from `p`, seed 0. Absolute tolerance is `1e-2`. On that draw
+    the k1 mean missed KL(p || q) by 0.00123 and the k3 mean missed it by
+    0.00116. Swapping the two arguments misses KL(p || q). The k2 mean on
+    the same draw was 0.95292 against KL 0.86054, a gap of 0.09238, outside
+    that tolerance.
+  - Gradient Monte Carlo. Policy logits `(1.0, 0.0, -0.5, 0.2)`, reference
+    logits `(-0.4, 0.8, 0.3, -0.2)`, float64. The policy logits require
+    grad. Analytic gradients are
+    `grad_z KL(p || q) = p * (log(p/q) - KL(p || q))` and
+    `grad_z KL(q || p) = p - q`. Autograd of the closed form matches those
+    formulas at absolute tolerance `1e-12`. On these logits KL(p || q) is
+    0.45165 and KL(q || p) is 0.40569. The two analytic gradients differ by
+    a max absolute gap of 0.08995, so tolerance `1e-2` cannot accept the
+    wrong direction. Draws 1,000,000 indices from softmax(policy logits),
+    seed 0. On that draw the max absolute error was 0.000383 for k1 against
+    0, 0.000259 for k2 against grad KL(p || q), and 0.000270 for k3 against
+    grad KL(q || p). k2 is outside that tolerance of the reverse gradient,
+    and k3 is outside it of the forward gradient.
   - TRL 1.17.1 `GRPOTrainer._compute_loss` (`trainer/grpo_trainer.py`) does
     compute a per-token KL. The assignment is
     `exp(ref_per_token_logps - per_token_logps) - (ref_per_token_logps - per_token_logps) - 1`,
     which is k3. There is no k1/k2 switch. On identical log-probabilities,
     float64 and float32, `per_token_kl(..., "k3")` matches that expression
-    bit for bit. `GRPOConfig.use_bias_correction_kl` defaults to True and
-    then multiplies by the importance ratio `coef_1`. That product is not
-    k3, and this estimator does not apply it. RLOO in the same release
-    uses `old_per_token_logps - ref_per_token_logps`, which is k1. Its
-    comment calls that the first-order log ratio and contrasts it with
-    GRPO's Schulman approximation. RLOO is not the parity target.
-  - Pytest on this branch, `.venv`, torch 2.15.0+cpu: 141 passed, 17.00s.
+    bit for bit. Differentiating that term with the token held fixed applies
+    the reverse-KL gradient. `GRPOConfig.use_bias_correction_kl` defaults to
+    True and then multiplies by the importance ratio `coef_1`. That product
+    is not k3, and this estimator does not apply it. RLOO in the same release
+    uses `old_per_token_logps - ref_per_token_logps`, which is k1, as a
+    reward-side penalty. Its comment calls that the first-order log ratio
+    and contrasts it with GRPO's Schulman approximation. RLOO is not the
+    parity target. The loss rejects k1.
+  - Pytest on this branch, `.venv`, torch 2.15.0+cpu: 142 passed, 17.93s.
     Ruff check and ruff format check pass.
 
 ### [ ] S0.6f fp32 logsumexp gather (optional, before Stage 1)
@@ -646,6 +680,10 @@ Cover:
     padding tokens in that window stay inside the KL mean. Entropy is
     still the mean over the full logits. Which tokens the KL uses, and
     the advantage normalisation over padding, stay in this item.
+  - 2026-11-06, S0.6e, code commit `d4bd358`. The loss default is `k2`.
+    `compute_kl_divergence` raises when `kl_estimator` is `k1`. `train_step`
+    still passes no mask. Prompt and padding tokens in the gathered window
+    stay inside the KL mean for `k2` and `k3`.
 
 ### [ ] S0.8 Determinism and resumable checkpoints
 - Seeding gives identical losses on CPU for 2 runs.
@@ -970,3 +1008,4 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-11-04 · S0.6d · Clipped surrogate, optional value clip (`value_clip`, with the one-half), and entropy matched to TRL 1.17.1 `entropy_from_logits`. The CPU suite is green: 130 passed. · 0107a29
 - 2026-11-04 · S0.6d · Both value modes use the one-half. Non-binding ratios keep r*A, and always clipping that input is a different loss. 132 passed. · a1bb38e
 - 2026-11-04 · S0.6e · Sampled-token KL(policy || reference), default k3. k1 and k3 match the closed form. GRPO 1.17.1's per-token KL is that k3 term. 141 passed. · 3f0319f
+- 2026-11-06 · S0.6e · Loss default is k2. Its gradient matches KL(policy || reference). k3 stays and its gradient is the reverse KL. The loss rejects k1. 142 passed. · d4bd358
