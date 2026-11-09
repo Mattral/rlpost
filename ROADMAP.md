@@ -1018,7 +1018,8 @@ Cover:
   - Pytest after `64331c2`, `.venv`, torch 2.15.0+cpu: 167 passed,
     18.67s. Ruff check and ruff format check pass.
 
-### [ ] S0.8 Determinism and resumable checkpoints
+### [~] S0.8 Determinism and resumable checkpoints
+- Branch: `feat/S0.8-determinism`.
 - Seeding gives identical losses on CPU for 2 runs.
 - Kill and resume reproduces the uninterrupted run's step-N metrics (within tolerance).
 - This is required before any Colab run.

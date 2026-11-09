@@ -466,6 +466,7 @@ class TrainingConfig(BaseConfig):
         run_name: Experiment name for logging and checkpointing.
         output_dir: Directory for checkpoints, logs, and outputs.
         seed: Random seed for reproducibility.
+        checkpoint_path: File path of the training checkpoint. None writes none.
         device: Training device ('cuda', 'cpu', 'auto').
         log_to_wandb: Enable Weights & Biases logging.
         wandb_project: W&B project name.
@@ -491,6 +492,14 @@ class TrainingConfig(BaseConfig):
         default=42,
         ge=0,
         description="Random seed for reproducibility across runs",
+    )
+    checkpoint_path: str | None = Field(
+        default=None,
+        description=(
+            "File path of the training checkpoint. None writes none. "
+            "Set a path on Google Drive for a Colab run, or a path on a "
+            "Modal Volume. This repo does not mount either one."
+        ),
     )
     device: Literal["cuda", "cpu", "auto"] = Field(
         default="auto",
@@ -539,6 +548,16 @@ class TrainingConfig(BaseConfig):
         default_factory=DatasetConfig,
         description="Dataset and data loading configuration",
     )
+
+    @field_validator("checkpoint_path")
+    @classmethod
+    def checkpoint_path_is_a_file(cls, value: str | None) -> str | None:
+        """None skips the write. A blank string is not a path."""
+        if value is None:
+            return None
+        if not isinstance(value, str) or value.strip() == "":
+            raise ValueError("checkpoint_path must be a file path or None")
+        return value
 
     @classmethod
     def from_yaml(cls: type["TrainingConfig"], path: str | Path) -> "TrainingConfig":

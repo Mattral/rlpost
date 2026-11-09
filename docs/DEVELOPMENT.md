@@ -9,7 +9,7 @@ git clone https://github.com/Mattral/rlpost.git
 cd rlpost
 ```
 
-`pyproject.toml` says `requires-python` is `>=3.11`. The CPU job uses Python 3.12, because `requirements-cpu.txt` pins `numpy==2.5.4`, which requires Python 3.12 or newer. The package does not import numpy. The pin stays in the lock so the job resolves one version.
+`pyproject.toml` says `requires-python` is `>=3.11`. The CPU job uses Python 3.12, because `requirements-cpu.txt` pins `numpy==2.5.4`, which requires Python 3.12 or newer. `rlpost.repro` imports numpy. The project dependency is `numpy>=1.26`, which that pin satisfies. The pin stays in the lock so the job resolves one version.
 
 ## CPU tests
 
