@@ -48,6 +48,7 @@ alignment:
   entropy_coefficient: 0.01
   value_loss_coefficient: 0.5
   value_clip: null
+  missing_eos_penalty: null
   advantage_normalization: true
 
 dataset:

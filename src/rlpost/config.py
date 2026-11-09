@@ -262,6 +262,7 @@ class AlignmentConfig(BaseConfig):
         entropy_coefficient: Weight of entropy regularization in policy loss.
         value_loss_coefficient: Weight of value function loss.
         value_clip: Clip radius for the value loss. None keeps the half square error.
+        missing_eos_penalty: Subtracted from a truncated sequence reward. None is off.
         advantage_normalization: Normalize advantages to zero-mean, unit-variance.
     """
 
@@ -347,6 +348,18 @@ class AlignmentConfig(BaseConfig):
             "Value-loss clip radius c. V_clip = V_old + clip(V - V_old, -c, c). "
             "None and a set radius both use coefficient * mean(0.5 * squared error). "
             "When set, must be >= 0. This is not ppo_epsilon."
+        ),
+    )
+    missing_eos_penalty: float | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Subtracted from the sequence reward of a rollout row that hits "
+            "max_response_length without EOS. None leaves that score unchanged. "
+            "An EOS-terminated row is not penalized. Must be > 0 when set. "
+            "TRL 1.17.1 OnlineDPOConfig.missing_eos_penalty is the same subtraction. "
+            "That release's docstring says the penalty must be positive, and its "
+            "trainer does not check the sign."
         ),
     )
     advantage_normalization: bool = Field(
@@ -622,6 +635,7 @@ class TrainingConfig(BaseConfig):
                 entropy_coefficient=0.01,
                 value_loss_coefficient=0.5,
                 value_clip=None,
+                missing_eos_penalty=None,
                 advantage_normalization=True,
             ),
             dataset=DatasetConfig(
@@ -699,6 +713,7 @@ class TrainingConfig(BaseConfig):
                 entropy_coefficient=0.01,
                 value_loss_coefficient=0.5,
                 value_clip=None,
+                missing_eos_penalty=None,
                 advantage_normalization=True,
             ),
             dataset=DatasetConfig(
