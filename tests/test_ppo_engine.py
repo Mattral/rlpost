@@ -393,7 +393,13 @@ class _TokenValue(nn.Module):
         self.embed = nn.Embedding(vocab, hidden)
         self.proj = nn.Linear(hidden, 1)
 
-    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        del attention_mask, position_ids
         return self.proj(self.embed(input_ids)).squeeze(-1)
 
 
@@ -414,6 +420,7 @@ def _causal_train_batch(seed: int = 0) -> tuple[dict[str, torch.Tensor], torch.T
         "prompt_lengths": torch.zeros(batch_size, dtype=torch.long),
         "response_lengths": torch.full((batch_size,), seq_len, dtype=torch.long),
         "padding_side": "right",
+        "temperature": 1.0,
     }
     return batch, old_log_probs
 

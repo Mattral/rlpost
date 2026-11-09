@@ -245,6 +245,24 @@ class TestAlignmentConfig:
         config.missing_eos_penalty = None
         assert config.missing_eos_penalty is None
 
+    def test_temperature_positive(self) -> None:
+        """temperature divides sampling logits and the PPO log-prob gather. It is not dpo_beta."""
+        config = AlignmentConfig()
+        assert config.temperature == 1.0
+        assert config.dpo_beta == 0.1
+
+        config = AlignmentConfig(temperature=0.5, dpo_beta=0.2)
+        assert config.temperature == 0.5
+        assert config.dpo_beta == 0.2
+
+        with pytest.raises(ValueError):
+            AlignmentConfig(temperature=0.0)
+        with pytest.raises(ValueError):
+            AlignmentConfig(temperature=-1.0)
+        config = AlignmentConfig()
+        with pytest.raises(ValueError):
+            config.temperature = 0.0
+
     def test_alignment_method_literal(self) -> None:
         """Verify alignment method is restricted to valid values."""
         for method in ["ppo", "dpo"]:
@@ -415,6 +433,7 @@ class TestConfigYAMLLoading:
             assert config.dataset.batch_size == 8
             assert config.alignment.kl_estimator == "k2"
             assert config.alignment.missing_eos_penalty is None
+            assert config.alignment.temperature == 1.0
 
     def test_load_default_yaml(self) -> None:
         """Verify default.yaml can be loaded from configs directory."""
@@ -425,6 +444,7 @@ class TestConfigYAMLLoading:
             assert config.optimization.mixed_precision == "bf16"
             assert config.alignment.kl_estimator == "k2"
             assert config.alignment.missing_eos_penalty is None
+            assert config.alignment.temperature == 1.0
 
 
 class TestConfigConsistency:

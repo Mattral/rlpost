@@ -68,6 +68,19 @@ mask is only how the rollout finds the last response token. Every
 reduction is ``sum(x * mask) / sum(mask)``. Advantage normalisation uses
 that mean and the matching std on ``gathered_mask`` only.
 
+The same lengths build ``padding_attention``. The policy, the reference,
+and the value model each receive that attention mask and
+``position_ids = clamp(cumsum(mask) - 1, min=0)``. A pad is not a token
+they can read. A real token keeps the position it has with the pads removed.
+
+``AlignmentConfig.temperature`` is the only temperature. Sampling reads
+that field. ``generate_rollout`` records the number it used.
+``train_step`` divides the policy and reference logits by the trainer's
+field before the log-prob gather and before the entropy, and raises
+when the recorded rollout temperature is a different number. Old
+log-probs are already log-probabilities of that scaled distribution.
+At the first step, before the weights move, the ratio is 1.
+
 The KL term is added to the loss and differentiated with the sampled
 token held fixed. ``gather_logprobs`` supplies ``log p`` at those tokens,
 and ``lr = log p_ref - log p_policy``. ``kl_estimator`` selects
@@ -113,9 +126,19 @@ from rlpost.config import (
     OptimizationConfig,
     TrainingConfig,
 )
-from rlpost.ops import gather_logprobs, response_token_mask
+from rlpost.ops import gather_logprobs, padding_attention, response_token_mask
 
 logger = logging.getLogger(__name__)
+
+
+def _recorded_temperature(value: object) -> float:
+    """Temperature stored on a rollout. A bool is not a temperature."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(
+            "batch['temperature'] must be the real number AlignmentConfig.temperature "
+            f"the rollout sampled with, got {type(value).__name__}"
+        )
+    return float(value)
 
 
 def masked_mean(values: Tensor, mask: Tensor | None = None) -> Tensor:
@@ -667,6 +690,16 @@ class PPOTrainer:
         whitening use ``gathered_mask``. Reductions use
         ``sum(x * mask) / sum(mask)``.
 
+        Those same lengths build ``padding_attention``. The policy, the
+        reference, and the value model are called with that
+        ``attention_mask`` and with ``position_ids``. Log-probs and the
+        entropy use ``logits / temperature``. ``temperature`` is
+        ``AlignmentConfig.temperature``. Sampling reads that same field.
+        ``batch["temperature"]`` is the number the rollout sampled with.
+        A different number raises. ``old_log_probs`` are already
+        log-probabilities of ``logits / temperature``. They are not
+        divided again.
+
         Args:
             batch: Dict with keys:
                 - "input_ids": Tokens, shape ``[B, T]``.
@@ -694,12 +727,27 @@ class PPOTrainer:
                 - "prompt_width": Padded query width. Required when
                   ``padding_side`` is ``"mixed"``. Not
                   ``max(prompt_lengths)``. Ignored for ``"right"``.
+                - "temperature": The ``AlignmentConfig.temperature`` the
+                  rollout sampled with. Must equal this trainer's field.
             old_log_probs: Log-probs of tokens ``1 .. T-1`` under the old policy,
                 shape ``[B, T - 1]``, matching ``gather_logprobs``.
 
         Returns:
             metrics: PPOMetrics container with all training metrics
         """
+        if "temperature" not in batch:
+            raise KeyError(
+                "batch needs temperature, the AlignmentConfig.temperature the rollout sampled with"
+            )
+        recorded = _recorded_temperature(batch["temperature"])
+        temperature = self.alignment_config.temperature
+        if recorded != temperature:
+            raise ValueError(
+                f"rollout sampled at temperature {recorded}, and "
+                f"AlignmentConfig.temperature is {temperature}. "
+                "Sampling and the train-step log-prob gather use that one field."
+            )
+
         # Extract batch data
         input_ids = batch["input_ids"].to(self.device)
         rewards = batch["rewards"].to(self.device)
@@ -723,25 +771,46 @@ class PPOTrainer:
             padding_side,
             prompt_width=batch.get("prompt_width"),
         )
-
+        # Same lengths as the loss mask. Prompt tokens stay visible here.
+        attention_mask, position_ids = padding_attention(
+            prompt_lengths,
+            response_lengths,
+            int(input_ids.shape[1]),
+            padding_side,
+            prompt_width=batch.get("prompt_width"),
+        )
         # Forward passes (should not compute gradients for reference model)
         with torch.no_grad():
             # Reference log-probs of the sampled tokens. The shift matches
             # the policy gather below. The KL mean uses gathered_mask.
-            ref_outputs = self.reference_model(input_ids)
+            ref_outputs = self.reference_model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+            )
             ref_logits = ref_outputs.logits if hasattr(ref_outputs, "logits") else ref_outputs
+            ref_logits = ref_logits / temperature
             ref_token_logprobs = gather_logprobs(ref_logits, input_ids)
 
         # Policy forward pass
-        policy_outputs = self.policy_model(input_ids)
+        policy_outputs = self.policy_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+        )
         policy_logits = (
             policy_outputs.logits if hasattr(policy_outputs, "logits") else policy_outputs
         )
+        policy_logits = policy_logits / temperature
 
         # Live value head. Position t has read tokens 0..t and has not read
         # token t+1. The value loss trains this prediction. GAE does not
         # read it: the baseline is V_old, frozen on the rollout.
-        value_outputs = self.value_model(input_ids)
+        value_outputs = self.value_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+        )
         value_out = value_outputs.value if hasattr(value_outputs, "value") else value_outputs
         if value_out.ndim == input_ids.ndim + 1 and value_out.shape[-1] == 1:
             value_out = value_out.squeeze(-1)

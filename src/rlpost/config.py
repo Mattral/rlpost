@@ -263,6 +263,7 @@ class AlignmentConfig(BaseConfig):
         value_loss_coefficient: Weight of value function loss.
         value_clip: Clip radius for the value loss. None keeps the half square error.
         missing_eos_penalty: Subtracted from a truncated sequence reward. None is off.
+        temperature: The only sampling and PPO log-prob temperature.
         advantage_normalization: Normalize advantages to zero-mean, unit-variance.
     """
 
@@ -360,6 +361,18 @@ class AlignmentConfig(BaseConfig):
             "TRL 1.17.1 OnlineDPOConfig.missing_eos_penalty is the same subtraction. "
             "That release's docstring says the penalty must be positive, and its "
             "trainer does not check the sign."
+        ),
+    )
+    temperature: float = Field(
+        default=1.0,
+        gt=0.0,
+        description=(
+            "The only temperature. RolloutGenerator reads this field and records "
+            "it on the rollout. It has no temperature argument. train_step divides "
+            "policy and reference logits by its own copy of this field before "
+            "gather_logprobs and before the entropy, and raises when the recorded "
+            "rollout temperature differs. The first-step ratio is 1 when the weights "
+            "have not moved. Must be > 0. This is not dpo_beta."
         ),
     )
     advantage_normalization: bool = Field(
@@ -636,6 +649,7 @@ class TrainingConfig(BaseConfig):
                 value_loss_coefficient=0.5,
                 value_clip=None,
                 missing_eos_penalty=None,
+                temperature=1.0,
                 advantage_normalization=True,
             ),
             dataset=DatasetConfig(
@@ -714,6 +728,7 @@ class TrainingConfig(BaseConfig):
                 value_loss_coefficient=0.5,
                 value_clip=None,
                 missing_eos_penalty=None,
+                temperature=1.0,
                 advantage_normalization=True,
             ),
             dataset=DatasetConfig(

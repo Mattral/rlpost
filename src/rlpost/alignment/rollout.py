@@ -1,22 +1,20 @@
-"""CPU rollout buffer and a token-at-a-time sampler.
+"""Token-at-a-time sampler for one PPO rollout batch.
 
-``RolloutBuffer`` keeps completed rollouts in a Python list. Tensors are
-moved to CPU. They are pinned only when CUDA is available.
 ``RolloutGenerator`` samples response tokens from a causal LM that returns
-``.logits``. The async generator-thread class was removed in S0.4. Nothing
-called it except ``train.py``, and it had no test.
+``.logits``. The policy, the reference, and the reward model each receive
+an attention mask and position ids from ``padding_attention``, built from
+the same lengths as the response mask. Left and right padding are not
+tokens those models can read. The async generator-thread class was removed
+in S0.4.
 """
 
-import logging
-import threading
 from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
 
-from rlpost.ops import response_token_mask
-
-logger = logging.getLogger(__name__)
+from rlpost.config import AlignmentConfig
+from rlpost.ops import padding_attention, response_token_mask
 
 
 @dataclass
@@ -52,6 +50,10 @@ class RolloutBatch:
     ``response_token_mask(..., "mixed", prompt_width=prompt_width)``.
     ``rollouts`` is the per-row view: ``response_tokens`` is the real
     response, EOS included, padding omitted.
+
+    ``temperature`` is the ``AlignmentConfig.temperature`` this call
+    sampled with. ``PPOTrainer.train_step`` raises when its config
+    field is a different number. There is no second temperature.
     """
 
     rollouts: list[Rollout]
@@ -63,125 +65,7 @@ class RolloutBatch:
     dones: torch.Tensor
     rewards: torch.Tensor
     token_mask: torch.Tensor
-
-
-class RolloutBuffer:
-    """In-memory ring buffer for collecting rollouts during generation phase."""
-
-    def __init__(self, capacity: int = 1000, device: str = "cuda"):
-        self.capacity = capacity
-        self.device = device
-        self.buffer: list = []
-        self.ptr = 0
-        self._lock = threading.Lock()
-
-    def add(self, rollout: Rollout) -> None:
-        """Add a rollout to the buffer (overwrites oldest if full)."""
-
-        # Convert tensors to pinned CPU memory to enable non-blocking device copies
-        def _pin(t: torch.Tensor) -> torch.Tensor:
-            if not isinstance(t, torch.Tensor):
-                return t
-            out = t.detach().cpu()
-            # pin_memory needs a CUDA driver. CPU-only torch raises if it is called.
-            if torch.cuda.is_available():
-                return out.pin_memory()
-            return out
-
-        pinned = Rollout(
-            query_tokens=_pin(rollout.query_tokens),
-            response_tokens=_pin(rollout.response_tokens),
-            reward=_pin(rollout.reward),
-            logits_policy=_pin(rollout.logits_policy),
-            logits_reference=_pin(rollout.logits_reference),
-        )
-
-        with self._lock:
-            if len(self.buffer) < self.capacity:
-                self.buffer.append(pinned)
-            else:
-                self.buffer[self.ptr] = pinned
-                self.ptr = (self.ptr + 1) % self.capacity
-
-    def sample_batch(self, batch_size: int) -> list:
-        """Sample a random batch of rollouts."""
-        if len(self.buffer) == 0:
-            raise RuntimeError("Cannot sample from empty rollout buffer.")
-
-        import random
-
-        with self._lock:
-            return random.sample(self.buffer, min(batch_size, len(self.buffer)))
-
-    def clear(self) -> None:
-        """Clear the buffer."""
-        self.buffer.clear()
-        self.ptr = 0
-
-    def size(self) -> int:
-        """Current number of rollouts in buffer."""
-        return len(self.buffer)
-
-
-class RolloutCollator:
-    """Collate rollouts into batched tensors."""
-
-    def __init__(self, max_response_length: int = 128):
-        self.max_response_length = max_response_length
-
-    def __call__(self, rollouts: list) -> dict:
-        """Collate a list of Rollout objects."""
-        # Pad response tokens
-        response_tokens_list = [r.response_tokens for r in rollouts]
-        padded_responses = self._pad_sequence(response_tokens_list, self.max_response_length)
-
-        # Pad logits
-        logits_policy_list = [r.logits_policy for r in rollouts]
-        logits_reference_list = [r.logits_reference for r in rollouts]
-
-        padded_logits_policy = self._pad_logits(logits_policy_list, self.max_response_length)
-        padded_logits_reference = self._pad_logits(logits_reference_list, self.max_response_length)
-
-        # Rewards
-        rewards = torch.stack([r.reward for r in rollouts])
-
-        query_tokens_list = [r.query_tokens for r in rollouts]
-        max_query_length = max(token.shape[0] for token in query_tokens_list)
-        padded_queries = self._pad_sequence(query_tokens_list, max_query_length)
-        query_lengths = torch.tensor([t.shape[0] for t in query_tokens_list], dtype=torch.long)
-
-        response_lengths = torch.tensor(
-            [r.response_tokens.shape[0] for r in rollouts], dtype=torch.long
-        )
-
-        return {
-            "query_tokens": padded_queries,
-            "response_tokens": padded_responses,
-            "logits_policy": padded_logits_policy,
-            "logits_reference": padded_logits_reference,
-            "rewards": rewards,
-            "query_lengths": query_lengths,
-            "response_lengths": response_lengths,
-        }
-
-    @staticmethod
-    def _pad_sequence(sequences: list, max_length: int) -> torch.Tensor:
-        """Pad token sequences to max_length."""
-        padded = torch.zeros(len(sequences), max_length, dtype=torch.long)
-        for i, seq in enumerate(sequences):
-            seq_len = min(len(seq), max_length)
-            padded[i, :seq_len] = seq[:seq_len]
-        return padded
-
-    @staticmethod
-    def _pad_logits(logits_list: list, max_length: int) -> torch.Tensor:
-        """Pad logits to (batch, max_length, vocab_size)."""
-        vocab_size = logits_list[0].shape[-1]
-        padded = torch.zeros(len(logits_list), max_length, vocab_size)
-        for i, logits in enumerate(logits_list):
-            seq_len = min(len(logits), max_length)
-            padded[i, :seq_len] = logits[:seq_len]
-        return padded
+    temperature: float
 
 
 def last_response_index(token_mask: torch.Tensor) -> torch.Tensor:
@@ -236,8 +120,8 @@ class RolloutGenerator:
         reference_model: torch.nn.Module,
         reward_model: torch.nn.Module,
         tokenizer,
+        alignment_config: AlignmentConfig,
         max_response_length: int = 128,
-        temperature: float = 1.0,
         top_p: float = 0.9,
         eos_token_id: int | None = None,
         pad_token_id: int | None = None,
@@ -246,9 +130,13 @@ class RolloutGenerator:
         self.policy_model = policy_model
         self.reference_model = reference_model
         self.reward_model = reward_model
+        if not isinstance(alignment_config, AlignmentConfig):
+            raise TypeError(
+                f"alignment_config must be AlignmentConfig, got {type(alignment_config)}"
+            )
+        self.alignment_config = alignment_config
         self.tokenizer = tokenizer
         self.max_response_length = max_response_length
-        self.temperature = temperature
         self.top_p = top_p
         if eos_token_id is None and tokenizer is not None:
             eos_token_id = getattr(tokenizer, "eos_token_id", None)
@@ -272,6 +160,11 @@ class RolloutGenerator:
         self.pad_token_id = pad_token_id
         # Same number as AlignmentConfig.missing_eos_penalty. None is off.
         self.missing_eos_penalty = missing_eos_penalty
+
+    @property
+    def temperature(self) -> float:
+        """Sampling temperature. This is ``AlignmentConfig.temperature``."""
+        return self.alignment_config.temperature
 
     @torch.no_grad()
     def generate_rollout(
@@ -298,7 +191,19 @@ class RolloutGenerator:
         score of rows that did not emit EOS, and from no other row. ``None``
         leaves the score unchanged. The score is then written on the last
         real response token.
+
+        Each policy, reference, and reward forward receives
+        ``padding_attention`` for the tokens written so far. A finished
+        row's later columns are padding and are 0 in that mask.
+
+        Sampling divides logits by ``alignment_config.temperature``,
+        read once at the start of this call and stored on the returned
+        batch. ``train_step`` gathers log-probs at that same number and
+        raises when its config field differs. ``top_p`` only filters
+        the tokens that can be drawn. It does not change the stored
+        logits or the train-time log-probs.
         """
+        temperature = self.alignment_config.temperature
         if query_tokens.ndim != 2:
             raise ValueError(
                 f"query_tokens must be [B, prompt_width], got {tuple(query_tokens.shape)}"
@@ -328,13 +233,29 @@ class RolloutGenerator:
         current = query_tokens.clone()
 
         for step in range(self.max_response_length):
-            policy_logits = self.policy_model(current).logits[:, -1, :]
-            ref_logits = self.reference_model(current).logits[:, -1, :]
+            # `lengths` is the real response written so far. Pads are not in it.
+            attention_mask, position_ids = padding_attention(
+                prompt_lengths,
+                lengths,
+                int(current.shape[1]),
+                "mixed",
+                prompt_width=prompt_width,
+            )
+            policy_logits = self.policy_model(
+                input_ids=current,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+            ).logits[:, -1, :]
+            ref_logits = self.reference_model(
+                input_ids=current,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+            ).logits[:, -1, :]
             policy_steps.append(policy_logits)
             ref_steps.append(ref_logits)
             sampled = self._sample_token(
                 policy_logits,
-                temperature=self.temperature,
+                temperature=temperature,
                 top_p=self.top_p,
             ).squeeze(1)
             token = torch.where(finished, torch.full_like(sampled, pad_id), sampled)
@@ -353,7 +274,18 @@ class RolloutGenerator:
             "mixed",
             prompt_width=prompt_width,
         )
-        reward_out = self.reward_model(input_ids)
+        attention_mask, position_ids = padding_attention(
+            prompt_lengths,
+            lengths,
+            int(input_ids.shape[1]),
+            "mixed",
+            prompt_width=prompt_width,
+        )
+        reward_out = self.reward_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+        )
         raw = self._decode_reward(reward_out, token_mask)
         last = last_response_index(token_mask).to(device=raw.device)
         scores = raw[torch.arange(batch, device=raw.device), last].clone()
@@ -395,6 +327,7 @@ class RolloutGenerator:
             dones=dones.detach().cpu(),
             rewards=rewards.detach().cpu(),
             token_mask=token_mask.detach().cpu(),
+            temperature=temperature,
         )
 
     @staticmethod
@@ -474,7 +407,15 @@ class RolloutGenerator:
         temperature: float = 1.0,
         top_p: float = 0.9,
     ) -> torch.Tensor:
-        """Sample the next token. Returns ids of shape [batch, 1]."""
+        """Sample the next token. Returns ids of shape ``[batch, 1]``.
+
+        The distribution is ``softmax(logits / temperature)``.
+        ``temperature`` is ``AlignmentConfig.temperature``, read by
+        ``generate_rollout``. When ``top_p < 1``, tokens past the
+        nucleus are dropped before the draw. The stored logits stay
+        the raw model outputs. Train-time log-probs are the full
+        ``log_softmax(logits / temperature)``, not the nucleus.
+        """
         scaled_logits = logits / temperature
         if top_p < 1.0:
             probs = F.softmax(scaled_logits, dim=-1)

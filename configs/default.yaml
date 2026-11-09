@@ -49,6 +49,7 @@ alignment:
   value_loss_coefficient: 0.5
   value_clip: null
   missing_eos_penalty: null
+  temperature: 1.0
   advantage_normalization: true
 
 dataset:
