@@ -846,6 +846,12 @@ Cover:
   - Pytest on this branch after those two fixes, `.venv`, torch
     2.15.0+cpu: 157 passed, 16.99s. Ruff check and ruff format check
     pass. The 154 passed line above is the count on `d2b9995`.
+  - 2026-11-09: PR #25 merged to main as `3d2928a`. README still said
+    GAE and the value loss use the `[B, T]` token mask. That sentence
+    described `28dcdfb`. Since `5806e22` those reductions use
+    `gathered_mask` `[B, T-1]`, and since `3e163eb` GAE reads `V_old`.
+    The README now says that. CODE_MAP and the notes above were already
+    current. No code change.
 
 ### [ ] S0.7b EOS, truncation, and the reference gradient
 - Depends on: S0.7.
@@ -1181,3 +1187,4 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-11-06 · S0.7 · One response-token mask in the gather layout, masked means in the PPO losses and in GAE, advantage stats over response tokens only. The sequence reward sits on the last response token. Config rejects k1. 151 passed. · 28dcdfb
 - 2026-11-06 · S0.7 · Action-layout values (`value_out[:, :-1]`) and the mixed `[pad | prompt | response | pad]` mask. The value at the sampled token was an action-dependent baseline. 154 passed. · 5806e22
 - 2026-11-09 · S0.7 · GAE is recomputed from the rollout values and held fixed across epochs. Returns are A + V_old. The live head is the value prediction. Mixed layout takes the padded query width, not max(prompt_lengths). 157 passed. · 3e163eb
+- 2026-11-09 · S0.7 · Merged as 3d2928a. README no longer says GAE and the value loss use the [B, T] mask. They use the gathered mask, and GAE reads V_old. · 12c81ff
