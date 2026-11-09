@@ -20,15 +20,18 @@ from rlpost.alignment.rollout import (
 )
 from rlpost.config import TrainingConfig
 from rlpost.ops import gather_logprobs, response_token_mask
-from rlpost.ppo_engine import PPOTrainer, masked_whiten
+from rlpost.ppo_engine import GeneralizedAdvantageEstimation, PPOTrainer, masked_whiten
 
 PROMPT = torch.tensor([2, 1], dtype=torch.long)
 RESPONSE = torch.tensor([3, 2], dtype=torch.long)
 SEQ_LEN = 6
 VOCAB = 6
+# This fixture's padded query width. It equals max(PROMPT). The width-8 test
+# is the batch where the pad is wider than the longest prompt.
+MIXED_WIDTH = 2
 
 # Right: [prompt | response | pad].
-# Mixed: prompts left-padded to P = max(prompt_lengths) = 2, then response, then pad.
+# Mixed: prompts left-padded to MIXED_WIDTH, then response, then pad.
 # Row 1 is the one that distinguishes them: right starts the response at column 1,
 # mixed starts every response at column 2.
 RIGHT_TOKEN = torch.tensor(
@@ -86,13 +89,33 @@ def _expected(padding_side: str) -> tuple[torch.Tensor, torch.Tensor]:
     return MIXED_TOKEN, MIXED_GATHERED
 
 
+def _mask(
+    prompt_lengths: torch.Tensor,
+    response_lengths: torch.Tensor,
+    seq_len: int,
+    padding_side: str,
+    prompt_width: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build the mask. Mixed uses this fixture's width unless one is passed."""
+    if padding_side == "mixed" and prompt_width is None:
+        prompt_width = MIXED_WIDTH
+    return response_token_mask(
+        prompt_lengths,
+        response_lengths,
+        seq_len,
+        padding_side,
+        prompt_width=prompt_width,
+    )
+
+
 def _value_columns_in_use(gathered: torch.Tensor) -> torch.Tensor:
-    """1 where ``value_out[:, t]`` is a response-action state or its bootstrap.
+    """1 where rollout ``V_old[:, t]`` enters GAE.
 
     The state for the action that emits token ``t + 1`` is column ``t``, which
     can be the last prompt token. The bootstrap is column ``t + 1``, and only
-    when the next action index is real. Other columns, including the value
-    written on the action's own token when the backup stops, are unused.
+    when the next action index is real. The live value head is trained on the
+    state columns. A 0 here is unused by both. The value written on the
+    action's own token is unused when the backup stops.
     """
     actions = gathered.shape[1]
     used = torch.zeros(gathered.shape[0], actions + 1)
@@ -146,7 +169,7 @@ def _batch(
     next_values: torch.Tensor,
     padding_side: str,
 ) -> dict:
-    return {
+    batch = {
         "input_ids": input_ids,
         "rewards": rewards,
         "values": values,
@@ -156,12 +179,15 @@ def _batch(
         "response_lengths": RESPONSE,
         "padding_side": padding_side,
     }
+    if padding_side == "mixed":
+        batch["prompt_width"] = MIXED_WIDTH
+    return batch
 
 
 @pytest.mark.parametrize("padding_side", ["right", "mixed"])
 def test_gathered_mask_matches_the_rollout_layout(padding_side: str) -> None:
     """Index t of the gathered mask marks token t+1, and only response tokens."""
-    token_mask, gathered = response_token_mask(PROMPT, RESPONSE, SEQ_LEN, padding_side)
+    token_mask, gathered = _mask(PROMPT, RESPONSE, SEQ_LEN, padding_side)
     expected_token, expected_gathered = _expected(padding_side)
     assert torch.equal(token_mask, expected_token)
     assert torch.equal(gathered, expected_gathered)
@@ -180,20 +206,87 @@ def test_mixed_layout_rejects_a_response_past_the_common_prompt_width() -> None:
     responses = torch.tensor([4, 1], dtype=torch.long)
     token_mask, _ = response_token_mask(prompts, responses, 6, "right")
     assert token_mask.shape == (2, 6)
-    with pytest.raises(ValueError, match="max\\(prompt_lengths\\)"):
-        response_token_mask(prompts, responses, 6, "mixed")
+    with pytest.raises(ValueError, match="prompt_width \\+ response_length"):
+        response_token_mask(prompts, responses, 6, "mixed", prompt_width=4)
+
+
+def test_mixed_layout_requires_prompt_width() -> None:
+    """Mixed does not fall back to max(prompt_lengths)."""
+    with pytest.raises(ValueError, match="prompt_width"):
+        response_token_mask(PROMPT, RESPONSE, SEQ_LEN, "mixed")
+
+
+def test_mixed_response_starts_at_the_padded_query_width() -> None:
+    """A query padded to 8 with a longest prompt of 5 opens the response at 8.
+
+    max(prompt_lengths) would open it at 5 and count the extra left pad as
+    response tokens. The loss uses that same window: a logit that scores
+    column 5 is outside it, and a logit that scores column 8 is inside it.
+    """
+    prompts = torch.tensor([5, 3], dtype=torch.long)
+    responses = torch.tensor([2, 2], dtype=torch.long)
+    seq_len = 12
+    width = 8
+    assert int(prompts.max()) == 5
+
+    token_mask, gathered = response_token_mask(
+        prompts, responses, seq_len, "mixed", prompt_width=width
+    )
+    expected = torch.zeros(2, seq_len)
+    expected[:, 8:10] = 1
+    assert torch.equal(token_mask, expected)
+    assert torch.equal(gathered, expected[:, 1:])
+    assert torch.all(token_mask[:, :8] == 0)
+    assert gathered[:, 4].eq(0).all()
+    assert gathered[:, 7].eq(1).all()
+
+    policy_logits = torch.arange(2 * seq_len * VOCAB, dtype=torch.float32).reshape(
+        2, seq_len, VOCAB
+    )
+    policy_logits = policy_logits / 10
+    ref_logits = -policy_logits
+    ids = torch.ones(2, seq_len, dtype=torch.long)
+    zeros = torch.zeros(2, seq_len)
+    rewards = place_sequence_reward(torch.tensor([2.0, 2.0]), token_mask)
+    old_log_probs = torch.zeros(2, seq_len - 1)
+    batch = {
+        "input_ids": ids,
+        "rewards": rewards,
+        "values": zeros,
+        "dones": zeros,
+        "prompt_lengths": prompts,
+        "response_lengths": responses,
+        "padding_side": "mixed",
+        "prompt_width": width,
+    }
+    base = _run(policy_logits, ref_logits, zeros, batch, old_log_probs)
+
+    outside = policy_logits.clone()
+    outside[:, 4, 1] = outside[:, 4, 1] + 5
+    held = _run(outside, ref_logits, zeros, batch, old_log_probs)
+    assert held.kl_divergence == pytest.approx(base.kl_divergence, abs=1e-5)
+    assert held.policy_loss == pytest.approx(base.policy_loss, abs=1e-5)
+
+    inside = policy_logits.clone()
+    inside[:, 7, 1] = inside[:, 7, 1] + 5
+    moved = _run(inside, ref_logits, zeros, batch, old_log_probs)
+    assert base.kl_divergence > 0
+    assert moved.kl_divergence != pytest.approx(base.kl_divergence, abs=1e-4)
+    assert moved.policy_loss != pytest.approx(base.policy_loss, abs=1e-4)
 
 
 @pytest.mark.parametrize("padding_side", ["right", "mixed"])
 def test_prompt_and_padding_do_not_change_losses_advantages_or_kl(padding_side: str) -> None:
     """Corrupting prompt ids, padding, or an unused value column leaves the step unchanged.
 
-    The state for the first response action sits on the last prompt token, so
-    that value column is in use and this test does not corrupt it. A
-    response-scoring logit and the last-token reward do change the step. An
-    unmasked mean fails the first check. An empty mask fails the second.
+    The state for the first response action sits on the last prompt token.
+    GAE reads that column from ``batch["values"]`` (``V_old``), so this test
+    does not corrupt it. The live head is trained on the same state columns.
+    A separate ``next_values`` entry is not read. A response-scoring logit
+    and the last-token reward do change the step. An unmasked mean fails the
+    first check. An empty mask fails the second.
     """
-    token_mask, gathered = response_token_mask(PROMPT, RESPONSE, SEQ_LEN, padding_side)
+    token_mask, gathered = _mask(PROMPT, RESPONSE, SEQ_LEN, padding_side)
     expected_token, expected_gathered = _expected(padding_side)
     assert torch.equal(token_mask, expected_token)
     assert torch.equal(gathered, expected_gathered)
@@ -223,10 +316,13 @@ def test_prompt_and_padding_do_not_change_losses_advantages_or_kl(padding_side: 
     corrupt_rewards = rewards.clone()
     corrupt_rewards[token_mask == 0] = 50
 
+    in_use = _value_columns_in_use(gathered)
     values = torch.full((2, SEQ_LEN), 0.5)
     values[token_mask == 0] = 0
     corrupt_values = values.clone()
-    corrupt_values[token_mask == 0] = 80
+    # Includes the value on the last response token. The backup stops there,
+    # so that column is not V_old for any response action.
+    corrupt_values[in_use == 0] = 80
 
     next_values = torch.zeros(2, SEQ_LEN)
     corrupt_next = next_values.clone()
@@ -235,8 +331,8 @@ def test_prompt_and_padding_do_not_change_losses_advantages_or_kl(padding_side: 
     value_pred = torch.full((2, SEQ_LEN), 0.25)
     corrupt_pred = value_pred.clone()
     # The last prompt column is the state of the first response action.
-    # Corrupting every token_mask == 0 column would move that baseline.
-    corrupt_pred[_value_columns_in_use(gathered) == 0] = 9
+    # The value loss trains the live head there. GAE does not read it.
+    corrupt_pred[in_use == 0] = 9
 
     offset = torch.linspace(-0.3, 0.3, SEQ_LEN - 1).view(1, -1)
     old_log_probs = gather_logprobs(policy_logits, base_ids).detach() - offset
@@ -335,7 +431,7 @@ def test_sequence_reward_sits_on_the_last_response_token(padding_side: str) -> N
     A sequence-level ``[B, 1]`` logit uses that same index. Right padding and
     the mixed layout disagree about which column that is.
     """
-    token_mask, _ = response_token_mask(PROMPT, RESPONSE, SEQ_LEN, padding_side)
+    token_mask, _ = _mask(PROMPT, RESPONSE, SEQ_LEN, padding_side)
     expected, _ = _expected(padding_side)
     assert torch.equal(token_mask, expected)
 
@@ -441,6 +537,92 @@ def test_action_advantage_does_not_see_its_own_token() -> None:
     assert not torch.equal(token_value, edited_token_value)
     assert torch.allclose(base[:, action_index], -state_value, atol=1e-6)
     assert torch.allclose(moved[:, action_index], base[:, action_index], atol=1e-6)
+    assert state_value[0].item() == pytest.approx(7.0)
+    assert token_value[0].item() == pytest.approx(8.0)
+
+
+def test_advantages_and_returns_stay_fixed_across_epochs() -> None:
+    """Two train_step calls on one batch share advantages and returns.
+
+    GAE reads ``batch["values"]`` (``V_old``). The live head is ``value_pred``
+    and moves when the critic steps. Returns are ``A + V_old``. Recomputing
+    GAE from the updated head makes the second call disagree. That is what
+    the previous step did.
+    """
+    seq_len = 4
+    prompt = torch.tensor([1], dtype=torch.long)
+    response = torch.tensor([2], dtype=torch.long)
+    v_old = torch.tensor([[1.0, 2.0, 4.0, 8.0]])
+    rewards = torch.tensor([[0.0, 0.0, 3.0, 0.0]])
+    dones = torch.zeros(1, seq_len)
+    ids = torch.tensor([[1, 2, 3, 0]], dtype=torch.long)
+
+    config = TrainingConfig.toy_mode()
+    config.log_to_wandb = False
+    config.alignment.gamma = 0.5
+    config.alignment.gae_lambda = 0.5
+    config.alignment.advantage_normalization = False
+    policy_logits = torch.zeros(1, seq_len, VOCAB)
+    policy = _FixedLogits(policy_logits)
+    reference = _FixedLogits(policy_logits)
+    value = _FixedValue(torch.zeros(1, seq_len))
+    optimizer = torch.optim.SGD(list(policy.parameters()) + list(value.parameters()), lr=1.0)
+    trainer = PPOTrainer(config, policy, value, reference, optimizer)
+
+    seen: dict[str, torch.Tensor] = {}
+    gae_compute = trainer.gae.compute
+    value_loss_fn = trainer.compute_value_loss
+
+    def capture_gae(action_rewards, values, next_values, action_dones, mask=None):
+        seen["gae_values"] = values.detach().clone()
+        seen["gae_next"] = next_values.detach().clone()
+        advantages, returns = gae_compute(action_rewards, values, next_values, action_dones, mask)
+        seen["advantages"] = advantages.detach().clone()
+        seen["returns"] = returns.detach().clone()
+        return advantages, returns
+
+    def capture_value(value_pred, returns, old_values=None, mask=None):
+        seen["value_pred"] = value_pred.detach().clone()
+        return value_loss_fn(value_pred, returns, old_values, mask)
+
+    trainer.gae.compute = capture_gae
+    trainer.compute_value_loss = capture_value
+
+    batch = {
+        "input_ids": ids,
+        "rewards": rewards,
+        "values": v_old,
+        "dones": dones,
+        "prompt_lengths": prompt,
+        "response_lengths": response,
+        "padding_side": "right",
+    }
+    old_log_probs = torch.zeros(1, seq_len - 1)
+    trainer.train_step(batch, old_log_probs)
+    first = {key: tensor.clone() for key, tensor in seen.items()}
+    trainer.train_step(batch, old_log_probs)
+    second = {key: tensor.clone() for key, tensor in seen.items()}
+
+    gathered = response_token_mask(prompt, response, seq_len, "right")[1]
+    spec_adv, spec_ret = GeneralizedAdvantageEstimation(0.5, 0.5).compute(
+        rewards[:, 1:],
+        v_old[:, :-1],
+        v_old[:, 1:],
+        dones[:, 1:],
+        gathered,
+    )
+
+    assert torch.equal(first["advantages"], second["advantages"])
+    assert torch.equal(first["returns"], second["returns"])
+    assert torch.equal(first["advantages"], spec_adv)
+    assert torch.equal(first["returns"], spec_ret)
+    assert torch.equal(first["gae_values"], v_old[:, :-1])
+    assert torch.equal(second["gae_values"], v_old[:, :-1])
+    assert torch.equal(first["gae_next"], v_old[:, 1:])
+    assert torch.equal(second["gae_next"], v_old[:, 1:])
+    assert torch.equal(first["returns"], (first["advantages"] + v_old[:, :-1]) * gathered)
+    assert not torch.equal(first["value_pred"], second["value_pred"])
+    assert not torch.equal(first["value_pred"], v_old[:, :-1])
 
 
 def test_masked_whiten_divides_by_the_response_count() -> None:

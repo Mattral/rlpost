@@ -14,32 +14,53 @@ This is the only PPO implementation. The step is:
 logits at position ``t`` score token ``t + 1``, and the result has shape
 ``[B, T - 1]``. The value head has the same shift. ``value_out[:, t]`` is
 the critic after it has read token ``t`` and before it has read token
-``t + 1``, so the tensors that enter GAE, the value loss, and whitening
-are the action layout ``[B, T - 1]``:
+``t + 1``. Index ``t`` of the action layout is the action that emits
+token ``t + 1``.
 
-    values[:, t]       = value_out[:, t]      # V(s) for the action at t
-    next_values[:, t]  = value_out[:, t + 1]  # V(s') after that action
+Advantages and returns stay fixed for every epoch on one rollout.
+Standard PPO computes them once from the rollout values and holds them.
+``train_step`` recomputes that GAE from ``batch["values"]`` on every
+call, instead of storing advantages on the rollout. The tensor is
+``V_old``. The critic's step does not change it, so two calls on the
+same batch return the same advantages and the same returns. The
+recursion stays in ``GeneralizedAdvantageEstimation.compute``. The
+rollout does not emit advantages, and a second copy of this shift would
+be a second place for the index to drift.
+
+    values[:, t]       = V_old[:, t]          # V(s) before the action
+    next_values[:, t]  = V_old[:, t + 1]      # V(s') after the action
     rewards[:, t]      = token_reward[:, t + 1]
+    returns            = A + V_old
 
-Index ``t`` is the action that emits token ``t + 1``. The reward written
-on a token moves back one column with it. TRL's PPO trainer (removed
-before 1.17.1; the 0.7 ``batched_forward_pass`` is the one that returned
-this) used the same shift: ``values[:, :-1]`` beside
-``logprobs_from_logits(logits[:, :-1], input_ids[:, 1:])``. This is that
-alignment, not a numeric match to a PPO loss TRL 1.17.1 does not ship.
+There is no ``next_values`` batch entry. The bootstrap is the next
+column of the same rollout tensor, not the live head. The live head is
+only the prediction the value loss trains:
 
-Using ``value_out[:, t + 1]`` as the baseline for that action is wrong.
-That position has already read the sampled token, so the baseline depends
-on the action. A state-only baseline drops out of the policy gradient
-because ``sum_a ∇π(a|s) = 0``. An action-dependent baseline does not.
-A higher value on the token that was just sampled makes ``A = r - V``
-smaller, so the surrogate reinforces that token less and punishes it
-more. Tokens the critic scores low get the opposite push. With
-``gamma = 0`` and zero rewards the advantage is ``-V(s)``, and editing
-the sampled token must leave it unchanged.
+    value_pred[:, t]   = value_out[:, t]
+
+The reward written on a token moves back one column with the action.
+TRL's PPO trainer (removed before 1.17.1; the 0.7 ``batched_forward_pass``
+is the one that returned this) used the same shift: ``values[:, :-1]``
+beside ``logprobs_from_logits(logits[:, :-1], input_ids[:, 1:])``. Those
+stored values were the rollout forward. This is that alignment, not a
+numeric match to a PPO loss TRL 1.17.1 does not ship.
+
+Using the value at the sampled token as the baseline is wrong, whether
+it is read from the live head or from ``V_old``. That position has
+already read the action, so the baseline depends on the action. A
+state-only baseline drops out of the policy gradient because
+``sum_a ∇π(a|s) = 0``. An action-dependent baseline does not. A higher
+value on the token that was just sampled makes ``A = r - V`` smaller,
+so the surrogate reinforces that token less and punishes it more.
+Tokens the critic scores low get the opposite push. With ``gamma = 0``
+and zero rewards the advantage is ``-V(s)``, and editing the sampled
+token must leave it unchanged. The state value in that test is ``-7``.
+The value after the sampled token is ``-8``.
 
 One response mask is built per batch from ``prompt_lengths`` and
 ``response_lengths``. ``response_token_mask`` documents the layout.
+``"mixed"`` also takes ``prompt_width``, the padded query tensor width.
+That width is not ``max(prompt_lengths)``.
 ``gathered_mask[:, t]`` is 1 when token ``t + 1`` is a generated response
 token, and 0 for prompt and padding. Policy loss, entropy, KL, GAE, the
 value loss, and advantage whitening all use that mask. The token-level
@@ -66,9 +87,10 @@ rewards that way.
 clip is ``ppo_epsilon``. ``c`` is the ``value_clip`` config field, not
 ``ppo_epsilon``. Both value modes use the same one-half. When
 ``value_clip`` is set, ``L_v`` is the masked mean of
-``0.5 * max((V - R)^2, (V_clip - R)^2)`` and ``train_step`` passes the
-batch values as ``V_old``. When ``value_clip`` is unset, ``L_v`` is
-the masked mean of ``0.5 * (V - R)^2``.
+``0.5 * max((V - R)^2, (V_clip - R)^2)`` and ``train_step`` passes
+``batch["values"][:, :-1]`` as ``V_old``. GAE reads that same rollout
+tensor. When ``value_clip`` is unset, ``L_v`` is the masked mean of
+``0.5 * (V - R)^2``. The target ``R`` is ``A + V_old`` in both modes.
 """
 
 import logging
@@ -268,7 +290,10 @@ class GeneralizedAdvantageEstimation:
         return are 0. Its reward, value, and advantage do not enter any
         other index. ``dones[:, t] == 1`` stops the backup after a real
         index whose next index is also real. On real indices,
-        ``returns = A + V``.
+        ``returns = A + V``. ``train_step`` passes the rollout value
+        head for both ``values`` and ``next_values``
+        (``batch["values"][:, :-1]`` and ``batch["values"][:, 1:]``),
+        so that sum is ``A + V_old``. The live critic is not an input.
 
         Args:
             rewards: Reward at each time index, shape ``[B, T]``.
@@ -625,7 +650,7 @@ class PPOTrainer:
 
     def train_step(
         self: "PPOTrainer",
-        batch: dict[str, Tensor | str],
+        batch: dict[str, Tensor | str | int],
         old_log_probs: Tensor,
     ) -> PPOMetrics:
         """Perform single PPO training step.
@@ -652,14 +677,20 @@ class PPOTrainer:
                   ``t + 1``.
                 - "values": Rollout value head at each token, shape ``[B, T]``.
                   ``values[:, t]`` was computed after reading token ``t``.
-                  The clip uses ``values[:, :-1]`` as ``V_old``. GAE does not
-                  read this tensor. It reads the live value head, shifted
-                  the same way.
+                  This is ``V_old``. GAE reads ``values[:, :-1]`` as the
+                  baseline and ``values[:, 1:]`` as the bootstrap, and
+                  holds the resulting advantages and returns fixed across
+                  epochs. The clip reads ``values[:, :-1]`` as ``V_old``
+                  when ``value_clip`` is set. The live value head is not
+                  this tensor.
                 - "dones": 1 stops the backup after that token, shape
                   ``[B, T]``. The action layout reads ``dones[:, 1:]``.
                 - "prompt_lengths": Real prompt tokens per row, int64 ``[B]``.
                 - "response_lengths": Real response tokens per row, int64 ``[B]``.
                 - "padding_side": ``"right"`` (default) or ``"mixed"``.
+                - "prompt_width": Padded query width. Required when
+                  ``padding_side`` is ``"mixed"``. Not
+                  ``max(prompt_lengths)``. Ignored for ``"right"``.
             old_log_probs: Log-probs of tokens ``1 .. T-1`` under the old policy,
                 shape ``[B, T - 1]``, matching ``gather_logprobs``.
 
@@ -685,8 +716,9 @@ class PPOTrainer:
         _, gathered_mask = response_token_mask(
             prompt_lengths,
             response_lengths,
-            input_ids.shape[1],
+            int(input_ids.shape[1]),
             padding_side,
+            prompt_width=batch.get("prompt_width"),
         )
 
         # Forward passes (should not compute gradients for reference model)
@@ -703,10 +735,9 @@ class PPOTrainer:
             policy_outputs.logits if hasattr(policy_outputs, "logits") else policy_outputs
         )
 
-        # Value head at each token. Position t has read tokens 0..t and has
-        # not read token t+1. The action that emits token t+1 is judged by
-        # position t. Position t+1 has already seen that token, so it is an
-        # action-dependent baseline and is not the value used here.
+        # Live value head. Position t has read tokens 0..t and has not read
+        # token t+1. The value loss trains this prediction. GAE does not
+        # read it: the baseline is V_old, frozen on the rollout.
         value_outputs = self.value_model(input_ids)
         value_out = value_outputs.value if hasattr(value_outputs, "value") else value_outputs
         if value_out.ndim == input_ids.ndim + 1 and value_out.shape[-1] == 1:
@@ -729,18 +760,19 @@ class PPOTrainer:
             )
 
         # Action layout [B, T-1]. Index t emits token t+1.
+        # V_old is frozen. Recomputing GAE from it is the same advantage a
+        # rollout-time store would have kept, and the recursion stays here.
+        # The live head is value_pred. Returns are A + V_old.
         action_values = value_out[:, :-1]
-        next_action_values = value_out[:, 1:]
         action_rewards = rewards[:, 1:]
         action_dones = dones[:, 1:]
         old_action_values = old_values_full[:, :-1]
+        old_next_values = old_values_full[:, 1:]
 
-        # Detach the baseline. The value loss trains action_values; the
-        # advantage must not carry that gradient into the policy term.
         advantages, returns = self.gae.compute(
             action_rewards,
-            action_values.detach(),
-            next_action_values.detach(),
+            old_action_values.detach(),
+            old_next_values.detach(),
             action_dones,
             gathered_mask,
         )
@@ -765,8 +797,9 @@ class PPOTrainer:
                 f"logprobs {tuple(token_logprobs.shape)}"
             )
 
-        # One mask for every reduction. batch values are V_old, and the loss
-        # reads them only when value_clip is set.
+        # One mask for every reduction. value_pred is the live head.
+        # old_action_values is V_old for the clip. The returns are already
+        # A + V_old.
         policy_loss, _ratio = self.compute_policy_loss(
             token_logprobs, old_log_probs, advantages, gathered_mask
         )

@@ -40,11 +40,31 @@ def gather_logprobs(logits: torch.Tensor, input_ids: torch.Tensor) -> torch.Tens
     return gathered
 
 
+def _prompt_width(prompt_width: int | torch.Tensor) -> int:
+    """One padded-query width. A Python int, or a single int64 tensor."""
+    if isinstance(prompt_width, torch.Tensor):
+        if prompt_width.dtype != torch.long or prompt_width.numel() != 1:
+            raise ValueError(
+                "prompt_width must be one int64, got "
+                f"dtype {prompt_width.dtype} and shape {tuple(prompt_width.shape)}"
+            )
+        width = int(prompt_width.reshape(()).item())
+    elif isinstance(prompt_width, bool) or not isinstance(prompt_width, int):
+        raise TypeError(f"prompt_width must be an int, got {type(prompt_width).__name__}")
+    else:
+        width = prompt_width
+    if width < 0:
+        raise ValueError(f"prompt_width must be >= 0, got {width}")
+    return width
+
+
 def response_token_mask(
     prompt_lengths: torch.Tensor,
     response_lengths: torch.Tensor,
     seq_len: int,
     padding_side: str = "right",
+    *,
+    prompt_width: int | torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Response-token masks for one rollout batch.
 
@@ -55,17 +75,20 @@ def response_token_mask(
 
     ``"right"`` lays each row out as ``[prompt | response | pad ...]``.
     The response starts at ``prompt_lengths`` and ends at
-    ``prompt_lengths + response_lengths``.
+    ``prompt_lengths + response_lengths``. ``prompt_width`` is not read.
 
     ``"mixed"`` is what a padded ``generate`` batch actually is:
-    ``[pad | prompt | response | pad]``. Prompts are left-padded to one
-    common width ``P = max(prompt_lengths)``, so the longest prompt has
-    no leading pad and every response starts at column ``P``. The response
-    ends at ``P + response_lengths``, which is where that row hit EOS, and
-    the rest of the row is a right pad. A suffix layout
-    ``[pad | prompt | response]`` (response flush with the end of the
-    tensor) is not produced by that generation, and nothing in this
-    repository reads it.
+    ``[pad | prompt | response | pad]``. ``prompt_width`` is the padded
+    query tensor's width (``query_tokens.shape[1]``). Prompts are
+    left-padded out to that width, so every response starts at column
+    ``prompt_width`` and ends at ``prompt_width + response_lengths``,
+    which is where that row hit EOS. The tail is a right pad. The width
+    is not ``max(prompt_lengths)``. A batch can pad every prompt to 8
+    while the longest real prompt is 5, and the response window still
+    starts at 8. Using the longest prompt would treat the extra left pad
+    as response tokens. A suffix layout ``[pad | prompt | response]``
+    (response flush with the end of the tensor) is not produced by that
+    generation, and nothing in this repository reads it.
 
     ``token_mask`` has shape ``[B, seq_len]``. Index ``t`` is 1 when
     ``input_ids[:, t]`` is a response token. The rollout writes the
@@ -81,9 +104,12 @@ def response_token_mask(
 
     Args:
         prompt_lengths: Real prompt tokens per row, int64, shape ``[B]``.
+            Each entry is ``<= prompt_width`` on the mixed layout.
         response_lengths: Real response tokens per row, int64, shape ``[B]``.
         seq_len: ``T``, the padded length of ``input_ids``.
         padding_side: ``"right"`` or ``"mixed"``.
+        prompt_width: Padded query width. Required for ``"mixed"``. Not
+            ``max(prompt_lengths)``. Ignored for ``"right"``.
 
     Returns:
         token_mask: float 0/1, shape ``[B, T]``.
@@ -113,11 +139,19 @@ def response_token_mask(
     if padding_side == "right":
         response_start = prompt_lengths
     else:
-        # One prompt width for the batch. A shorter prompt has leading pads.
-        prompt_width = prompt_lengths.max()
-        if torch.any(prompt_width + response_lengths > seq_len):
-            raise ValueError("mixed layout needs max(prompt_lengths) + response_length <= seq_len")
-        response_start = prompt_width.expand_as(prompt_lengths)
+        # The padded query width, not the longest prompt. A shorter prompt
+        # has more leading pad, and every response still starts at `width`.
+        if prompt_width is None:
+            raise ValueError(
+                "mixed layout needs prompt_width, the padded query tensor width, "
+                "not max(prompt_lengths)"
+            )
+        width = _prompt_width(prompt_width)
+        if torch.any(prompt_lengths > width):
+            raise ValueError("prompt_lengths cannot exceed prompt_width, the padded query width")
+        response_start = torch.full_like(prompt_lengths, width)
+        if torch.any(response_start + response_lengths > seq_len):
+            raise ValueError("mixed layout needs prompt_width + response_length <= seq_len")
     response_end = response_start + response_lengths
     token_mask = (positions >= response_start.unsqueeze(1)) & (
         positions < response_end.unsqueeze(1)
