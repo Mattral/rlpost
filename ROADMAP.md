@@ -802,6 +802,50 @@ Cover:
   - Pytest on this branch after those two fixes, `.venv`, torch
     2.15.0+cpu: 154 passed, 17.12s. Ruff check and ruff format check
     pass. The 151 passed line above is the count on `28dcdfb`.
+  - 2026-11-09, before merge of PR #25. Two more fixes on this branch.
+    The notes above describe `5806e22`. This note describes `3e163eb`.
+  - GAE uses the rollout values, not the live value head. Standard PPO
+    computes advantages and returns once per rollout batch and holds
+    them fixed across epochs. `train_step` recomputes that GAE from
+    `batch["values"]` on every call. The tensor is `V_old`. The critic's
+    step does not change it, so the numbers are the ones a rollout-time
+    advantage would have stored. The recursion stays in
+    `GeneralizedAdvantageEstimation.compute`. Storing the advantages on
+    the rollout was the other option. It was not taken. The rollout does
+    not run the critic into the training batch, and a second copy of the
+    shift would drift from this one.
+  - Action layout, same shift as `5806e22`:
+    `values = batch["values"][:, :-1]`,
+    `next_values = batch["values"][:, 1:]`.
+    There is still no `next_values` batch entry. The bootstrap is the
+    next column of that rollout tensor, not `value_out[:, 1:]`.
+    `returns = A + V_old`. The live head is `value_pred` on
+    `value_out[:, :-1]`. The value loss trains that prediction toward
+    the frozen returns. `batch["values"][:, :-1]` is also `V_old` for
+    the clip.
+  - `test_advantages_and_returns_stay_fixed_across_epochs` runs
+    `train_step` twice on one batch. The advantages and the returns
+    match. The live value prediction does not: the critic stepped.
+    On `5806e22` the second call recomputed GAE from the updated head,
+    so the advantages moved. `test_action_advantage_does_not_see_its_own_token`
+    still requires `-7` at the state and not `-8` at the sampled token.
+    Those stored values are the rollout head.
+  - Mixed layout. `prompt_width` is an argument. It is the padded query
+    tensor's width, `query_tokens.shape[1]`, not `max(prompt_lengths)`.
+    A batch can pad every prompt to 8 while the longest real prompt is
+    5. The response window starts at 8. `max(prompt_lengths)` would
+    start it at 5 and count the extra left pad as response tokens.
+    `"mixed"` without `prompt_width` raises. `"right"` does not read it.
+    The overflow check is `prompt_width + response_length <= seq_len`.
+    `test_mixed_response_starts_at_the_padded_query_width` is the width-8
+    case. A logit that scores column 5 stays out of the KL. A logit that
+    scores column 8 moves it.
+    `test_mixed_layout_rejects_a_response_past_the_common_prompt_width`
+    still passes `prompt_width=4` on prompts `[1, 4]`, responses `[4, 1]`,
+    `T = 6`.
+  - Pytest on this branch after those two fixes, `.venv`, torch
+    2.15.0+cpu: 157 passed, 16.99s. Ruff check and ruff format check
+    pass. The 154 passed line above is the count on `d2b9995`.
 
 ### [ ] S0.7b EOS, truncation, and the reference gradient
 - Depends on: S0.7.
@@ -1136,3 +1180,4 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-11-06 · S0.6e · Loss default is k2. Its gradient matches KL(policy || reference). k3 stays and its gradient is the reverse KL. The loss rejects k1. 142 passed. · d4bd358
 - 2026-11-06 · S0.7 · One response-token mask in the gather layout, masked means in the PPO losses and in GAE, advantage stats over response tokens only. The sequence reward sits on the last response token. Config rejects k1. 151 passed. · 28dcdfb
 - 2026-11-06 · S0.7 · Action-layout values (`value_out[:, :-1]`) and the mixed `[pad | prompt | response | pad]` mask. The value at the sampled token was an action-dependent baseline. 154 passed. · 5806e22
+- 2026-11-09 · S0.7 · GAE is recomputed from the rollout values and held fixed across epochs. Returns are A + V_old. The live head is the value prediction. Mixed layout takes the padded query width, not max(prompt_lengths). 157 passed. · 3e163eb
