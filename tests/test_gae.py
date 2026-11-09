@@ -6,9 +6,12 @@ helper. The installed tree has no module whose name contains ``ppo`` or
 ``gae``. GRPO's advantage is ``reward - group mean``. RLOO's is
 leave-one-out. Neither is this recursion, so there is no TRL parity call.
 
-Time is axis 1 of ``[B, T]``. ``rewards[:, t]`` is the reward for the token
-at that index. ``next_values[:, t]`` is ``V_{t+1}``. On real tokens,
-``returns = advantages + values``.
+Time is axis 1 of ``[B, T]``. PPO passes the action layout ``[B, T-1]``:
+index ``t`` is the action that emits token ``t + 1``, ``rewards[:, t]`` is
+that action's reward, and ``values[:, t]`` is ``V`` before the action.
+``next_values[:, t]`` is ``V`` of the next state. On real indices,
+``returns = advantages + values``. The numbers below are the recursion.
+They do not depend on that token alignment.
 
 fp32 absolute tolerance is 1e-6. The T=4 numbers are dyadic and match to
 the bit on this CPU.

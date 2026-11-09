@@ -190,9 +190,15 @@ class TestAlignmentConfig:
         assert config.kl_estimator == "k2"
         assert config.kl_coefficient == 0.1
 
-        for name in ("k1", "k2", "k3"):
+        for name in ("k2", "k3"):
             config = AlignmentConfig(kl_estimator=name)
             assert config.kl_estimator == name
+
+        with pytest.raises(ValueError, match="k1 cannot be the PPO loss term"):
+            AlignmentConfig(kl_estimator="k1")
+        config = AlignmentConfig()
+        with pytest.raises(ValueError, match="k1 cannot be the PPO loss term"):
+            config.kl_estimator = "k1"
 
         with pytest.raises(ValueError):
             AlignmentConfig(kl_estimator="k4")

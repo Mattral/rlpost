@@ -201,7 +201,8 @@ class DPOTrainer:
         The prompt is tokenized on its own and as a prefix of ``prompt + response``.
         The completion mask is 0 on that shared prefix and on padding, and 1 on
         the remaining tokens. Right padding is assumed: a left-padded prompt is
-        not a prefix, and this mask would then be wrong. Padding side is S0.7.
+        not a prefix, and this mask would then be wrong. Batched left padding
+        stays with the S0.11 collation note.
 
         Args:
             prompt: Prompt text.

@@ -232,6 +232,18 @@ class OptimizationConfig(BaseConfig):
     )
 
 
+# Raised by AlignmentConfig and again by PPOTrainer.compute_kl_divergence.
+# k1's value is unbiased and per_token_kl still returns it. As a loss term
+# its expected gradient w.r.t. the policy logits is 0.
+K1_LOSS_REJECTED = (
+    "k1 cannot be the PPO loss term. Under samples from the policy "
+    "the expected gradient of mean(k1) w.r.t. the policy logits is 0. "
+    "k1 belongs in the reward, as reward minus beta * k1 (InstructGPT). "
+    "This trainer does not implement that. Use kl_estimator k2 for "
+    "KL(policy || reference)."
+)
+
+
 class AlignmentConfig(BaseConfig):
     """RLHF/DPO alignment hyperparameters.
 
@@ -282,13 +294,22 @@ class AlignmentConfig(BaseConfig):
         default="k2",
         description=(
             "Per-token KL estimator on sampled tokens. lr = log p_ref - log p_policy. "
-            "k1 = -lr: unbiased value, expected loss gradient 0. The PPO loss rejects it. "
+            "k1 = -lr: unbiased value, expected loss gradient 0. Config validation rejects it. "
             "It belongs in the reward (reward minus beta * k1), which is not implemented. "
             "k2 = 0.5 * lr^2: biased value, gradient of KL(policy || reference). Default. "
             "k3 = exp(lr) - 1 - lr: unbiased nonnegative value, gradient of "
             "KL(reference || policy), the reverse direction GRPO uses."
         ),
     )
+
+    @field_validator("kl_estimator")
+    @classmethod
+    def reject_k1_loss_estimator(cls, value: str) -> str:
+        """k1 is a legal name and an illegal loss term. Same message as the trainer."""
+        if value == "k1":
+            raise ValueError(K1_LOSS_REJECTED)
+        return value
+
     dpo_beta: float = Field(
         default=0.1,
         gt=0.0,

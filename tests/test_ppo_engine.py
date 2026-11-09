@@ -410,6 +410,10 @@ def _causal_train_batch(seed: int = 0) -> tuple[dict[str, torch.Tensor], torch.T
         "values": torch.randn(batch_size, seq_len),
         "next_values": torch.randn(batch_size, seq_len),
         "dones": torch.zeros(batch_size, seq_len),
+        # The whole row is the response. Prompt length 0 keeps every token.
+        "prompt_lengths": torch.zeros(batch_size, dtype=torch.long),
+        "response_lengths": torch.full((batch_size,), seq_len, dtype=torch.long),
+        "padding_side": "right",
     }
     return batch, old_log_probs
 
