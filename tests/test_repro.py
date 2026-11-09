@@ -83,6 +83,10 @@ class TestConfigHash:
         config.checkpoint_path = str(tmp_path / "elsewhere.pt")
         assert config_hash(config) == original
 
+    def test_a_blank_checkpoint_path_raises(self) -> None:
+        with pytest.raises(ValueError, match="checkpoint_path"):
+            TrainingConfig(checkpoint_path="  ")
+
     def test_a_training_field_changes_the_hash(self, tmp_path: Path) -> None:
         config = _config(tmp_path)
         original = config_hash(config)
