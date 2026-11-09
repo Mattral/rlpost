@@ -1029,7 +1029,8 @@ Cover:
 - Notes:
   - 2026-11-09: branch `feat/S0.8-determinism` from `origin/main` `79ace06`
     (merge of PR #28). `9ed4afe` is the seed and the checkpoint.
-    `da877b8` is the PPO and DPO runs.
+    `da877b8` is the PPO and DPO runs. Docs commit `0e0b2a7`.
+    Opened as PR #29.
   - The old item text said resume matches within a tolerance. The owner
     required exact equality on CPU. Losses and every metric field use
     `==`. Weights use `torch.equal`.
