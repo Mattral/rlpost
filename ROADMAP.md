@@ -995,6 +995,28 @@ Cover:
   - Pytest on this branch, `.venv`, torch 2.15.0+cpu: 166 passed,
     17.31s. Ruff check and ruff format check pass. The 163 passed
     line under S0.7b is the count on `f05be3c`.
+  - 2026-11-09 follow-up, `64331c2`. `AlignmentConfig.temperature`
+    is the only temperature. `RolloutGenerator` takes that config
+    and has no `temperature` argument. `generate_rollout` reads the
+    field once and stores it on `RolloutBatch.temperature`.
+    `train_step` raises when `batch["temperature"]` differs from
+    the trainer's field. `test_rollout_sampled_at_another_temperature_cannot_train`
+    samples at 0.7 and feeds that batch to a trainer whose config
+    is 1.0. The step raises. Passing `temperature=` to the generator
+    raises `TypeError`.
+  - Sampling still applies `top_p`. The stored logits are the raw
+    model outputs. Train-time log-probs are
+    `log_softmax(logits / temperature)` over the full vocabulary,
+    not the nucleus. That is the same approximation as TRL 1.17.1.
+    `GRPOTrainer` puts `temperature` and `top_p` on the generation
+    kwargs (`trl/trainer/grpo_trainer.py`). `selective_log_softmax`
+    divides by temperature and normalizes over the whole vocabulary
+    (`trl/trainer/utils.py`). With `top_p`, the trainer warns that
+    those log-probabilities make the importance ratio biased
+    (`grpo_trainer.py`, the filtered-sampling warning). No code
+    change for that approximation.
+  - Pytest after `64331c2`, `.venv`, torch 2.15.0+cpu: 167 passed,
+    18.67s. Ruff check and ruff format check pass.
 
 ### [ ] S0.8 Determinism and resumable checkpoints
 - Seeding gives identical losses on CPU for 2 runs.
@@ -1049,7 +1071,12 @@ Cover:
     `[B, R, V]`. The PPO step only needs the gathered per-token
     log-prob of the sampled token,
     `log_softmax(logits / temperature)` at that index. Store that
-    instead of the full vocabulary tensor.
+    instead of the full vocabulary tensor. That log-prob is
+    `log_softmax` over the full vocabulary, not the `top_p`
+    nucleus. Sampling still drops tokens outside the nucleus, and
+    the ratio uses the full distribution. TRL 1.17.1 does the same.
+    The S0.7c note records it. Leave the approximation in place
+    when storing the gathered log-prob.
   - The sampler calls the policy and the reference on the whole
     prefix at every new token. There is no KV cache.
   - `RolloutGenerator` raises when `pad_token_id == eos_token_id`.
@@ -1342,3 +1369,4 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-11-09 · S0.7 · Merged as 3d2928a. README no longer says GAE and the value loss use the [B, T] mask. They use the gathered mask, and GAE reads V_old. · 12c81ff
 - 2026-11-09 · S0.7b · Each row stops at its own EOS. A truncated row stays non-terminal, so GAE bootstraps from V. missing_eos_penalty matches the TRL 1.17.1 Online DPO subtraction and rejects a non-positive value. Reference grads stay None. 163 passed. · efb2c75
 - 2026-11-09 · S0.7c · PPO forwards take an attention mask and position ids, so padding does not move real-token logits. train_step gathers log-probs from logits / temperature. RolloutBuffer and RolloutCollator are deleted. 166 passed. · 16b07d0
+- 2026-11-09 · S0.7c · Sampling and train_step share AlignmentConfig.temperature. A rollout recorded at another temperature raises. top_p stays a sampling filter; train log-probs stay the full softmax. 167 passed. · 64331c2
