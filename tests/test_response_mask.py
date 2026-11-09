@@ -67,8 +67,13 @@ class _FixedLogits(nn.Module):
         super().__init__()
         self.logits = nn.Parameter(logits.clone())
 
-    def forward(self, input_ids: torch.Tensor):
-        del input_ids
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.Tensor | None = None,
+    ):
+        del input_ids, attention_mask, position_ids
         return SimpleNamespace(logits=self.logits)
 
 
@@ -78,8 +83,13 @@ class _FixedValue(nn.Module):
         self.bias = nn.Parameter(torch.zeros(()))
         self.values = values.clone()
 
-    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
-        del input_ids
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        del input_ids, attention_mask, position_ids
         return self.values + self.bias
 
 
@@ -470,7 +480,13 @@ class _CausalValue(nn.Module):
         super().__init__()
         self.bias = nn.Parameter(torch.zeros(()))
 
-    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        del attention_mask, position_ids
         return input_ids.to(dtype=torch.float32).cumsum(dim=-1) + self.bias
 
 

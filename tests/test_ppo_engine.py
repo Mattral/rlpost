@@ -393,7 +393,13 @@ class _TokenValue(nn.Module):
         self.embed = nn.Embedding(vocab, hidden)
         self.proj = nn.Linear(hidden, 1)
 
-    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        del attention_mask, position_ids
         return self.proj(self.embed(input_ids)).squeeze(-1)
 
 

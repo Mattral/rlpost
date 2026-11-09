@@ -1,7 +1,7 @@
-"""Rollout storage and sampling.
+"""Rollout sampling.
 
 PPO updates live in ``rlpost.ppo_engine``.
-This package re-exports the rollout buffer and the token sampler.
+This package re-exports the token sampler.
 """
 
 from . import rollout

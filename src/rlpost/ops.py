@@ -158,3 +158,64 @@ def response_token_mask(
     )
     token_mask = token_mask.to(dtype=torch.float32)
     return token_mask, token_mask[:, 1:]
+
+
+def padding_attention(
+    prompt_lengths: torch.Tensor,
+    response_lengths: torch.Tensor,
+    seq_len: int,
+    padding_side: str = "right",
+    *,
+    prompt_width: int | torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Attention mask and position ids that hide padding from the model.
+
+    Prompt tokens and response tokens are 1. Left padding and right
+    padding are 0. The lengths are the same arguments as
+    ``response_token_mask``, so the model and the loss agree on which
+    columns exist. This is not the loss mask. A prompt token is visible
+    here and is still 0 in the gathered response mask.
+
+    ``"right"`` is ``[prompt | response | pad]``. ``"mixed"`` is
+    ``[pad | prompt | response | pad]``. ``prompt_width`` is the padded
+    query width, required for ``"mixed"``, and not ``max(prompt_lengths)``.
+
+    ``position_ids = clamp(cumsum(attention_mask) - 1, min=0)``. A left
+    pad is position 0. The first real token is 0. Each later real token
+    counts up by one, which is the position it would have with the pads
+    removed. A right pad repeats the last real position. The attention
+    mask stops the model from reading it.
+
+    Args:
+        prompt_lengths: Real prompt tokens per row, int64, shape ``[B]``.
+        response_lengths: Real response tokens per row, int64, shape ``[B]``.
+        seq_len: ``T``, the padded length of ``input_ids``.
+        padding_side: ``"right"`` or ``"mixed"``.
+        prompt_width: Padded query width. Required for ``"mixed"``.
+
+    Returns:
+        attention_mask: int64 0/1, shape ``[B, T]``.
+        position_ids: int64, shape ``[B, T]``.
+    """
+    # One validator for both masks. A length the loss would reject is rejected here.
+    response_token_mask(
+        prompt_lengths,
+        response_lengths,
+        seq_len,
+        padding_side,
+        prompt_width=prompt_width,
+    )
+    batch = prompt_lengths.shape[0]
+    positions = torch.arange(seq_len, device=prompt_lengths.device).unsqueeze(0).expand(batch, -1)
+    if padding_side == "right":
+        real_start = torch.zeros_like(prompt_lengths)
+        real_end = prompt_lengths + response_lengths
+    else:
+        width = _prompt_width(prompt_width)
+        real_start = width - prompt_lengths
+        real_end = torch.full_like(prompt_lengths, width) + response_lengths
+    attention_mask = (
+        (positions >= real_start.unsqueeze(1)) & (positions < real_end.unsqueeze(1))
+    ).to(dtype=torch.long)
+    position_ids = (attention_mask.cumsum(dim=-1) - 1).clamp(min=0)
+    return attention_mask, position_ids
