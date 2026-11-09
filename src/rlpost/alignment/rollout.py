@@ -30,6 +30,41 @@ class Rollout:
     logits_reference: torch.Tensor
 
 
+@dataclass
+class RolloutBatch:
+    """One ``generate_rollout`` call, in the mixed layout.
+
+    ``input_ids`` is ``[B, prompt_width + max_response_length]``:
+    ``[pad | prompt | response | pad]``. ``prompt_width`` is
+    ``query_tokens.shape[1]``, the padded query width, not
+    ``max(prompt_lengths)``. Every response starts at that column.
+
+    ``response_lengths`` counts real response tokens, including the EOS
+    token when the row emitted one, and not the padding after it.
+    ``dones`` is 1 on that EOS token and 0 everywhere else. A row that
+    fills ``max_response_length`` without EOS stays 0, including on its
+    last token, so GAE bootstraps from ``V`` there instead of treating
+    the length limit as an episode end.
+
+    ``rewards`` is ``[B, T]``. The sequence score sits on the last real
+    response token, which is the EOS token when the row has one.
+    ``token_mask`` is the ``[B, T]`` response mask from
+    ``response_token_mask(..., "mixed", prompt_width=prompt_width)``.
+    ``rollouts`` is the per-row view: ``response_tokens`` is the real
+    response, EOS included, padding omitted.
+    """
+
+    rollouts: list[Rollout]
+    input_ids: torch.Tensor
+    prompt_lengths: torch.Tensor
+    response_lengths: torch.Tensor
+    prompt_width: int
+    padding_side: str
+    dones: torch.Tensor
+    rewards: torch.Tensor
+    token_mask: torch.Tensor
+
+
 class RolloutBuffer:
     """In-memory ring buffer for collecting rollouts during generation phase."""
 
@@ -204,6 +239,9 @@ class RolloutGenerator:
         max_response_length: int = 128,
         temperature: float = 1.0,
         top_p: float = 0.9,
+        eos_token_id: int | None = None,
+        pad_token_id: int | None = None,
+        missing_eos_penalty: float | None = None,
     ):
         self.policy_model = policy_model
         self.reference_model = reference_model
@@ -212,77 +250,152 @@ class RolloutGenerator:
         self.max_response_length = max_response_length
         self.temperature = temperature
         self.top_p = top_p
+        if eos_token_id is None and tokenizer is not None:
+            eos_token_id = getattr(tokenizer, "eos_token_id", None)
+        if eos_token_id is not None:
+            eos_token_id = int(eos_token_id)
+        if pad_token_id is None and tokenizer is not None:
+            pad_token_id = getattr(tokenizer, "pad_token_id", None)
+        if pad_token_id is None:
+            pad_token_id = 0
+        pad_token_id = int(pad_token_id)
+        if eos_token_id is not None and pad_token_id == eos_token_id:
+            raise ValueError("pad_token_id and eos_token_id must differ")
+        if missing_eos_penalty is not None and (
+            isinstance(missing_eos_penalty, bool) or missing_eos_penalty <= 0
+        ):
+            raise ValueError(
+                "missing_eos_penalty must be > 0 when set, got "
+                f"{missing_eos_penalty}. None leaves the sequence reward unchanged."
+            )
+        self.eos_token_id = eos_token_id
+        self.pad_token_id = pad_token_id
+        # Same number as AlignmentConfig.missing_eos_penalty. None is off.
+        self.missing_eos_penalty = missing_eos_penalty
 
     @torch.no_grad()
-    def generate_rollout(self, query_tokens: torch.Tensor) -> list[Rollout]:
-        """Generate one rollout per row of ``query_tokens`` ([B, T_query])."""
-        # Generate response tokens autoregressively
-        response_tokens_list = []
-        logits_policy_list = []
-        logits_reference_list = []
+    def generate_rollout(
+        self,
+        query_tokens: torch.Tensor,
+        prompt_lengths: torch.Tensor | None = None,
+    ) -> RolloutBatch:
+        """Generate one rollout per row of ``query_tokens`` ([B, prompt_width]).
 
-        current_tokens = query_tokens.clone()
+        ``query_tokens`` is already left-padded to ``prompt_width``. The
+        last column is the last real prompt token, which is what
+        ``logits[:, -1]`` reads. The returned batch is the mixed layout
+        ``[pad | prompt | response | pad]`` with that same ``prompt_width``.
+        It is not ``max(prompt_lengths)``.
 
-        for _ in range(self.max_response_length):
-            # Policy forward pass
-            policy_out = self.policy_model(current_tokens)
-            policy_logits = policy_out.logits[:, -1, :]
+        Each row stops when it samples ``eos_token_id``. That token counts
+        in ``response_lengths`` and in the response mask. Later columns of
+        that row are ``pad_token_id``, and the mask is 0 there. A row that
+        reaches ``max_response_length`` without EOS is truncated: its
+        ``dones`` stay 0, so the backup at the last action bootstraps from
+        ``V``. An EOS token is the only 1 in ``dones``.
 
-            # Reference forward pass
-            ref_out = self.reference_model(current_tokens)
-            ref_logits = ref_out.logits[:, -1, :]
+        ``missing_eos_penalty``, when set, is subtracted from the sequence
+        score of rows that did not emit EOS, and from no other row. ``None``
+        leaves the score unchanged. The score is then written on the last
+        real response token.
+        """
+        if query_tokens.ndim != 2:
+            raise ValueError(
+                f"query_tokens must be [B, prompt_width], got {tuple(query_tokens.shape)}"
+            )
+        batch, prompt_width = query_tokens.shape
+        device = query_tokens.device
+        if prompt_lengths is None:
+            prompt_lengths = torch.full((batch,), prompt_width, dtype=torch.long, device=device)
+        else:
+            prompt_lengths = prompt_lengths.to(device=device, dtype=torch.long)
+        if prompt_lengths.shape != (batch,):
+            raise ValueError(
+                f"prompt_lengths must be [B], got {tuple(prompt_lengths.shape)} for batch {batch}"
+            )
+        if torch.any((prompt_lengths < 0) | (prompt_lengths > prompt_width)):
+            raise ValueError(f"prompt_lengths must lie in [0, prompt_width={prompt_width}]")
 
-            logits_policy_list.append(policy_logits)
-            logits_reference_list.append(ref_logits)
+        eos_id = self.eos_token_id
+        pad_id = self.pad_token_id
+        response = torch.full(
+            (batch, self.max_response_length), pad_id, dtype=torch.long, device=device
+        )
+        finished = torch.zeros(batch, dtype=torch.bool, device=device)
+        lengths = torch.zeros(batch, dtype=torch.long, device=device)
+        policy_steps: list[torch.Tensor] = []
+        ref_steps: list[torch.Tensor] = []
+        current = query_tokens.clone()
 
-            next_token = self._sample_token(
+        for step in range(self.max_response_length):
+            policy_logits = self.policy_model(current).logits[:, -1, :]
+            ref_logits = self.reference_model(current).logits[:, -1, :]
+            policy_steps.append(policy_logits)
+            ref_steps.append(ref_logits)
+            sampled = self._sample_token(
                 policy_logits,
                 temperature=self.temperature,
                 top_p=self.top_p,
-            )
-            response_tokens_list.append(next_token)
-            current_tokens = torch.cat([current_tokens, next_token], dim=1)
+            ).squeeze(1)
+            token = torch.where(finished, torch.full_like(sampled, pad_id), sampled)
+            response[:, step] = token
+            # The EOS token itself is a response token. Padding after it is not.
+            lengths = lengths + (~finished).to(dtype=torch.long)
+            if eos_id is not None:
+                finished = finished | (token == eos_id)
+            current = torch.cat([current, token.unsqueeze(1)], dim=1)
 
-        response_tokens = torch.cat(response_tokens_list, dim=1)
-        logits_policy = torch.stack(logits_policy_list, dim=1)
-        logits_reference = torch.stack(logits_reference_list, dim=1)
+        input_ids = current
+        token_mask, _gathered = response_token_mask(
+            prompt_lengths,
+            lengths,
+            int(input_ids.shape[1]),
+            "mixed",
+            prompt_width=prompt_width,
+        )
+        reward_out = self.reward_model(input_ids)
+        raw = self._decode_reward(reward_out, token_mask)
+        last = last_response_index(token_mask).to(device=raw.device)
+        scores = raw[torch.arange(batch, device=raw.device), last].clone()
+        hit_eos = finished.to(device=scores.device)
+        if self.missing_eos_penalty is not None:
+            penalty = scores.new_tensor(self.missing_eos_penalty)
+            scores = torch.where(hit_eos, scores, scores - penalty)
+        rewards = place_sequence_reward(scores, token_mask.to(device=scores.device))
 
-        with torch.no_grad():
-            reward_input = torch.cat([query_tokens, response_tokens], dim=1)
-            reward_out = self.reward_model(reward_input)
-            # No extra padding: the row is exactly [prompt | response].
-            # The last index is the last response token.
-            batch, query_len = query_tokens.shape
-            response_len = response_tokens.shape[1]
-            prompt_lengths = torch.full(
-                (batch,), query_len, dtype=torch.long, device=query_tokens.device
-            )
-            response_lengths = torch.full(
-                (batch,), response_len, dtype=torch.long, device=query_tokens.device
-            )
-            token_mask, _ = response_token_mask(
-                prompt_lengths,
-                response_lengths,
-                query_len + response_len,
-                "right",
-            )
-            placed = self._decode_reward(reward_out, token_mask)
-            last = last_response_index(token_mask)
-            rewards = placed[torch.arange(batch, device=placed.device), last]
+        dones = torch.zeros(rewards.shape, dtype=rewards.dtype, device=rewards.device)
+        hit_eos = hit_eos.to(device=dones.device)
+        last = last.to(device=dones.device)
+        if eos_id is not None and bool(torch.any(hit_eos)):
+            rows = torch.arange(batch, device=dones.device)[hit_eos]
+            dones[rows, last[hit_eos]] = 1
 
-        rollouts = []
-        for index in range(query_tokens.shape[0]):
+        policy_logits_all = torch.stack(policy_steps, dim=1)
+        ref_logits_all = torch.stack(ref_steps, dim=1)
+        rollouts: list[Rollout] = []
+        for index in range(batch):
+            length = int(lengths[index].item())
             rollouts.append(
                 Rollout(
                     query_tokens=query_tokens[index].detach().cpu(),
-                    response_tokens=response_tokens[index].detach().cpu(),
-                    logits_policy=logits_policy[index].detach().cpu(),
-                    logits_reference=logits_reference[index].detach().cpu(),
-                    reward=rewards[index].detach().cpu(),
+                    response_tokens=response[index, :length].detach().cpu(),
+                    logits_policy=policy_logits_all[index, :length].detach().cpu(),
+                    logits_reference=ref_logits_all[index, :length].detach().cpu(),
+                    reward=scores[index].detach().cpu(),
                 )
             )
 
-        return rollouts
+        return RolloutBatch(
+            rollouts=rollouts,
+            input_ids=input_ids.detach().cpu(),
+            prompt_lengths=prompt_lengths.detach().cpu(),
+            response_lengths=lengths.detach().cpu(),
+            prompt_width=prompt_width,
+            padding_side="mixed",
+            dones=dones.detach().cpu(),
+            rewards=rewards.detach().cpu(),
+            token_mask=token_mask.detach().cpu(),
+        )
 
     @staticmethod
     def _decode_reward(
@@ -305,9 +418,9 @@ class RolloutGenerator:
           is the mean over ``H``.
 
         Without ``token_mask``, per-token scores use the last index. That
-        index is the last response token only when the row is not
-        right-padded. ``generate_rollout`` does not pad, and it passes a
-        mask anyway.
+        index is the last response token only when the row has no padding
+        after the response. ``generate_rollout`` passes a mask. Tokens
+        after EOS are padding, and the mask ends on the EOS token.
 
         With ``token_mask`` ``[B, T]`` (1 on response tokens), the return is
         ``[B, T]``: the sequence score at the last 1, and 0 elsewhere. Right

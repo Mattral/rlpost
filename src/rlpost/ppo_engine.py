@@ -685,6 +685,9 @@ class PPOTrainer:
                   this tensor.
                 - "dones": 1 stops the backup after that token, shape
                   ``[B, T]``. The action layout reads ``dones[:, 1:]``.
+                  ``generate_rollout`` sets 1 only on an EOS token. A row
+                  that hit ``max_response_length`` without EOS stays 0, so
+                  the last action bootstraps from ``V``.
                 - "prompt_lengths": Real prompt tokens per row, int64 ``[B]``.
                 - "response_lengths": Real response tokens per row, int64 ``[B]``.
                 - "padding_side": ``"right"`` (default) or ``"mixed"``.

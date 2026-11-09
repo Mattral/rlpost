@@ -226,6 +226,25 @@ class TestAlignmentConfig:
         config.value_clip = None
         assert config.value_clip is None
 
+    def test_missing_eos_penalty_defaults_to_none(self) -> None:
+        """None leaves the sequence reward. A set penalty must be > 0."""
+        config = AlignmentConfig()
+        assert config.missing_eos_penalty is None
+        assert config.value_clip is None
+
+        config = AlignmentConfig(missing_eos_penalty=1.5)
+        assert config.missing_eos_penalty == 1.5
+
+        with pytest.raises(ValueError):
+            AlignmentConfig(missing_eos_penalty=0)
+        with pytest.raises(ValueError):
+            AlignmentConfig(missing_eos_penalty=-0.5)
+        config = AlignmentConfig()
+        with pytest.raises(ValueError):
+            config.missing_eos_penalty = -1.0
+        config.missing_eos_penalty = None
+        assert config.missing_eos_penalty is None
+
     def test_alignment_method_literal(self) -> None:
         """Verify alignment method is restricted to valid values."""
         for method in ["ppo", "dpo"]:
@@ -395,6 +414,7 @@ class TestConfigYAMLLoading:
             assert config.model.policy_model_id == "distilgpt2"
             assert config.dataset.batch_size == 8
             assert config.alignment.kl_estimator == "k2"
+            assert config.alignment.missing_eos_penalty is None
 
     def test_load_default_yaml(self) -> None:
         """Verify default.yaml can be loaded from configs directory."""
@@ -404,6 +424,7 @@ class TestConfigYAMLLoading:
             assert config.model.policy_model_id == "meta-llama/Llama-2-7b"
             assert config.optimization.mixed_precision == "bf16"
             assert config.alignment.kl_estimator == "k2"
+            assert config.alignment.missing_eos_penalty is None
 
 
 class TestConfigConsistency:

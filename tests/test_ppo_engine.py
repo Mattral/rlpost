@@ -473,6 +473,35 @@ class TestTrainStep:
         assert math.isfinite(metrics.explained_variance)
         assert metrics.explained_variance <= 1
 
+    def test_train_step_leaves_the_reference_without_gradients(self) -> None:
+        """Every reference parameter keeps a None grad and the same weights.
+
+        The reference is trainable and sits in the optimizer, so a grad
+        that escaped ``no_grad`` would move a weight. The forward is
+        under ``no_grad``, and the KL detaches ``log p_ref``.
+        """
+        config = TrainingConfig.toy_mode()
+        config.log_to_wandb = False
+        policy = tiny_causal_lm(0)
+        policy.train()
+        value = _TokenValue()
+        reference = tiny_causal_lm(1)
+        reference.train()
+        reference.requires_grad_(True)
+        optimizer = torch.optim.Adam(
+            list(policy.parameters()) + list(value.parameters()) + list(reference.parameters()),
+            lr=1e-2,
+        )
+        trainer = PPOTrainer(config, policy, value, reference, optimizer)
+        before = [p.detach().clone() for p in reference.parameters()]
+        batch, old_log_probs = _causal_train_batch(seed=5)
+
+        trainer.train_step(batch, old_log_probs)
+
+        assert all(p.grad is None for p in reference.parameters())
+        for old, current in zip(before, reference.parameters(), strict=True):
+            assert torch.equal(old, current)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

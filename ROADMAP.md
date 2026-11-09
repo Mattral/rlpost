@@ -853,12 +853,75 @@ Cover:
     The README now says that. CODE_MAP and the notes above were already
     current. No code change.
 
-### [ ] S0.7b EOS, truncation, and the reference gradient
+### [x] S0.7b EOS, truncation, and the reference gradient
 - Depends on: S0.7.
 - EOS and truncation in the response mask.
 - A test that `train_step` leaves the reference parameters with no
   gradient. The forward is already under `torch.no_grad`.
 - Notes:
+  - Branch `test/S0.7b-eos-truncation` from origin/main `81e5d0f`
+    (merge of PR #26). PR #25's merge `3d2928a` is an ancestor.
+    Code commit `efb2c75`. The new rollout and config tests failed on
+    `81e5d0f`: `RolloutGenerator` took no `eos_token_id`, and
+    `AlignmentConfig` had no `missing_eos_penalty`. The reference-grad
+    test already passed there. The forward was already under `no_grad`.
+  - `generate_rollout` returns a `RolloutBatch` in the mixed layout.
+    Queries are already left-padded. `prompt_width` is
+    `query_tokens.shape[1]`, not `max(prompt_lengths)`. The fixture
+    uses width 4 and prompt lengths `[2, 3]`. Rebuilding the mask
+    with width 3 does not match the batch mask. Index 3 stays 0.
+  - Each row stops at its own EOS. That token counts in
+    `response_lengths` and in the mask. Later columns are
+    `pad_token_id` and the mask is 0 there. Plan `[8, EOS, 9]` becomes
+    response `[8, EOS]`. Token 9 is absent. The other row is `[8, 8, 8]`.
+    Lengths are `[2, 3]`. `dones` on the EOS row is 1 at column 5 and
+    0 elsewhere. The truncated row is 0 on every column.
+  - GAE is unchanged. The generator sets `dones`. An early EOS has
+    padding after it, so the next action is already masked. `done=1`
+    still matters when EOS lands on the final column, because the mask
+    cannot tell that row from a truncated row of the same length.
+  - Horizon case. Both responses have length 3. Row 0 ends on EOS.
+    Row 1 does not. gamma is 0.5, lambda is 0, rewards are 0, and `V`
+    at the last column is 4. The last action is index `T - 2`. The
+    truncated advantage is `0.5 * 4 = 2`. The EOS advantage is 0.
+    Forcing done on the truncated row drops 2 to 0.
+  - The sequence score sits on the last real response token. The
+    per-token score is the column index. The EOS row is 5.0 at column
+    5 and 0 on the pad at column 6. The truncated row is 6.0 at column
+    6. One nonzero reward per row. The time mean of columns 0..6 is 3.
+    Neither score is 3.
+  - `missing_eos_penalty` defaults to `None`. A set value must be
+    `> 0`. `0` and a negative value raise, including assignment.
+    Assigning `None` back is allowed. The generator also rejects a
+    bool and `<= 0`. The penalty is subtracted once, inside
+    `generate_rollout`, from rows that never emitted EOS, before
+    `place_sequence_reward`. `train_step` does not apply it again.
+    Penalty 1.5 leaves the EOS row at 5.0 and makes the truncated
+    row 4.5. `configs/toy.yaml` and `configs/default.yaml` set the
+    field null, beside `value_clip`. `PPOTrainer` does not read it.
+  - TRL 1.17.1 equivalent, read from the installed package.
+    `trl/experimental/online_dpo/online_dpo_config.py` defines
+    `OnlineDPOConfig.missing_eos_penalty: float | None = None`.
+    `trl/experimental/online_dpo/online_dpo_trainer.py` does
+    `rewards[~contain_eos_token] -= self.args.missing_eos_penalty`
+    when the field is set, once, on the sequence score, before the
+    loss. `__post_init__` does not check the sign. The docstring says
+    the penalty must be positive. This field rejects a non-positive
+    value. GRPO and RLOO `mask_truncated_completions` drop a truncated
+    completion from the loss. That is a different mechanism. TRL
+    1.17.1 has no PPO trainer and no GAE helper.
+  - `test_train_step_leaves_the_reference_without_gradients` builds
+    `tiny_causal_lm`, sets `log_to_wandb` false, calls
+    `requires_grad_(True)` on the reference, and puts those parameters
+    in Adam at `lr=1e-2`. After `train_step` every reference `.grad`
+    is `None` and the weights equal the clones taken before the step.
+    `per_token_kl` detaches `logp_ref`. PyTorch 2.15
+    `Optimizer.zero_grad` defaults to `set_to_none=True`, so a
+    parameter the backward never touched stays `None`.
+  - Pytest on this branch, `.venv`, torch 2.15.0+cpu: 163 passed,
+    18.11s. Ruff check and ruff format check pass. The new tests are
+    the four rollout cases, the config field, and the reference
+    gradient. The two YAML loads also assert the field is `None`.
 
 ### [ ] S0.8 Determinism and resumable checkpoints
 - Seeding gives identical losses on CPU for 2 runs.
@@ -1188,3 +1251,4 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-11-06 · S0.7 · Action-layout values (`value_out[:, :-1]`) and the mixed `[pad | prompt | response | pad]` mask. The value at the sampled token was an action-dependent baseline. 154 passed. · 5806e22
 - 2026-11-09 · S0.7 · GAE is recomputed from the rollout values and held fixed across epochs. Returns are A + V_old. The live head is the value prediction. Mixed layout takes the padded query width, not max(prompt_lengths). 157 passed. · 3e163eb
 - 2026-11-09 · S0.7 · Merged as 3d2928a. README no longer says GAE and the value loss use the [B, T] mask. They use the gathered mask, and GAE reads V_old. · 12c81ff
+- 2026-11-09 · S0.7b · Each row stops at its own EOS. A truncated row stays non-terminal, so GAE bootstraps from V. missing_eos_penalty matches the TRL 1.17.1 Online DPO subtraction and rejects a non-positive value. Reference grads stay None. 163 passed. · efb2c75
