@@ -420,6 +420,7 @@ def _causal_train_batch(seed: int = 0) -> tuple[dict[str, torch.Tensor], torch.T
         "prompt_lengths": torch.zeros(batch_size, dtype=torch.long),
         "response_lengths": torch.full((batch_size,), seq_len, dtype=torch.long),
         "padding_side": "right",
+        "temperature": 1.0,
     }
     return batch, old_log_probs
 

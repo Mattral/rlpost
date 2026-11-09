@@ -188,6 +188,7 @@ def _batch(
         "prompt_lengths": PROMPT,
         "response_lengths": RESPONSE,
         "padding_side": padding_side,
+        "temperature": 1.0,
     }
     if padding_side == "mixed":
         batch["prompt_width"] = MIXED_WIDTH
@@ -268,6 +269,7 @@ def test_mixed_response_starts_at_the_padded_query_width() -> None:
         "response_lengths": responses,
         "padding_side": "mixed",
         "prompt_width": width,
+        "temperature": 1.0,
     }
     base = _run(policy_logits, ref_logits, zeros, batch, old_log_probs)
 
@@ -540,6 +542,7 @@ def test_action_advantage_does_not_see_its_own_token() -> None:
             "prompt_lengths": prompt,
             "response_lengths": response,
             "padding_side": "right",
+            "temperature": 1.0,
         }
         trainer.train_step(batch, torch.zeros(2, seq_len - 1))
         return seen["advantages"]
@@ -612,6 +615,7 @@ def test_advantages_and_returns_stay_fixed_across_epochs() -> None:
         "prompt_lengths": prompt,
         "response_lengths": response,
         "padding_side": "right",
+        "temperature": 1.0,
     }
     old_log_probs = torch.zeros(1, seq_len - 1)
     trainer.train_step(batch, old_log_probs)

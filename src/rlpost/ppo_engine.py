@@ -73,11 +73,13 @@ and the value model each receive that attention mask and
 ``position_ids = clamp(cumsum(mask) - 1, min=0)``. A pad is not a token
 they can read. A real token keeps the position it has with the pads removed.
 
-``AlignmentConfig.temperature`` divides the policy and reference logits
-before the log-prob gather and before the entropy. Sampling divides by
-the same temperature. Old log-probs are already log-probabilities of
-that scaled distribution. At the first step, before the weights move,
-the ratio is 1 when those old log-probs used this temperature.
+``AlignmentConfig.temperature`` is the only temperature. Sampling reads
+that field. ``generate_rollout`` records the number it used.
+``train_step`` divides the policy and reference logits by the trainer's
+field before the log-prob gather and before the entropy, and raises
+when the recorded rollout temperature is a different number. Old
+log-probs are already log-probabilities of that scaled distribution.
+At the first step, before the weights move, the ratio is 1.
 
 The KL term is added to the loss and differentiated with the sampled
 token held fixed. ``gather_logprobs`` supplies ``log p`` at those tokens,
@@ -127,6 +129,16 @@ from rlpost.config import (
 from rlpost.ops import gather_logprobs, padding_attention, response_token_mask
 
 logger = logging.getLogger(__name__)
+
+
+def _recorded_temperature(value: object) -> float:
+    """Temperature stored on a rollout. A bool is not a temperature."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(
+            "batch['temperature'] must be the real number AlignmentConfig.temperature "
+            f"the rollout sampled with, got {type(value).__name__}"
+        )
+    return float(value)
 
 
 def masked_mean(values: Tensor, mask: Tensor | None = None) -> Tensor:
@@ -682,8 +694,10 @@ class PPOTrainer:
         reference, and the value model are called with that
         ``attention_mask`` and with ``position_ids``. Log-probs and the
         entropy use ``logits / temperature``. ``temperature`` is
-        ``AlignmentConfig.temperature``, the scale sampling divides by.
-        ``old_log_probs`` are already log-probabilities. They are not
+        ``AlignmentConfig.temperature``. Sampling reads that same field.
+        ``batch["temperature"]`` is the number the rollout sampled with.
+        A different number raises. ``old_log_probs`` are already
+        log-probabilities of ``logits / temperature``. They are not
         divided again.
 
         Args:
@@ -713,12 +727,27 @@ class PPOTrainer:
                 - "prompt_width": Padded query width. Required when
                   ``padding_side`` is ``"mixed"``. Not
                   ``max(prompt_lengths)``. Ignored for ``"right"``.
+                - "temperature": The ``AlignmentConfig.temperature`` the
+                  rollout sampled with. Must equal this trainer's field.
             old_log_probs: Log-probs of tokens ``1 .. T-1`` under the old policy,
                 shape ``[B, T - 1]``, matching ``gather_logprobs``.
 
         Returns:
             metrics: PPOMetrics container with all training metrics
         """
+        if "temperature" not in batch:
+            raise KeyError(
+                "batch needs temperature, the AlignmentConfig.temperature the rollout sampled with"
+            )
+        recorded = _recorded_temperature(batch["temperature"])
+        temperature = self.alignment_config.temperature
+        if recorded != temperature:
+            raise ValueError(
+                f"rollout sampled at temperature {recorded}, and "
+                f"AlignmentConfig.temperature is {temperature}. "
+                "Sampling and the train-step log-prob gather use that one field."
+            )
+
         # Extract batch data
         input_ids = batch["input_ids"].to(self.device)
         rewards = batch["rewards"].to(self.device)
@@ -750,9 +779,6 @@ class PPOTrainer:
             padding_side,
             prompt_width=batch.get("prompt_width"),
         )
-        # Sampling divides by this. The gather has to use the same scale.
-        temperature = self.alignment_config.temperature
-
         # Forward passes (should not compute gradients for reference model)
         with torch.no_grad():
             # Reference log-probs of the sampled tokens. The shift matches

@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 
+from rlpost.config import AlignmentConfig
 from rlpost.ops import padding_attention, response_token_mask
 
 
@@ -49,6 +50,10 @@ class RolloutBatch:
     ``response_token_mask(..., "mixed", prompt_width=prompt_width)``.
     ``rollouts`` is the per-row view: ``response_tokens`` is the real
     response, EOS included, padding omitted.
+
+    ``temperature`` is the ``AlignmentConfig.temperature`` this call
+    sampled with. ``PPOTrainer.train_step`` raises when its config
+    field is a different number. There is no second temperature.
     """
 
     rollouts: list[Rollout]
@@ -60,6 +65,7 @@ class RolloutBatch:
     dones: torch.Tensor
     rewards: torch.Tensor
     token_mask: torch.Tensor
+    temperature: float
 
 
 def last_response_index(token_mask: torch.Tensor) -> torch.Tensor:
@@ -114,8 +120,8 @@ class RolloutGenerator:
         reference_model: torch.nn.Module,
         reward_model: torch.nn.Module,
         tokenizer,
+        alignment_config: AlignmentConfig,
         max_response_length: int = 128,
-        temperature: float = 1.0,
         top_p: float = 0.9,
         eos_token_id: int | None = None,
         pad_token_id: int | None = None,
@@ -124,9 +130,13 @@ class RolloutGenerator:
         self.policy_model = policy_model
         self.reference_model = reference_model
         self.reward_model = reward_model
+        if not isinstance(alignment_config, AlignmentConfig):
+            raise TypeError(
+                f"alignment_config must be AlignmentConfig, got {type(alignment_config)}"
+            )
+        self.alignment_config = alignment_config
         self.tokenizer = tokenizer
         self.max_response_length = max_response_length
-        self.temperature = temperature
         self.top_p = top_p
         if eos_token_id is None and tokenizer is not None:
             eos_token_id = getattr(tokenizer, "eos_token_id", None)
@@ -150,6 +160,11 @@ class RolloutGenerator:
         self.pad_token_id = pad_token_id
         # Same number as AlignmentConfig.missing_eos_penalty. None is off.
         self.missing_eos_penalty = missing_eos_penalty
+
+    @property
+    def temperature(self) -> float:
+        """Sampling temperature. This is ``AlignmentConfig.temperature``."""
+        return self.alignment_config.temperature
 
     @torch.no_grad()
     def generate_rollout(
@@ -180,7 +195,15 @@ class RolloutGenerator:
         Each policy, reference, and reward forward receives
         ``padding_attention`` for the tokens written so far. A finished
         row's later columns are padding and are 0 in that mask.
+
+        Sampling divides logits by ``alignment_config.temperature``,
+        read once at the start of this call and stored on the returned
+        batch. ``train_step`` gathers log-probs at that same number and
+        raises when its config field differs. ``top_p`` only filters
+        the tokens that can be drawn. It does not change the stored
+        logits or the train-time log-probs.
         """
+        temperature = self.alignment_config.temperature
         if query_tokens.ndim != 2:
             raise ValueError(
                 f"query_tokens must be [B, prompt_width], got {tuple(query_tokens.shape)}"
@@ -232,7 +255,7 @@ class RolloutGenerator:
             ref_steps.append(ref_logits)
             sampled = self._sample_token(
                 policy_logits,
-                temperature=self.temperature,
+                temperature=temperature,
                 top_p=self.top_p,
             ).squeeze(1)
             token = torch.where(finished, torch.full_like(sampled, pad_id), sampled)
@@ -304,6 +327,7 @@ class RolloutGenerator:
             dones=dones.detach().cpu(),
             rewards=rewards.detach().cpu(),
             token_mask=token_mask.detach().cpu(),
+            temperature=temperature,
         )
 
     @staticmethod
@@ -385,12 +409,12 @@ class RolloutGenerator:
     ) -> torch.Tensor:
         """Sample the next token. Returns ids of shape ``[batch, 1]``.
 
-        The distribution is ``softmax(logits / temperature)``. This
-        ``temperature`` is the generator argument.
-        ``AlignmentConfig.temperature`` is what ``train_step`` divides by
-        before the log-prob gather. Pass the same number to both. Old
-        log-probs stored for the step are ``log_softmax(logits / temperature)``
-        of the sampled token, not the raw logits.
+        The distribution is ``softmax(logits / temperature)``.
+        ``temperature`` is ``AlignmentConfig.temperature``, read by
+        ``generate_rollout``. When ``top_p < 1``, tokens past the
+        nucleus are dropped before the draw. The stored logits stay
+        the raw model outputs. Train-time log-probs are the full
+        ``log_softmax(logits / temperature)``, not the nucleus.
         """
         scaled_logits = logits / temperature
         if top_p < 1.0:

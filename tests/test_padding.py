@@ -5,19 +5,21 @@ or right padding. The comparison uses ``torch.testing.assert_close`` at
 the default tolerance for the dtype. The batch is the mixed layout:
 left pad, prompt, response, right pad. The model is ``tiny_causal_lm``.
 
-Sampling divides logits by a temperature. ``train_step`` has to gather
-log-probs from those same scaled logits, or the first-step ratio is not 1
-when the temperature is not 1.
+Sampling and ``train_step`` both read ``AlignmentConfig.temperature``.
+The rollout records that number. A train step whose config disagrees
+raises. Log-probs are gathered from ``logits / temperature``, so the
+first-step ratio is 1 when the temperature is not 1.
 """
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 from tests.tiny_lm import tiny_causal_lm
 from torch import nn
 
 from rlpost.alignment.rollout import RolloutGenerator
-from rlpost.config import TrainingConfig
+from rlpost.config import AlignmentConfig, TrainingConfig
 from rlpost.ops import gather_logprobs, padding_attention
 from rlpost.ppo_engine import PPOTrainer
 
@@ -177,6 +179,7 @@ def test_mixed_batch_logits_match_the_unpadded_row() -> None:
         "response_lengths": response_lengths,
         "padding_side": "mixed",
         "prompt_width": prompt_width,
+        "temperature": 1.0,
     }
     # The step updates the policy. Snapshot the unpadded logits on the
     # weights the forward inside train_step still has.
@@ -232,8 +235,8 @@ def test_rollout_logits_match_the_unpadded_row() -> None:
         reference_model=reference,
         reward_model=reward,
         tokenizer=None,
+        alignment_config=AlignmentConfig(),
         max_response_length=int(plan.shape[1]),
-        temperature=1.0,
         top_p=1.0,
         eos_token_id=EOS,
         pad_token_id=0,
@@ -308,6 +311,7 @@ def test_ratio_is_one_at_the_first_step_when_temperature_is_not_one() -> None:
         "prompt_lengths": torch.zeros(batch_size, dtype=torch.long),
         "response_lengths": torch.full((batch_size,), seq_len, dtype=torch.long),
         "padding_side": "right",
+        "temperature": temperature,
     }
     seen: dict[str, torch.Tensor] = {}
     original = trainer.compute_policy_loss
@@ -327,3 +331,64 @@ def test_ratio_is_one_at_the_first_step_when_temperature_is_not_one() -> None:
 
     ratio = seen["ratio"]
     assert torch.equal(ratio, torch.ones_like(ratio))
+
+
+def test_rollout_sampled_at_another_temperature_cannot_train() -> None:
+    """The generator has no temperature of its own. A 0.7 rollout cannot train at 1.0.
+
+    ``RolloutGenerator`` reads ``AlignmentConfig.temperature`` and records
+    it on the batch. Passing ``temperature=`` to the generator is not a
+    parameter. ``train_step`` on a config whose field is 1.0 raises.
+    """
+    policy = tiny_causal_lm(0).eval()
+    reference = tiny_causal_lm(1).eval()
+    reward = tiny_causal_lm(2).eval()
+    sample_config = AlignmentConfig(temperature=0.7)
+    with pytest.raises(TypeError, match="temperature"):
+        RolloutGenerator(
+            policy_model=policy,
+            reference_model=reference,
+            reward_model=reward,
+            tokenizer=None,
+            alignment_config=sample_config,
+            temperature=0.7,
+        )
+
+    generator = RolloutGenerator(
+        policy_model=policy,
+        reference_model=reference,
+        reward_model=reward,
+        tokenizer=None,
+        alignment_config=sample_config,
+        max_response_length=2,
+        top_p=1.0,
+        eos_token_id=EOS,
+        pad_token_id=0,
+    )
+    assert generator.temperature == 0.7
+    generated = generator.generate_rollout(torch.randint(0, 128, (2, 4)))
+    assert generated.temperature == 0.7
+
+    config = TrainingConfig.toy_mode()
+    config.log_to_wandb = False
+    assert config.alignment.temperature == 1.0
+    value = _ZeroValue()
+    optimizer = torch.optim.Adam(
+        list(policy.parameters()) + list(value.parameters()),
+        lr=1e-3,
+    )
+    trainer = PPOTrainer(config, policy, value, reference, optimizer)
+    rows, length = generated.input_ids.shape
+    batch = {
+        "input_ids": generated.input_ids,
+        "rewards": generated.rewards,
+        "values": torch.zeros(rows, length),
+        "dones": generated.dones,
+        "prompt_lengths": generated.prompt_lengths,
+        "response_lengths": generated.response_lengths,
+        "padding_side": generated.padding_side,
+        "prompt_width": generated.prompt_width,
+        "temperature": generated.temperature,
+    }
+    with pytest.raises(ValueError, match="0.7"):
+        trainer.train_step(batch, torch.zeros(rows, length - 1))

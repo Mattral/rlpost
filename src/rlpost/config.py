@@ -263,7 +263,7 @@ class AlignmentConfig(BaseConfig):
         value_loss_coefficient: Weight of value function loss.
         value_clip: Clip radius for the value loss. None keeps the half square error.
         missing_eos_penalty: Subtracted from a truncated sequence reward. None is off.
-        temperature: Divides logits before sampling and before the PPO log-prob gather.
+        temperature: The only sampling and PPO log-prob temperature.
         advantage_normalization: Normalize advantages to zero-mean, unit-variance.
     """
 
@@ -367,12 +367,12 @@ class AlignmentConfig(BaseConfig):
         default=1.0,
         gt=0.0,
         description=(
-            "Temperature for sampling and for the PPO log-prob gather. "
-            "Sampling divides logits by this before softmax. train_step divides "
-            "policy and reference logits by the same value before gather_logprobs "
-            "and before the entropy, so the first-step ratio is 1 when the weights "
-            "have not moved and the old log-probs used this temperature. "
-            "Must be > 0. This is not dpo_beta."
+            "The only temperature. RolloutGenerator reads this field and records "
+            "it on the rollout. It has no temperature argument. train_step divides "
+            "policy and reference logits by its own copy of this field before "
+            "gather_logprobs and before the entropy, and raises when the recorded "
+            "rollout temperature differs. The first-step ratio is 1 when the weights "
+            "have not moved. Must be > 0. This is not dpo_beta."
         ),
     )
     advantage_normalization: bool = Field(

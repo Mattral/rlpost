@@ -20,6 +20,7 @@ import torch.nn as nn
 from rlpost.alignment.rollout import (
     RolloutGenerator,
 )
+from rlpost.config import AlignmentConfig
 from rlpost.ops import response_token_mask
 from rlpost.ppo_engine import GeneralizedAdvantageEstimation
 
@@ -70,8 +71,8 @@ def test_rollout_generator_creates_valid_rollouts():
         reference_model=reference_model,
         reward_model=reward_model,
         tokenizer=tokenizer,
+        alignment_config=AlignmentConfig(),
         max_response_length=3,
-        temperature=1.0,
         top_p=0.9,
     )
 
@@ -111,8 +112,8 @@ def test_rank3_reward_is_the_last_token_not_the_time_mean():
         reference_model=DummyCausalLM(vocab_size=16),
         reward_model=Rank3Reward(),
         tokenizer=None,
+        alignment_config=AlignmentConfig(),
         max_response_length=3,
-        temperature=1.0,
         top_p=1.0,
     )
     query = torch.randint(low=0, high=16, size=(2, 4))
@@ -191,8 +192,8 @@ def _generate(
         reference_model=ZeroLM(),
         reward_model=IndexReward(),
         tokenizer=None,
+        alignment_config=AlignmentConfig(),
         max_response_length=int(plan.shape[1]),
-        temperature=1.0,
         top_p=1.0,
         eos_token_id=EOS,
         pad_token_id=PAD,
