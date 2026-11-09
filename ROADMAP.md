@@ -1187,4 +1187,4 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-11-06 · S0.7 · One response-token mask in the gather layout, masked means in the PPO losses and in GAE, advantage stats over response tokens only. The sequence reward sits on the last response token. Config rejects k1. 151 passed. · 28dcdfb
 - 2026-11-06 · S0.7 · Action-layout values (`value_out[:, :-1]`) and the mixed `[pad | prompt | response | pad]` mask. The value at the sampled token was an action-dependent baseline. 154 passed. · 5806e22
 - 2026-11-09 · S0.7 · GAE is recomputed from the rollout values and held fixed across epochs. Returns are A + V_old. The live head is the value prediction. Mixed layout takes the padded query width, not max(prompt_lengths). 157 passed. · 3e163eb
-- 2026-11-09 · S0.7 · Merged as 3d2928a. README no longer says GAE and the value loss use the [B, T] mask. They use the gathered mask, and GAE reads V_old. · 3d2928a
+- 2026-11-09 · S0.7 · Merged as 3d2928a. README no longer says GAE and the value loss use the [B, T] mask. They use the gathered mask, and GAE reads V_old. · 12c81ff
