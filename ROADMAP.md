@@ -923,6 +923,79 @@ Cover:
     the four rollout cases, the config field, and the reference
     gradient. The two YAML loads also assert the field is `None`.
 
+### [x] S0.7c Hide padding from the models
+- Depends on: S0.7b.
+- Pass `attention_mask` and `position_ids` into every PPO forward.
+- `train_step` log-probs use `logits / temperature`, the sampling temperature.
+- Delete `RolloutBuffer` and `RolloutCollator`.
+- Notes:
+  - Branch `test/S0.7c-hide-padding` from origin/main `f05be3c`
+    (merge of PR #27). Code commit `16b07d0`.
+  - On `f05be3c`, before this change,
+    `test_mixed_batch_logits_match_the_unpadded_row` and
+    `test_rollout_logits_match_the_unpadded_row` failed.
+    `torch.testing.assert_close` uses the float32 default
+    (rtol 1.3e-6, atol 1e-5). A row inside a mixed batch disagreed
+    with the same tokens run alone. The greatest absolute difference
+    on the train-step policy was about 0.19. The ratio test could not
+    set `AlignmentConfig.temperature`. The field did not exist.
+  - `padding_attention` in `ops.py` takes the same arguments as
+    `response_token_mask`. The attention mask is int64 0/1. Prompt
+    tokens and response tokens are 1. Left and right padding are 0.
+    This is not the loss mask. A prompt token is visible to the model
+    and is still 0 in `gathered_mask`.
+    `position_ids = clamp(cumsum(attention_mask) - 1, min=0)`. A left
+    pad is 0. The first real token is 0. Each later real token counts
+    up by one, which is the position it would have with the pads
+    removed. A right pad repeats the last real position, and the mask
+    stops the model from reading it. `"mixed"` needs `prompt_width`.
+    `"right"` does not read it. An all-pad row is position 0 on every
+    column.
+  - Those tensors go to every forward in the PPO path.
+    `generate_rollout` passes them to the policy, the reference, and
+    the reward model. `train_step` passes them to the policy, the
+    reference, and the value model. The rollout rebuilds them each
+    step from the real response length so far, so a pad written after
+    EOS is 0.
+  - The check uses `tiny_causal_lm`. A row's logits on its real
+    columns match that row run with the pads removed, at the default
+    `assert_close` tolerance. The train-step batch has width 5 and
+    length 9. Row 0 is `[pad, pad, 4, 5, 6, 7, 8, pad, pad]`. Row 1
+    has one pad on each side. The solo logits are snapshotted before
+    the optimizer step, because the step moves the policy. The rollout
+    check scripts the tokens. One row ends on EOS, so the reward
+    forward sees a right pad, and both queries are left-padded.
+    Policy, reference, and reward are checked. After the mask, a
+    direct forward of this tiny Llama on the train-step fixture has a
+    max absolute gap of about 9e-8 against the unpadded row.
+  - `AlignmentConfig.temperature` defaults to 1.0 and must be `> 0`.
+    It is not `dpo_beta`. `train_step` divides policy and reference
+    logits by it before `gather_logprobs` and before the entropy.
+    `old_log_probs` are already log-probabilities of that scaled
+    distribution. They are not divided again.
+    `RolloutGenerator._sample_token` divides by the generator's
+    `temperature` argument. That is the same number when the caller
+    passes one value to both. The generator does not read the config
+    field. Nothing in the trainers constructs the generator.
+    `configs/toy.yaml` and `configs/default.yaml` set the field to 1.0.
+    Dividing by 1 is bitwise identical to the raw logits on this
+    torch, so the default does not move the existing losses.
+  - `test_ratio_is_one_at_the_first_step_when_temperature_is_not_one`
+    sets temperature 0.5, gathers the old log-probs from
+    `logits / 0.5` on the current policy, and reads the ratio inside
+    the first `train_step`. The weights have not moved.
+    `torch.equal` against a tensor of ones passes.
+  - Deleted `RolloutBuffer` and `RolloutCollator`. Nothing called
+    them. The collator zero-padded logits and put no mask in the
+    batch, so a later forward would have treated the pad as tokens.
+    `sample_batch` draws a random subset. That is not the rollout
+    whose advantages `train_step` holds fixed. Removed tests:
+    `test_rollout_buffer_sample_and_clear` and
+    `test_rollout_collator_padding`.
+  - Pytest on this branch, `.venv`, torch 2.15.0+cpu: 166 passed,
+    17.31s. Ruff check and ruff format check pass. The 163 passed
+    line under S0.7b is the count on `f05be3c`.
+
 ### [ ] S0.8 Determinism and resumable checkpoints
 - Seeding gives identical losses on CPU for 2 runs.
 - Kill and resume reproduces the uninterrupted run's step-N metrics (within tolerance).
@@ -970,6 +1043,18 @@ Cover:
     `weight_decay or 0.01`, `warmup_ratio or 0.1`, and
     `gradient_accumulation_steps or 1`. `weight_decay` and `warmup_ratio`
     allow 0, and those `or` expressions replace a legal 0.
+  - 2026-11-09, S0.7c. Not done here.
+    `generate_rollout` stores `logits_policy` and `logits_reference`
+    of shape `[R, V]` on each row. Stacked over the batch, that is
+    `[B, R, V]`. The PPO step only needs the gathered per-token
+    log-prob of the sampled token,
+    `log_softmax(logits / temperature)` at that index. Store that
+    instead of the full vocabulary tensor.
+  - The sampler calls the policy and the reference on the whole
+    prefix at every new token. There is no KV cache.
+  - `RolloutGenerator` raises when `pad_token_id == eos_token_id`.
+    A tokenizer that uses one id for both cannot be sampled. The CLI
+    has to pass two different ids.
 
 ### [x] S0.9 Delete the orphaned distributed scaffolding
 - Branch: `chore/S0.9-delete-distributed`.
@@ -1164,6 +1249,10 @@ Write `benchmarks/PREREG.md` **before** any GPU run. It fixes:
 - Notes:
   - DPO `train_step` is one pair, shape `[1, T]`. Batched collation is an
     S0.11 note. It has to land before this harness.
+  - Rollouts store full `[B, R, V]` policy and reference logits, and
+    generation has no KV cache. `pad_token_id == eos_token_id` raises
+    in `RolloutGenerator`. Those three are on the S0.11 note. They
+    land before this harness measures generation time and memory.
 
 ### [ ] S1.3 Evaluation module
 - Held-out reward scoring, a length-controlled win-rate judge, and KL and length statistics.
@@ -1252,3 +1341,4 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-11-09 · S0.7 · GAE is recomputed from the rollout values and held fixed across epochs. Returns are A + V_old. The live head is the value prediction. Mixed layout takes the padded query width, not max(prompt_lengths). 157 passed. · 3e163eb
 - 2026-11-09 · S0.7 · Merged as 3d2928a. README no longer says GAE and the value loss use the [B, T] mask. They use the gathered mask, and GAE reads V_old. · 12c81ff
 - 2026-11-09 · S0.7b · Each row stops at its own EOS. A truncated row stays non-terminal, so GAE bootstraps from V. missing_eos_penalty matches the TRL 1.17.1 Online DPO subtraction and rejects a non-positive value. Reference grads stay None. 163 passed. · efb2c75
+- 2026-11-09 · S0.7c · PPO forwards take an attention mask and position ids, so padding does not move real-token logits. train_step gathers log-probs from logits / temperature. RolloutBuffer and RolloutCollator are deleted. 166 passed. · 16b07d0

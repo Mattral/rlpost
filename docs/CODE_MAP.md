@@ -140,7 +140,7 @@ loss   = value_loss_coefficient * L_v
 policy_loss + value_loss - entropy_coefficient * entropy + kl_coefficient * kl
 ```
 
-`train_step` calls `gather_logprobs` on the policy logits and, under `no_grad`, on the reference logits. Logits at `t` score token `t+1`. Each result is `[B, T-1]`. `old_log_probs` must have that shape. The value head is shifted the same way: `value_out[:, t]` is the critic after it has read token `t` and before it has read token `t+1`. The value loss trains that live prediction. GAE does not read it. Whitening runs on the action layout, not on `[B, T]` followed by `advantages[:, 1:]`.
+`train_step` calls `gather_logprobs` on the policy logits and, under `no_grad`, on the reference logits. Both logits are divided by `AlignmentConfig.temperature` first (default 1, must be `> 0`, not `dpo_beta`). The entropy uses that same scaled policy tensor. Logits at `t` score token `t+1`. Each result is `[B, T-1]`. `old_log_probs` must have that shape and must already be log-probabilities of `logits / temperature`. They are not divided again. The policy, the reference, and the value model also receive `padding_attention` from those same lengths: 1 on prompt and response, 0 on padding, and `position_ids = clamp(cumsum(mask) - 1, min=0)`. The value head is shifted the same way: `value_out[:, t]` is the critic after it has read token `t` and before it has read token `t+1`. The value loss trains that live prediction. GAE does not read it. Whitening runs on the action layout, not on `[B, T]` followed by `advantages[:, 1:]`.
 
 Advantages and returns stay fixed for the epochs on one rollout. `train_step` recomputes GAE from `batch["values"]` on every call, instead of storing advantages on the rollout. The tensor is `V_old`. The critic's step does not change it, so two calls on the same batch return the same advantages and the same returns. The recursion stays in `GeneralizedAdvantageEstimation.compute`. The rollout does not emit advantages.
 
@@ -162,7 +162,7 @@ The value at the sampled token is the wrong baseline for the action that emitted
 
 Status: GAE, the clipped surrogate, both value losses, entropy against the TRL helper, the k1/k2/k3 estimators (k3 matched to TRL 1.17.1 GRPO on identical log-probabilities), explained variance, the adaptive coefficient, and `train_step` on a tiny causal LM are tested. See [S0.4](../ROADMAP.md#s04-code-ownership-pass), [S0.6](../ROADMAP.md#s06-numerical-parity-tests-core-correctness), and [S0.7](../ROADMAP.md#s07-classic-rlhf-edge-case-tests).
 
-Tests: `tests/test_ppo_engine.py`, `tests/test_ppo_loss.py`, `tests/test_gae.py`, `tests/test_logprob_gather.py`, `tests/test_kl.py`, and `tests/test_response_mask.py`.
+Tests: `tests/test_ppo_engine.py`, `tests/test_ppo_loss.py`, `tests/test_gae.py`, `tests/test_logprob_gather.py`, `tests/test_kl.py`, `tests/test_response_mask.py`, and `tests/test_padding.py`.
 
 ## `src/rlpost/cli.py`
 
@@ -188,15 +188,13 @@ Status: untested as an import. The rollout pieces below are what the tests impor
 
 `generate_rollout` returns a `RolloutBatch`. `rollouts` is that per-row view.
 
-`RolloutBuffer.add` detaches tensors to CPU. It calls `pin_memory` only when `torch.cuda.is_available()`. `sample_batch` returns a Python list of up to `batch_size` rollouts. `clear` empties the list. Capacity overwrites the oldest slot.
+`RolloutBuffer` and `RolloutCollator` were removed in [S0.7c](../ROADMAP.md#s07c-hide-padding-from-the-models). Nothing called them. The collator zero-padded logits and returned no mask. A random replay is not the rollout whose advantages `train_step` holds fixed.
 
-`RolloutCollator` pads queries to the longest query in the batch and responses to `max_response_length`. Outputs: `query_tokens` `[B, max_query]` long, `response_tokens` `[B, max_response]` long, `logits_policy` and `logits_reference` `[B, max_response, V]`, `rewards` `[B]` if each reward is a scalar, `query_lengths` `[B]`, `response_lengths` `[B]`. Short rows are zero-padded. There is no padding mask in the dict. Lengths are returned so a caller could build one. No caller does.
-
-`RolloutGenerator.generate_rollout(query_tokens [B, prompt_width], prompt_lengths=None)` samples up to `max_response_length` tokens. `query_tokens` is already left-padded. The last column is the last real prompt token, which is what `logits[:, -1]` reads. `prompt_lengths` defaults to `prompt_width` on every row. Each step reads `policy_out.logits[:, -1, :]` and the same slice from the reference, shape `[B, V]`, and appends a token of shape `[B, 1]`. `_sample_token` divides by `temperature` and, when `top_p < 1`, drops tokens whose sorted cumulative probability is already above `top_p`, always keeping the top token.
+`RolloutGenerator.generate_rollout(query_tokens [B, prompt_width], prompt_lengths=None)` samples up to `max_response_length` tokens. `query_tokens` is already left-padded. The last column is the last real prompt token, which is what `logits[:, -1]` reads. `prompt_lengths` defaults to `prompt_width` on every row. Each step builds `padding_attention` from the real response length so far and passes that `attention_mask` and `position_ids` to the policy and the reference, then reads `logits[:, -1, :]`, shape `[B, V]`, and appends a token of shape `[B, 1]`. `_sample_token` divides by the generator's `temperature` argument and, when `top_p < 1`, drops tokens whose sorted cumulative probability is already above `top_p`, always keeping the top token. That argument is not `AlignmentConfig.temperature`. Pass the same number to both. The stored row is still the raw logits, shape `[R, V]`, not the tempered log-prob.
 
 Each row stops when it samples `eos_token_id`. That token counts in `response_lengths` and in the mask. Later columns of that row are `pad_token_id`. A row with no EOS id, or that never samples it, runs to `max_response_length` and is truncated. `eos_token_id` comes from the argument, else `tokenizer.eos_token_id`, else `None` (never stop). `pad_token_id` comes from the argument, else the tokenizer, else `0`. Equal pad and EOS ids raise.
 
-`RolloutBatch.input_ids` is `[B, prompt_width + max_response_length]`: `[pad | prompt | response | pad]`, `padding_side` `"mixed"`. `prompt_width` is `query_tokens.shape[1]`, not `max(prompt_lengths)`. `dones` is `[B, T]`, 1 only on the EOS token of a row that emitted one, and 0 everywhere on a truncated row, including its last token. `rewards` is `[B, T]`: the sequence score on the last real response token, and 0 elsewhere. `token_mask` is `response_token_mask(..., "mixed", prompt_width=prompt_width)`. The reward model runs once on the padded `input_ids`. The sequence score is the value at the last 1 of that mask. `missing_eos_penalty`, when set, is subtracted from rows that did not emit EOS, then `place_sequence_reward` writes the score. `None` skips the subtraction. `train_step` does not apply the penalty again. The generator also rejects a bool or a non-positive penalty. Stored tensors are on CPU.
+`RolloutBatch.input_ids` is `[B, prompt_width + max_response_length]`: `[pad | prompt | response | pad]`, `padding_side` `"mixed"`. `prompt_width` is `query_tokens.shape[1]`, not `max(prompt_lengths)`. `dones` is `[B, T]`, 1 only on the EOS token of a row that emitted one, and 0 everywhere on a truncated row, including its last token. `rewards` is `[B, T]`: the sequence score on the last real response token, and 0 elsewhere. `token_mask` is `response_token_mask(..., "mixed", prompt_width=prompt_width)`. The reward model runs once on the padded `input_ids`, with the same `padding_attention` as the sampler. The sequence score is the value at the last 1 of that mask. `missing_eos_penalty`, when set, is subtracted from rows that did not emit EOS, then `place_sequence_reward` writes the score. `None` skips the subtraction. `train_step` does not apply the penalty again. The generator also rejects a bool or a non-positive penalty. Stored tensors are on CPU.
 
 `_decode_reward(reward_out, token_mask=None)`:
 
@@ -206,9 +204,9 @@ Each row stops when it samples `eos_token_id`. That token counts in `response_le
 - With `token_mask` `[B, T]`, the return is `[B, T]`: the score at the last 1, and 0 elsewhere. Right padding and the mixed layout both use that index. `train_step` then reads it at index `last - 1`.
 - Without `token_mask`, the return is the score `[B]`. Per-token scores then use the last index, which is the last response token only when the row is not right-padded.
 
-Status: buffer, collator, generator, EOS stop, truncation, the penalty, and the reward index are tested on CPU with stand-in modules. See [S0.9](../ROADMAP.md#s09-delete-the-orphaned-distributed-scaffolding) for the CPU pin fix, [S0.7](../ROADMAP.md#s07-classic-rlhf-edge-case-tests) for the reward position, and [S0.7b](../ROADMAP.md#s07b-eos-truncation-and-the-reference-gradient) for EOS and truncation.
+Status: generator, EOS stop, truncation, the penalty, the reward index, and padding-invariant logits are tested on CPU. See [S0.9](../ROADMAP.md#s09-delete-the-orphaned-distributed-scaffolding) for the old CPU pin fix, [S0.7](../ROADMAP.md#s07-classic-rlhf-edge-case-tests) for the reward position, [S0.7b](../ROADMAP.md#s07b-eos-truncation-and-the-reference-gradient) for EOS and truncation, and [S0.7c](../ROADMAP.md#s07c-hide-padding-from-the-models) for the attention mask.
 
-Tests: `tests/test_rollout.py` (8 tests, passing).
+Tests: `tests/test_rollout.py` (6 tests, passing) and `tests/test_padding.py`.
 
 ## `src/rlpost/utils/telemetry.py`
 

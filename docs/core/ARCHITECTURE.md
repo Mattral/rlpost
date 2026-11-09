@@ -6,7 +6,7 @@ This note is not a measured result. The module-by-module map, with tensor shapes
 
 What the remaining code does:
 
-- `rollout.py` keeps generated tokens in a CPU list and can sample a response from a module that returns `.logits`. The background generator-thread class was removed in S0.4.
+- `rollout.py` samples a response from a module that returns `.logits` and returns one `RolloutBatch`. The background generator-thread class was removed in S0.4. The CPU rollout buffer and the collator were removed in S0.7c.
 - `utils/telemetry.py` can log a JSON event. Nothing in `tests/` constructs it.
 
 An older draft of this page claimed a 40% GPU-memory reduction. That number was not a measurement. It is gone.
@@ -25,7 +25,6 @@ train.py
 
 The modules that still exist:
   ├─ rlpost.alignment.rollout
-  │   ├─ RolloutBuffer (CPU list, pin only if CUDA exists)
   │   └─ RolloutGenerator (autoregressive sampling)
   │
   ├─ rlpost.ppo_engine
@@ -42,6 +41,6 @@ The modules that still exist:
 | `train.py` | Exits 2. Does not call `PPOTrainer` |
 | `scripts/README.md` | Note for this directory |
 | `ROADMAP.md` | Work status, notes, and change log |
-| `src/rlpost/alignment/rollout.py` | CPU rollout buffer and token sampler |
+| `src/rlpost/alignment/rollout.py` | Token sampler for one rollout batch |
 | `src/rlpost/ppo_engine.py` | `PPOTrainer`, the only PPO update |
 | `src/rlpost/utils/telemetry.py` | JSON logging. No test calls it |
