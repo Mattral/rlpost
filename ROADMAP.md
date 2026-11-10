@@ -1504,4 +1504,4 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-11-09 · S0.7c · Sampling and train_step share AlignmentConfig.temperature. A rollout recorded at another temperature raises. top_p stays a sampling filter; train log-probs stay the full softmax. 167 passed. · 64331c2
 - 2026-11-09 · S0.8 · One seed at startup, an atomic checkpoint, and exact CPU resume for PPO and DPO. 186 passed. · da877b8
 - 2026-11-09 · S0.8 · The toy loop lives in the tests. The checkpoint loads with weights_only=True. 187 passed. · d10cd09
-- 2026-11-10 · S0.11 · Split into S0.11a–d. DPO collation and run-dpo are S0.11a. PPO gathered log-probs and run-ppo are S0.11b. SFT, the reward model, accelerate, and the LoRA fields are S0.11c. Silent fallbacks and the dataloader generator are S0.11d. · —
+- 2026-11-10 · S0.11 · Split into S0.11a–d. DPO collation and run-dpo are S0.11a. PPO gathered log-probs and run-ppo are S0.11b. SFT, the reward model, accelerate, and the LoRA fields are S0.11c. Silent fallbacks and the dataloader generator are S0.11d. · 463e2f3
