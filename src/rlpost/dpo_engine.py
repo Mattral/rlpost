@@ -8,6 +8,7 @@ This module provides:
 """
 
 import logging
+from collections.abc import Mapping, Sequence
 from typing import Tuple
 
 import torch
@@ -62,6 +63,182 @@ def completion_token_mask(
     positions = torch.arange(attention_mask.shape[-1], device=attention_mask.device)
     prompt = prompt_lengths.to(device=attention_mask.device).unsqueeze(1)
     return ((positions >= prompt) & attention_mask.bool()).to(dtype=attention_mask.dtype)
+
+
+def _as_rows(value: object, name: str) -> list[str]:
+    """One string is one row. A list or tuple of strings is a batch."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple)) and all(isinstance(item, str) for item in value):
+        if len(value) == 0:
+            raise ValueError(f"{name} is empty")
+        return list(value)
+    raise TypeError(f"{name} must be a string or a sequence of strings")
+
+
+def _pad_token_id(tokenizer: object) -> int:
+    """Read ``pad_token_id``. A missing id is an error, not a default of 0."""
+    pad = getattr(tokenizer, "pad_token_id", None)
+    if isinstance(pad, bool) or not isinstance(pad, int):
+        raise TypeError("tokenizer.pad_token_id must be an int")
+    return pad
+
+
+def _token_ids(tokenizer: object, text: str, max_length: int) -> list[int]:
+    """Token ids for ``text``, truncated to ``max_length``.
+
+    The tokenizer is called without ``return_tensors``. A tensor or a
+    batched list is flattened to one row.
+    """
+    if max_length < 1:
+        raise ValueError(f"max_length must be >= 1, got {max_length}")
+    if not callable(tokenizer):
+        raise TypeError("tokenizer must be callable")
+    encoded = tokenizer(
+        text,
+        truncation=True,
+        max_length=max_length,
+        add_special_tokens=True,
+    )
+    if not isinstance(encoded, Mapping) or "input_ids" not in encoded:
+        raise TypeError("tokenizer must return a mapping with input_ids")
+    ids = encoded["input_ids"]
+    if isinstance(ids, torch.Tensor):
+        flat = ids.detach().cpu().reshape(-1).tolist()
+    elif isinstance(ids, (list, tuple)) and ids and isinstance(ids[0], (list, tuple)):
+        flat = list(ids[0])
+    elif isinstance(ids, (list, tuple)):
+        flat = list(ids)
+    else:
+        raise TypeError("input_ids must be a list or a tensor")
+    if any(isinstance(token, bool) or not isinstance(token, int) for token in flat):
+        raise TypeError("input_ids must be ints")
+    return [int(token) for token in flat[:max_length]]
+
+
+def collate_completions(
+    tokenizer: object,
+    prompts: Sequence[str],
+    responses: Sequence[str],
+    *,
+    max_length: int,
+    pad_token_id: int,
+) -> dict[str, torch.Tensor]:
+    """Right-pad one prompt and response per row.
+
+    Each row is ``prompt + response``, truncated to ``max_length``. The
+    prompt length is the shared prefix of the prompt ids and that row.
+    Rows are then padded on the right to the longest row in the batch.
+    The completion mask is 0 on the prompt prefix and on padding.
+
+    Left padding is not implemented. A left pad is not part of the prompt
+    prefix, so this mask would mark the wrong tokens.
+
+    Args:
+        tokenizer: Callable returning ``input_ids``. Must not left-pad.
+        prompts: One prompt string per row.
+        responses: One response string per row. Same length as ``prompts``.
+        max_length: Truncation length for each row.
+        pad_token_id: Written into the padded columns.
+
+    Returns:
+        ``input_ids`` ``[B, T]``, ``attention_mask`` ``[B, T]``,
+        ``completion_mask`` ``[B, T]``, and ``prompt_lengths`` ``[B]``.
+        ``T`` is the longest row after truncation.
+    """
+    if len(prompts) != len(responses):
+        raise ValueError(
+            "prompts and responses must have the same length, "
+            f"got {len(prompts)} and {len(responses)}"
+        )
+    if len(prompts) == 0:
+        raise ValueError("prompts is empty")
+    rows: list[list[int]] = []
+    prompt_lengths: list[int] = []
+    for prompt, response in zip(prompts, responses, strict=True):
+        prompt_ids = _token_ids(tokenizer, prompt, max_length)
+        full_ids = _token_ids(tokenizer, prompt + response, max_length)
+        if not full_ids:
+            raise ValueError("a row has no tokens")
+        rows.append(full_ids)
+        prompt_lengths.append(prompt_prefix_length(prompt_ids, full_ids))
+    width = max(len(row) for row in rows)
+    batch = len(rows)
+    input_ids = torch.full((batch, width), pad_token_id, dtype=torch.long)
+    attention = torch.zeros(batch, width, dtype=torch.long)
+    for index, row in enumerate(rows):
+        length = len(row)
+        input_ids[index, :length] = torch.tensor(row, dtype=torch.long)
+        attention[index, :length] = 1
+    lengths = torch.tensor(prompt_lengths, dtype=torch.long)
+    completion = completion_token_mask(attention, lengths)
+    return {
+        "input_ids": input_ids,
+        "attention_mask": attention,
+        "completion_mask": completion,
+        "prompt_lengths": lengths,
+    }
+
+
+def collate_preference_pairs(
+    tokenizer: object,
+    prompts: Sequence[str],
+    chosen: Sequence[str],
+    rejected: Sequence[str],
+    *,
+    max_length: int,
+    pad_token_id: int,
+) -> dict[str, torch.Tensor]:
+    """Right-pad a batch of preference pairs.
+
+    Chosen and rejected are padded separately, so the two sides can have
+    different widths. Each row keeps its own prompt length. The prompt
+    text is the same string on both sides. The prefix length can still
+    differ when tokenization merges across the boundary.
+
+    Args:
+        tokenizer: Callable returning ``input_ids``.
+        prompts: One prompt per pair.
+        chosen: Chosen response per pair.
+        rejected: Rejected response per pair.
+        max_length: Truncation length for each row.
+        pad_token_id: Written into the padded columns.
+
+    Returns:
+        Chosen and rejected ``input_ids``, ``attention_mask``,
+        ``completion_mask``, each ``[B, T]`` with that side's ``T``, and
+        ``prompt_lengths`` ``[B]`` for each side.
+    """
+    count = len(prompts)
+    if not (count == len(chosen) == len(rejected)):
+        raise ValueError(
+            "prompt, chosen, and rejected must have the same length, "
+            f"got {count}, {len(chosen)}, {len(rejected)}"
+        )
+    chosen_side = collate_completions(
+        tokenizer,
+        prompts,
+        chosen,
+        max_length=max_length,
+        pad_token_id=pad_token_id,
+    )
+    rejected_side = collate_completions(
+        tokenizer,
+        prompts,
+        rejected,
+        max_length=max_length,
+        pad_token_id=pad_token_id,
+    )
+    return {
+        "chosen_ids": chosen_side["input_ids"],
+        "chosen_attention_mask": chosen_side["attention_mask"],
+        "chosen_completion_mask": chosen_side["completion_mask"],
+        "chosen_prompt_lengths": chosen_side["prompt_lengths"],
+        "rejected_ids": rejected_side["input_ids"],
+        "rejected_attention_mask": rejected_side["attention_mask"],
+        "rejected_completion_mask": rejected_side["completion_mask"],
+        "rejected_prompt_lengths": rejected_side["prompt_lengths"],
+    }
 
 
 class DPOMetrics:
@@ -200,9 +377,10 @@ class DPOTrainer:
 
         The prompt is tokenized on its own and as a prefix of ``prompt + response``.
         The completion mask is 0 on that shared prefix and on padding, and 1 on
-        the remaining tokens. Right padding is assumed: a left-padded prompt is
-        not a prefix, and this mask would then be wrong. Batched left padding
-        stays with the S0.11 collation note.
+        the remaining tokens. One row is padded only up to its own length, so
+        a single short pair has no pad columns. ``collate_completions`` is the
+        implementation. It right-pads. A left-padded prompt is not a prefix,
+        and this mask would then be wrong.
 
         Args:
             prompt: Prompt text.
@@ -214,30 +392,14 @@ class DPOTrainer:
         """
         if self.tokenizer is None:
             raise RuntimeError("train_step requires a tokenizer.")
-        max_length = self.config.dataset.max_seq_length
-        prompt_ids = self.tokenizer(
-            prompt,
-            truncation=True,
-            max_length=max_length,
-            add_special_tokens=True,
-        )["input_ids"]
-        tokens = self.tokenizer(
-            prompt + response,
-            max_length=max_length,
-            truncation=True,
-            padding="max_length",
-            return_tensors="pt",
-            add_special_tokens=True,
+        collated = collate_completions(
+            self.tokenizer,
+            [prompt],
+            [response],
+            max_length=self.config.dataset.max_seq_length,
+            pad_token_id=_pad_token_id(self.tokenizer),
         )
-        input_ids = tokens["input_ids"]
-        attention_mask = tokens["attention_mask"]
-        valid = int(attention_mask[0].sum().item())
-        prompt_len = prompt_prefix_length(list(prompt_ids), input_ids[0, :valid].tolist())
-        completion_mask = completion_token_mask(
-            attention_mask,
-            torch.tensor([prompt_len], dtype=torch.long),
-        )
-        return input_ids, attention_mask, completion_mask
+        return collated["input_ids"], collated["attention_mask"], collated["completion_mask"]
 
     def compute_dpo_loss(
         self,
@@ -336,31 +498,45 @@ class DPOTrainer:
         return (token_log_probs * shift_completion).sum(dim=1)
 
     def train_step(self, batch: dict) -> DPOMetrics:
-        """Single DPO training step on one prompt and two response strings.
+        """One DPO update on one pair or a batch of pairs.
 
-        Tokenizes ``prompt``, ``chosen``, and ``rejected``, then calls
-        ``train_token_step``. Right padding is assumed.
+        ``prompt``, ``chosen``, and ``rejected`` are each a string or a
+        sequence of strings. A string is a batch of one. The three sequences
+        must have the same length. ``collate_preference_pairs`` right-pads
+        each side, then ``train_token_step`` runs the update.
 
         Args:
-            batch: Dictionary with keys ``prompt``, ``chosen``, and ``rejected``.
+            batch: Keys ``prompt``, ``chosen``, and ``rejected``.
 
         Returns:
-            DPOMetrics for this step.
+            DPOMetrics for this step. ``accuracy`` is the mean over the batch,
+            so a batch of more than one pair can land strictly between 0 and 1.
         """
-        prompt = batch["prompt"]
-        chosen_input_ids, chosen_attn, chosen_completion = self._tokenize_for_loss(
-            prompt, batch["chosen"]
-        )
-        rejected_input_ids, rejected_attn, rejected_completion = self._tokenize_for_loss(
-            prompt, batch["rejected"]
+        if self.tokenizer is None:
+            raise RuntimeError("train_step requires a tokenizer.")
+        prompts = _as_rows(batch["prompt"], "prompt")
+        chosen = _as_rows(batch["chosen"], "chosen")
+        rejected = _as_rows(batch["rejected"], "rejected")
+        if not (len(prompts) == len(chosen) == len(rejected)):
+            raise ValueError(
+                "prompt, chosen, and rejected must have the same length, "
+                f"got {len(prompts)}, {len(chosen)}, {len(rejected)}"
+            )
+        collated = collate_preference_pairs(
+            self.tokenizer,
+            prompts,
+            chosen,
+            rejected,
+            max_length=self.config.dataset.max_seq_length,
+            pad_token_id=_pad_token_id(self.tokenizer),
         )
         return self.train_token_step(
-            chosen_input_ids,
-            chosen_attn,
-            chosen_completion,
-            rejected_input_ids,
-            rejected_attn,
-            rejected_completion,
+            collated["chosen_ids"],
+            collated["chosen_attention_mask"],
+            collated["chosen_completion_mask"],
+            collated["rejected_ids"],
+            collated["rejected_attention_mask"],
+            collated["rejected_completion_mask"],
         )
 
     def train_token_step(

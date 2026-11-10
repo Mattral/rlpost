@@ -1106,8 +1106,9 @@ Cover:
   neither has a CPU end-to-end test.
 - The notes that were on this item now sit on the sub-item that owns them.
 
-### [ ] S0.11a DPO batched collation and `run-dpo`
+### [~] S0.11a DPO batched collation and `run-dpo`
 - Depends on: S0.8.
+- Branch: `feat/S0.11a-dpo-batch`.
 - Batched collation with a prompt length and a completion mask on each row.
 - Re-run the S0.6b TRL parity test on a batch of 4 with unequal lengths.
 - `run-dpo` trains end to end on tiny_lm on CPU. It calls `seed_everything`

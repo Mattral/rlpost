@@ -20,9 +20,10 @@ labels by one. ``_compute_loss`` then sums the row when ``ld_alpha`` is
 
 The parity tests run seeds 0 through 5. The policy is ``tiny_causal_lm(seed)``,
 the reference is ``tiny_causal_lm(seed + 10)``, and the token batch uses that
-same seed. Each seed runs twice: the same masks on both sides, and a batch
-where chosen and rejected have different completion lengths and different
-padding. Those four masks are separate arguments on both sides.
+same seed. Each seed runs three times: the same masks on both sides, a batch
+of 2 where chosen and rejected have different completion lengths and different
+padding, and a batch of 4 with a different prompt length and completion
+length on every row. Those masks are separate arguments on both sides.
 
 fp32 absolute tolerance on the loss, the margin, and the rewards is 1e-6.
 TRL logs the batch mean of those sums (``logps/chosen``, ``logps/rejected``).
@@ -52,6 +53,7 @@ from rlpost.config import TrainingConfig
 from rlpost.dpo_engine import (
     DPOMetrics,
     DPOTrainer,
+    collate_preference_pairs,
     completion_token_mask,
     prompt_prefix_length,
 )
@@ -535,6 +537,58 @@ def _unequal_batch(seed: int) -> dict[str, torch.Tensor]:
     }
 
 
+def _fill_side(
+    seed: int,
+    specs: list[tuple[int, int]],
+    width: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Token ids, attention, and completion for one side.
+
+    ``specs`` is ``(prompt_length, completion_length)`` per row. The tail
+    past ``prompt + completion`` is padding. Ids on the pad are 0.
+    """
+    torch.manual_seed(seed)
+    batch = len(specs)
+    ids = torch.randint(1, VOCAB, (batch, width))
+    attention = torch.zeros(batch, width, dtype=torch.long)
+    completion = torch.zeros(batch, width, dtype=torch.long)
+    for index, (prompt, length) in enumerate(specs):
+        if prompt + length > width:
+            raise ValueError(f"row {index} does not fit in width {width}")
+        attention[index, : prompt + length] = 1
+        completion[index, prompt : prompt + length] = 1
+    return ids * attention, attention, completion
+
+
+def _unequal_batch_of_4(seed: int) -> dict[str, torch.Tensor]:
+    """Four rows. Prompt lengths and completion lengths differ on each side.
+
+    Width 10. Chosen prompt lengths are 2, 4, 1, 3. Completion lengths are
+    6, 2, 5, 7, so the last chosen row has no pad. Rejected prompt lengths
+    are 3, 1, 5, 2. Completion lengths are 4, 9, 3, 5, so the second
+    rejected row has no pad. The two sides are not the same mask.
+    """
+    width = 10
+    chosen, chosen_attention, chosen_completion = _fill_side(
+        seed,
+        [(2, 6), (4, 2), (1, 5), (3, 7)],
+        width,
+    )
+    rejected, rejected_attention, rejected_completion = _fill_side(
+        seed + 1,
+        [(3, 4), (1, 9), (5, 3), (2, 5)],
+        width,
+    )
+    return {
+        "chosen_ids": chosen,
+        "rejected_ids": rejected,
+        "chosen_attention_mask": chosen_attention,
+        "rejected_attention_mask": rejected_attention,
+        "chosen_completion_mask": chosen_completion,
+        "rejected_completion_mask": rejected_completion,
+    }
+
+
 def _preference_batch(layout: str, seed: int) -> dict[str, torch.Tensor]:
     """One pair batch. Masks are per side, even when the values match."""
     if layout == "matched":
@@ -551,6 +605,8 @@ def _preference_batch(layout: str, seed: int) -> dict[str, torch.Tensor]:
         }
     if layout == "unequal":
         return _unequal_batch(seed)
+    if layout == "unequal4":
+        return _unequal_batch_of_4(seed)
     raise ValueError(f"unknown layout {layout}")
 
 
@@ -562,6 +618,21 @@ def _assert_sides_differ(batch: dict[str, torch.Tensor]) -> None:
         batch["chosen_completion_mask"].sum(dim=1),
         batch["rejected_completion_mask"].sum(dim=1),
     )
+
+
+def _prompt_lengths(completion: torch.Tensor) -> list[int]:
+    """Columns before the first completion token. That is the prompt prefix."""
+    lengths = []
+    for row in completion:
+        ones = (row == 1).nonzero(as_tuple=False)
+        lengths.append(int(ones[0]) if len(ones) else int(row.shape[0]))
+    return lengths
+
+
+def _assert_prompt_lengths_differ(completion: torch.Tensor) -> None:
+    """Per-row prompt lengths are not one shared width."""
+    lengths = _prompt_lengths(completion)
+    assert len(set(lengths)) > 1
 
 
 def _side_logprobs(
@@ -586,7 +657,13 @@ def _side_logprobs(
 
 
 class _CharTokenizer:
-    """Maps each character to an id. Prompt text is a prefix of prompt+response."""
+    """Maps each character to an id. Prompt text is a prefix of prompt+response.
+
+    ``pad_token_id`` is 0. Character ids start at 1, so a pad is not a letter.
+    This tokenizer does not pad. ``collate_completions`` right-pads.
+    """
+
+    pad_token_id = 0
 
     def __call__(
         self,
@@ -597,18 +674,9 @@ class _CharTokenizer:
         return_tensors: str | None = None,
         add_special_tokens: bool = True,
     ) -> dict:
-        del truncation, add_special_tokens
-        ids = [min(ord(ch), 120) for ch in text][:max_length]
-        if return_tensors != "pt":
-            return {"input_ids": ids}
-        length = len(ids)
-        pad = max_length - length
-        attn = [1] * length + [0] * pad
-        ids = ids + [0] * pad
-        return {
-            "input_ids": torch.tensor([ids], dtype=torch.long),
-            "attention_mask": torch.tensor([attn], dtype=torch.long),
-        }
+        del truncation, padding, return_tensors, add_special_tokens
+        ids = [max(min(ord(ch), 120), 1) for ch in text][:max_length]
+        return {"input_ids": ids}
 
 
 class TestCompletionLogProb:
@@ -652,9 +720,9 @@ class TestCompletionLogProb:
         )
         input_ids, attention_mask, completion_mask = trainer._tokenize_for_loss("ab", "cd")
 
-        assert input_ids.shape == (1, 8)
-        assert int(attention_mask.sum()) == 4
-        assert completion_mask.tolist() == [[0, 0, 1, 1, 0, 0, 0, 0]]
+        assert input_ids.shape == (1, 4)
+        assert attention_mask.tolist() == [[1, 1, 1, 1]]
+        assert completion_mask.tolist() == [[0, 0, 1, 1]]
         # Counting the prompt would mark the first two real tokens as well.
         assert completion_mask.tolist() != attention_mask.tolist()
 
@@ -665,6 +733,129 @@ class TestCompletionLogProb:
             torch.tensor([2]),
         )
         assert mask.tolist() == [[0, 0, 1, 1, 0]]
+
+    def test_batch_of_four_right_pads_each_row(self):
+        """Unequal strings pad on the right. Each row has its own prompt length."""
+        tokenizer = _CharTokenizer()
+        prompts = ["ab", "xyz", "Q", "hello"]
+        chosen = ["cd", "q", "one two", "yes"]
+        rejected = ["e", "a much longer answer", "n", "nope"]
+        collated = collate_preference_pairs(
+            tokenizer,
+            prompts,
+            chosen,
+            rejected,
+            max_length=32,
+            pad_token_id=tokenizer.pad_token_id,
+        )
+
+        assert collated["chosen_ids"].shape[0] == 4
+        assert collated["rejected_ids"].shape[0] == 4
+        assert collated["chosen_ids"].shape[1] != collated["rejected_ids"].shape[1]
+        for side in ("chosen", "rejected"):
+            ids = collated[f"{side}_ids"]
+            attention = collated[f"{side}_attention_mask"]
+            completion = collated[f"{side}_completion_mask"]
+            lengths = collated[f"{side}_prompt_lengths"]
+            assert torch.equal(completion, completion_token_mask(attention, lengths))
+            assert int(attention[:, 0].sum()) == 4
+            for row in range(4):
+                valid = int(attention[row].sum())
+                assert torch.equal(attention[row, :valid], torch.ones(valid, dtype=torch.long))
+                assert int(attention[row, valid:].sum()) == 0
+                assert int(ids[row, valid:].sum()) == 0
+                assert int(completion[row, : int(lengths[row])].sum()) == 0
+                assert int(completion[row, valid:].sum()) == 0
+                assert int(completion[row].sum()) > 0
+        assert len(set(int(v) for v in collated["chosen_prompt_lengths"])) > 1
+        assert len(set(int(v) for v in collated["rejected_prompt_lengths"])) > 1
+
+    def test_train_step_runs_a_batch_of_four(self):
+        """The string path trains four unequal pairs. The reference gets no gradient."""
+        config = TrainingConfig.toy_mode()
+        config.log_to_wandb = False
+        config.dataset.max_seq_length = 32
+        config.optimization.learning_rate = 1e-2
+        policy = tiny_causal_lm(0)
+        reference = tiny_causal_lm(1)
+        reference_before = [parameter.detach().clone() for parameter in reference.parameters()]
+        trainer = DPOTrainer(
+            config,
+            policy_model=policy,
+            reference_model=reference,
+            tokenizer=_CharTokenizer(),
+        )
+        metrics = trainer.train_step(
+            {
+                "prompt": ["ab", "xyz", "Q", "hello"],
+                "chosen": ["cd", "q", "one two", "yes"],
+                "rejected": ["e", "a much longer answer", "n", "nope"],
+            }
+        )
+
+        assert trainer.step_count == 1
+        assert metrics.accuracy in {0.0, 0.25, 0.5, 0.75, 1.0}
+        assert all(
+            torch.equal(before, parameter)
+            for before, parameter in zip(reference_before, reference.parameters(), strict=True)
+        )
+        assert all(parameter.grad is None for parameter in reference.parameters())
+
+    def test_padded_row_matches_the_row_alone(self):
+        """Right padding does not change the short row's completion log-prob."""
+        config = TrainingConfig.toy_mode()
+        config.log_to_wandb = False
+        config.dataset.max_seq_length = 32
+        trainer = DPOTrainer(
+            config,
+            policy_model=tiny_causal_lm(0),
+            reference_model=tiny_causal_lm(1),
+            tokenizer=_CharTokenizer(),
+        )
+        prompts = ["ab", "xyz"]
+        chosen = ["cd", "a much longer chosen answer"]
+        collated = collate_preference_pairs(
+            trainer.tokenizer,
+            prompts,
+            chosen,
+            ["n", "z"],
+            max_length=32,
+            pad_token_id=0,
+        )
+        batched = trainer.compute_log_probs(
+            trainer.policy_model,
+            collated["chosen_ids"],
+            collated["chosen_attention_mask"],
+            collated["chosen_completion_mask"],
+        )
+        short = collate_preference_pairs(
+            trainer.tokenizer,
+            prompts[:1],
+            chosen[:1],
+            ["n"],
+            max_length=32,
+            pad_token_id=0,
+        )
+        alone = trainer.compute_log_probs(
+            trainer.policy_model,
+            short["chosen_ids"],
+            short["chosen_attention_mask"],
+            short["chosen_completion_mask"],
+        )
+        assert collated["chosen_ids"].shape[1] > short["chosen_ids"].shape[1]
+        assert torch.allclose(batched[:1], alone, atol=FP32_ATOL, rtol=0)
+
+    def test_mismatched_pair_lengths_raise(self):
+        tokenizer = _CharTokenizer()
+        with pytest.raises(ValueError, match="same length"):
+            collate_preference_pairs(
+                tokenizer,
+                ["ab", "cd"],
+                ["x"],
+                ["y", "z"],
+                max_length=8,
+                pad_token_id=0,
+            )
 
 
 def _trl_sigmoid_loss(
@@ -742,14 +933,18 @@ class TestDPOParity:
 
         assert trl.__version__ == "1.17.1"
 
-    @pytest.mark.parametrize("layout", ["matched", "unequal"])
+    @pytest.mark.parametrize("layout", ["matched", "unequal", "unequal4"])
     @pytest.mark.parametrize("seed", range(6))
     def test_loss_rewards_margin_match_trl(self, seed: int, layout: str) -> None:
         beta = 0.2
         trainer = _trainer(policy_seed=seed, reference_seed=seed + 10, beta=beta)
         batch = _preference_batch(layout, seed)
-        if layout == "unequal":
+        if layout in {"unequal", "unequal4"}:
             _assert_sides_differ(batch)
+        if layout == "unequal4":
+            assert batch["chosen_ids"].shape == (4, 10)
+            _assert_prompt_lengths_differ(batch["chosen_completion_mask"])
+            _assert_prompt_lengths_differ(batch["rejected_completion_mask"])
         policy = trainer.policy_model
         reference = trainer.reference_model
         policy.train()
@@ -784,14 +979,16 @@ class TestDPOParity:
             logged["rewards/rejected"], abs=FP32_ATOL
         )
 
-    @pytest.mark.parametrize("layout", ["matched", "unequal"])
+    @pytest.mark.parametrize("layout", ["matched", "unequal", "unequal4"])
     @pytest.mark.parametrize("seed", range(6))
     def test_policy_gradients_match_trl(self, seed: int, layout: str) -> None:
         """Backward both losses from the same weights. Reference grads stay None."""
         beta = 0.2
         batch = _preference_batch(layout, seed)
-        if layout == "unequal":
+        if layout in {"unequal", "unequal4"}:
             _assert_sides_differ(batch)
+        if layout == "unequal4":
+            assert batch["chosen_ids"].shape[0] == 4
 
         policy = tiny_causal_lm(seed)
         policy_trl = tiny_causal_lm(seed)
