@@ -1,7 +1,7 @@
 """Same seed, same CPU losses. Resume in a fresh process matches the full run.
 
 PPO and DPO each train tiny_lm for N steps. The batch is drawn from
-Python, NumPy, and torch inside ``run_ppo`` / ``run_dpo``. Losses are
+Python, NumPy, and torch inside ``tests.repro_harness``. Losses are
 compared with ``==``. Weights are compared with ``torch.equal``.
 """
 
@@ -13,12 +13,13 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+from tests.repro_harness import run_dpo, run_ppo
 from tests.tiny_lm import VOCAB, tiny_causal_lm
 
 from rlpost.config import TrainingConfig
 from rlpost.dpo_engine import DPOTrainer
 from rlpost.ppo_engine import PPOTrainer
-from rlpost.repro import run_dpo, run_ppo, seed_everything
+from rlpost.repro import seed_everything
 
 ROOT = Path(__file__).resolve().parents[1]
 N = 2
@@ -123,10 +124,7 @@ def resume_entry(argv: list[str]) -> None:
     with the parent. Arguments: kind, checkpoint, n_steps, output file.
     """
     kind, ckpt, n_steps, out = argv
-    try:
-        payload = torch.load(ckpt, map_location="cpu", weights_only=False)
-    except TypeError:
-        payload = torch.load(ckpt, map_location="cpu")
+    payload = torch.load(ckpt, map_location="cpu", weights_only=True)
     config = TrainingConfig(**payload["config"])
     if kind == "ppo":
         trainer = _build_ppo(config)
@@ -169,10 +167,7 @@ def _resume_in_fresh_process(kind: str, ckpt: Path, n_steps: int, out: Path) -> 
     )
     if proc.returncode != 0:
         raise AssertionError(f"resume process failed\n{proc.stdout}\n{proc.stderr}")
-    try:
-        return torch.load(out, map_location="cpu", weights_only=False)
-    except TypeError:
-        return torch.load(out, map_location="cpu")
+    return torch.load(out, map_location="cpu", weights_only=True)
 
 
 def _assert_run_json(output_path: str, seed: int) -> None:

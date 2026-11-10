@@ -1,21 +1,27 @@
 """Seed a run once, and save or load a checkpoint that can continue it.
 
 ``seed_everything`` seeds Python's ``random``, the global NumPy RNG, and
-torch. When CUDA is present it seeds every CUDA device. A run calls it
-once, at startup, before the first step. A resumed run calls it once and
-then replaces that state with the checkpoint.
+torch. When CUDA is present it seeds every CUDA device. Call it once, at
+startup, before the first step. A resumed run calls it once and then
+replaces that state with the checkpoint.
 
 The checkpoint holds the models, the optimizer, the step counter, those
-RNG states, and the config. The write is a temporary file in the same
-directory and ``os.replace``, so a reader sees the old file or the new
-one. ``checkpoint_path`` is where that file goes. It is not part of the
-config hash: the hash is the run, and the path is only where the file
-sits. A Drive path on Colab or a Volume path on Modal is that string.
-Nothing here mounts either one.
+RNG states, and the config. NumPy's RNG state is a string, a list of ints,
+and Python numbers. Every other non-tensor value is stored as a list, a
+number, a string, or ``None``, so ``torch.load(..., weights_only=True)``
+can read the file. The write is a temporary file in the same directory
+and ``os.replace``, so a reader sees the old file or the new one.
+``checkpoint_path`` is where that file goes. It is not part of the config
+hash: the hash is the run, and the path is only where the file sits. A
+Drive path on Colab or a Volume path on Modal is that string. Nothing
+here mounts either one.
 
 ``trainer_state`` is the trainer state the optimizer does not hold.
 PPO stores ``kl_coefficient`` there. ``adaptive_kl_penalty`` changes it
 after each step, and the next step's loss uses the new value.
+
+This module does not run a training loop. The synthetic PPO and DPO
+steps that check resume on CPU live in the tests.
 """
 
 from __future__ import annotations
@@ -26,7 +32,7 @@ import os
 import random
 import tempfile
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -35,13 +41,8 @@ from torch import nn
 from torch.optim import Optimizer
 
 from rlpost.config import TrainingConfig
-from rlpost.dpo_engine import DPOTrainer
-from rlpost.ops import gather_logprobs, padding_attention
-from rlpost.ppo_engine import PPOTrainer
 
 _HASH_EXCLUDED = ("checkpoint_path",)
-_BATCH = 2
-_LENGTH = 8
 
 
 def seed_everything(seed: int) -> None:
@@ -83,16 +84,42 @@ def config_hash(config: TrainingConfig) -> str:
 
 
 def capture_rng() -> dict:
-    """Python, NumPy, and torch RNG states. CUDA is ``None`` when it is absent."""
+    """Python, NumPy, and torch RNG states. CUDA is ``None`` when it is absent.
+
+    The NumPy state is ``(algorithm, keys, pos, has_gauss, cached_gaussian)``.
+    ``keys`` is a list of ints. The algorithm is a string. The other three
+    fields are Python numbers. Nothing in the result is a NumPy array.
+    """
     cuda = None
     if torch.cuda.is_available():
         cuda = torch.cuda.get_rng_state_all()
+    kind, keys, pos, has_gauss, cached = np.random.get_state()
     return {
         "python": random.getstate(),
-        "numpy": np.random.get_state(),
+        "numpy": (str(kind), keys.tolist(), int(pos), int(has_gauss), float(cached)),
         "torch": torch.get_rng_state(),
         "cuda": cuda,
     }
+
+
+def _numpy_state(plain: object) -> tuple:
+    """Rebuild the tuple ``np.random.set_state`` expects."""
+    if not isinstance(plain, (tuple, list)) or len(plain) != 5:
+        raise TypeError("numpy RNG state must be a 5-item sequence of plain values")
+    kind, keys, pos, has_gauss, cached = plain
+    if not isinstance(kind, str):
+        raise TypeError("numpy RNG algorithm must be a string")
+    if not isinstance(keys, list) or any(
+        isinstance(key, bool) or not isinstance(key, int) for key in keys
+    ):
+        raise TypeError("numpy RNG keys must be a list of ints")
+    if isinstance(pos, bool) or not isinstance(pos, int):
+        raise TypeError("numpy RNG position must be an int")
+    if isinstance(has_gauss, bool) or not isinstance(has_gauss, int):
+        raise TypeError("numpy RNG has_gauss must be an int")
+    if isinstance(cached, bool) or not isinstance(cached, float):
+        raise TypeError("numpy RNG cached gaussian must be a float")
+    return (kind, np.array(keys, dtype=np.uint32), pos, has_gauss, cached)
 
 
 def restore_rng(state: Mapping[str, object]) -> None:
@@ -101,8 +128,11 @@ def restore_rng(state: Mapping[str, object]) -> None:
     A checkpoint saved with CUDA RNG state does not load on a machine
     where CUDA is absent.
     """
-    random.setstate(state["python"])
-    np.random.set_state(state["numpy"])
+    python_state = state["python"]
+    if not isinstance(python_state, tuple):
+        raise TypeError("python RNG state must be a tuple")
+    random.setstate(python_state)
+    np.random.set_state(_numpy_state(state["numpy"]))
     torch_state = state["torch"]
     if not isinstance(torch_state, torch.Tensor):
         raise TypeError("torch RNG state must be a tensor")
@@ -127,6 +157,34 @@ class LoadedCheckpoint:
 
     step: int
     trainer_state: dict[str, float]
+
+
+def _plain_tree(value: object) -> object:
+    """Return ``value`` as tensors and plain Python values.
+
+    A tensor stays a tensor. A NumPy array becomes a nested list. A NumPy
+    scalar becomes a Python scalar. A dict, list, or tuple is walked.
+    Strings, ints, floats, bools, bytes, and ``None`` stay as they are.
+    Anything else raises, so the file cannot hold a type that
+    ``weights_only=True`` would refuse.
+    """
+    if isinstance(value, torch.Tensor):
+        return value
+    if isinstance(value, np.ndarray):
+        return _plain_tree(value.tolist())
+    if isinstance(value, np.generic):
+        return _plain_tree(value.item())
+    if value is None or isinstance(value, (str, bytes, float, bool, int)):
+        return value
+    if isinstance(value, dict):
+        return {_plain_tree(key): _plain_tree(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return tuple(_plain_tree(item) for item in value)
+    if isinstance(value, list):
+        return [_plain_tree(item) for item in value]
+    raise TypeError(
+        f"checkpoint value of type {type(value).__name__} is not a tensor or a plain Python value"
+    )
 
 
 def save_checkpoint(
@@ -154,16 +212,20 @@ def save_checkpoint(
     """
     if isinstance(step, bool) or not isinstance(step, int) or step < 0:
         raise ValueError(f"step must be an int >= 0, got {step!r}")
-    payload = {
-        "seed": config.seed,
-        "step": step,
-        "models": {name: module.state_dict() for name, module in models.items()},
-        "optimizer": optimizer.state_dict(),
-        "rng": capture_rng(),
-        "config": config.model_dump(mode="json"),
-        "config_hash": config_hash(config),
-        "trainer_state": dict(trainer_state or {}),
-    }
+    payload = _plain_tree(
+        {
+            "seed": config.seed,
+            "step": step,
+            "models": {name: module.state_dict() for name, module in models.items()},
+            "optimizer": optimizer.state_dict(),
+            "rng": capture_rng(),
+            "config": config.model_dump(mode="json"),
+            "config_hash": config_hash(config),
+            "trainer_state": dict(trainer_state or {}),
+        }
+    )
+    if not isinstance(payload, dict):
+        raise TypeError("checkpoint payload must be a dict")
     _atomic_torch_save(Path(path), payload)
 
 
@@ -178,7 +240,8 @@ def load_checkpoint(
 
     The hash is checked before any weight is written. A mismatch raises
     ``ValueError`` and leaves ``models`` and ``optimizer`` as they were.
-    ``checkpoint_path`` is not part of the hash.
+    ``checkpoint_path`` is not part of the hash. The file is read with
+    ``weights_only=True``.
 
     Args:
         path: File written by ``save_checkpoint``.
@@ -194,10 +257,7 @@ def load_checkpoint(
     file = Path(path)
     if not file.is_file():
         raise FileNotFoundError(f"checkpoint not found: {file}")
-    try:
-        payload = torch.load(file, map_location="cpu", weights_only=False)
-    except TypeError:
-        payload = torch.load(file, map_location="cpu")
+    payload = torch.load(file, map_location="cpu", weights_only=True)
     expected = config_hash(config)
     stored = payload.get("config_hash")
     if stored != expected:
@@ -224,291 +284,6 @@ def _atomic_torch_save(path: Path, payload: dict) -> None:
     try:
         with os.fdopen(fd, "wb") as handle:
             torch.save(payload, handle)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-    except Exception:
-        tmp.unlink(missing_ok=True)
-        raise
-
-
-@dataclass
-class RunOutput:
-    """What one call of ``run_ppo`` or ``run_dpo`` did.
-
-    Attributes:
-        seed: ``TrainingConfig.seed``. The same value is written to the
-            run JSON at ``output_path``.
-        step: Trainer step after this call. A resumed call continues from
-            the checkpoint, so this is the global step, not ``len(losses)``.
-        losses: One loss per step taken in this call. PPO records
-            ``policy_loss``. DPO records ``dpo_loss``.
-        metrics: One dict per step. PPO is every ``PPOMetrics`` field.
-            DPO is ``DPOMetrics.to_dict()``.
-        output_path: JSON file for this call. It records the seed.
-        checkpoint_path: Checkpoint file written at the end, or None when
-            the config does not set one.
-    """
-
-    seed: int
-    step: int
-    losses: list[float]
-    metrics: list[dict[str, float]]
-    output_path: str
-    checkpoint_path: str | None
-
-
-def run_ppo(
-    trainer: PPOTrainer,
-    n_steps: int,
-    *,
-    resume_from: str | Path | None = None,
-) -> RunOutput:
-    """Run ``n_steps`` PPO updates.
-
-    Seeds once, then draws each batch from Python, NumPy, and torch.
-    The batch is ``[2, 8]``. Prompt length is 0 and the response length
-    is 8, so every token is a response token on the right-padding layout.
-    ``old_log_probs`` are the current policy's ``log_softmax(logits /
-    temperature)`` at the sampled tokens, shape ``[2, 7]``. ``values``
-    are the value model, detached, shape ``[2, 8]``. This is not
-    ``generate_rollout``.
-
-    A resumed call seeds once and then replaces the RNG, the weights,
-    the optimizer, the step, and ``kl_coefficient`` from ``resume_from``.
-
-    Args:
-        trainer: PPO trainer. Policy and value are trained. The reference
-            is stored in the checkpoint and is not stepped.
-        n_steps: Updates to take in this call. At least 1.
-        resume_from: Checkpoint to load before those updates. None starts
-            from the trainer as it was constructed.
-
-    Returns:
-        Losses and metrics for the steps taken in this call.
-    """
-    _check_steps(n_steps)
-    seed_everything(trainer.config.seed)
-    models = {
-        "policy": trainer.policy_model,
-        "value": trainer.value_model,
-        "reference": trainer.reference_model,
-    }
-    if resume_from is not None:
-        loaded = load_checkpoint(
-            resume_from,
-            models=models,
-            optimizer=trainer.optimizer,
-            config=trainer.config,
-        )
-        trainer.global_step = loaded.step
-        if "kl_coefficient" not in loaded.trainer_state:
-            raise KeyError("PPO checkpoint trainer_state is missing kl_coefficient")
-        trainer.kl_coefficient = float(loaded.trainer_state["kl_coefficient"])
-    trainer.policy_model.train()
-    trainer.value_model.train()
-    trainer.reference_model.eval()
-    losses: list[float] = []
-    metrics: list[dict[str, float]] = []
-    for _ in range(n_steps):
-        batch, old_log_probs = _ppo_batch(trainer)
-        step_metrics = trainer.train_step(batch, old_log_probs)
-        losses.append(step_metrics.policy_loss)
-        metrics.append(asdict(step_metrics))
-    return _finish_run(
-        trainer.config,
-        models=models,
-        optimizer=trainer.optimizer,
-        step=trainer.global_step,
-        trainer_state={"kl_coefficient": float(trainer.kl_coefficient)},
-        losses=losses,
-        metrics=metrics,
-    )
-
-
-def run_dpo(
-    trainer: DPOTrainer,
-    n_steps: int,
-    *,
-    resume_from: str | Path | None = None,
-) -> RunOutput:
-    """Run ``n_steps`` DPO updates on token batches.
-
-    Seeds once. Each step draws a prompt length from Python, a token
-    offset from NumPy, and the token ids from torch. Chosen and rejected
-    rows are ``[2, 8]``. The completion mask is 0 on the prompt prefix.
-    ``train_token_step`` sums ``completion_mask[:, 1:]``. This does not
-    tokenize text.
-
-    A resumed call seeds once and then replaces the RNG, the weights,
-    the optimizer, and the step from ``resume_from``.
-
-    Args:
-        trainer: DPO trainer. The policy is trained. The reference is
-            frozen and is still stored in the checkpoint.
-        n_steps: Updates to take in this call. At least 1.
-        resume_from: Checkpoint to load before those updates.
-
-    Returns:
-        Losses and metrics for the steps taken in this call.
-    """
-    _check_steps(n_steps)
-    seed_everything(trainer.config.seed)
-    models = {
-        "policy": trainer.policy_model,
-        "reference": trainer.reference_model,
-    }
-    if resume_from is not None:
-        loaded = load_checkpoint(
-            resume_from,
-            models=models,
-            optimizer=trainer.optimizer,
-            config=trainer.config,
-        )
-        trainer.step_count = loaded.step
-    losses: list[float] = []
-    metrics: list[dict[str, float]] = []
-    for _ in range(n_steps):
-        batch = _dpo_batch(trainer)
-        step_metrics = trainer.train_token_step(*batch)
-        losses.append(step_metrics.dpo_loss)
-        metrics.append(step_metrics.to_dict())
-    return _finish_run(
-        trainer.config,
-        models=models,
-        optimizer=trainer.optimizer,
-        step=trainer.step_count,
-        trainer_state={},
-        losses=losses,
-        metrics=metrics,
-    )
-
-
-def _check_steps(n_steps: int) -> None:
-    if isinstance(n_steps, bool) or not isinstance(n_steps, int) or n_steps < 1:
-        raise ValueError(f"n_steps must be an int >= 1, got {n_steps!r}")
-
-
-def _vocab_size(module: nn.Module) -> int:
-    config = getattr(module, "config", None)
-    vocab = getattr(config, "vocab_size", None)
-    if isinstance(vocab, bool) or not isinstance(vocab, int):
-        raise TypeError("the policy needs config.vocab_size")
-    return vocab
-
-
-def _ppo_batch(trainer: PPOTrainer) -> tuple[dict, torch.Tensor]:
-    """One PPO batch. Python, NumPy, and torch each contribute a draw."""
-    vocab = _vocab_size(trainer.policy_model)
-    shift = random.randrange(0, 5)
-    scale = 0.25 + float(np.random.random())
-    input_ids = torch.randint(0, vocab, (_BATCH, _LENGTH))
-    rewards = torch.randn(_BATCH, _LENGTH) * scale + shift
-    prompt_lengths = torch.zeros(_BATCH, dtype=torch.long)
-    response_lengths = torch.full((_BATCH,), _LENGTH, dtype=torch.long)
-    attention, position_ids = padding_attention(prompt_lengths, response_lengths, _LENGTH, "right")
-    temperature = trainer.alignment_config.temperature
-    with torch.no_grad():
-        policy_out = trainer.policy_model(
-            input_ids=input_ids,
-            attention_mask=attention,
-            position_ids=position_ids,
-        )
-        logits = policy_out.logits if hasattr(policy_out, "logits") else policy_out
-        old_log_probs = gather_logprobs(logits / temperature, input_ids)
-        value_out = trainer.value_model(
-            input_ids=input_ids,
-            attention_mask=attention,
-            position_ids=position_ids,
-        )
-        values = value_out.value if hasattr(value_out, "value") else value_out
-        if values.ndim == input_ids.ndim + 1 and values.shape[-1] == 1:
-            values = values.squeeze(-1)
-    batch = {
-        "input_ids": input_ids,
-        "rewards": rewards,
-        "values": values.detach(),
-        "dones": torch.zeros(_BATCH, _LENGTH),
-        "prompt_lengths": prompt_lengths,
-        "response_lengths": response_lengths,
-        "padding_side": "right",
-        "temperature": temperature,
-    }
-    return batch, old_log_probs.detach()
-
-
-def _dpo_batch(
-    trainer: DPOTrainer,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Chosen and rejected rows. The prompt length comes from Python's RNG."""
-    vocab = _vocab_size(trainer.policy_model)
-    prompt_len = random.randrange(1, _LENGTH - 1)
-    offset = int(np.random.randint(0, 7))
-    chosen = (torch.randint(0, vocab, (_BATCH, _LENGTH)) + offset) % vocab
-    rejected = torch.randint(0, vocab, (_BATCH, _LENGTH))
-    attention = torch.ones(_BATCH, _LENGTH, dtype=torch.long)
-    prompt_lengths = torch.full((_BATCH,), prompt_len, dtype=torch.long)
-    positions = torch.arange(_LENGTH).unsqueeze(0)
-    completion = (positions >= prompt_lengths.unsqueeze(1)).to(dtype=torch.long)
-    return chosen, attention, completion, rejected, attention.clone(), completion.clone()
-
-
-def _finish_run(
-    config: TrainingConfig,
-    *,
-    models: Mapping[str, nn.Module],
-    optimizer: Optimizer,
-    step: int,
-    trainer_state: Mapping[str, float],
-    losses: list[float],
-    metrics: list[dict[str, float]],
-) -> RunOutput:
-    checkpoint = config.checkpoint_path
-    if checkpoint is not None:
-        save_checkpoint(
-            checkpoint,
-            models=models,
-            optimizer=optimizer,
-            step=step,
-            config=config,
-            trainer_state=trainer_state,
-        )
-    output_path = Path(config.output_dir) / "run.json"
-    output = RunOutput(
-        seed=config.seed,
-        step=step,
-        losses=losses,
-        metrics=metrics,
-        output_path=str(output_path),
-        checkpoint_path=checkpoint,
-    )
-    _atomic_text(
-        output_path,
-        json.dumps(
-            {
-                "checkpoint_path": output.checkpoint_path,
-                "config_hash": config_hash(config),
-                "losses": output.losses,
-                "metrics": output.metrics,
-                "seed": output.seed,
-                "step": output.step,
-            },
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n",
-    )
-    return output
-
-
-def _atomic_text(path: Path, text: str) -> None:
-    """Write ``text`` via a temp file and ``os.replace``."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-    tmp = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(text.encode())
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, path)

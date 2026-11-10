@@ -52,6 +52,23 @@ def _draw() -> tuple[float, float, list[float]]:
     )
 
 
+def _assert_plain_or_tensor(value: object) -> None:
+    if isinstance(value, torch.Tensor):
+        return
+    if value is None or isinstance(value, (str, bytes, float, bool, int)):
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            _assert_plain_or_tensor(key)
+            _assert_plain_or_tensor(item)
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            _assert_plain_or_tensor(item)
+        return
+    raise AssertionError(type(value).__name__)
+
+
 class TestSeed:
     def test_same_seed_repeats_python_numpy_and_torch(self) -> None:
         seed_everything(5)
@@ -162,16 +179,57 @@ class TestCheckpoint:
             step=0,
             config=config,
         )
-        try:
-            payload = torch.load(path, map_location="cpu", weights_only=False)
-        except TypeError:
-            payload = torch.load(path, map_location="cpu")
+        payload = torch.load(path, map_location="cpu", weights_only=True)
         assert payload["seed"] == 11
         assert payload["config"]["seed"] == 11
+        _assert_plain_or_tensor(payload)
+        kind, keys, pos, has_gauss, cached = payload["rng"]["numpy"]
+        assert isinstance(kind, str)
+        assert isinstance(keys, list) and keys
+        assert all(isinstance(key, int) and not isinstance(key, bool) for key in keys)
+        assert isinstance(pos, int) and not isinstance(pos, bool)
+        assert isinstance(has_gauss, int) and not isinstance(has_gauss, bool)
+        assert isinstance(cached, float)
         if torch.cuda.is_available():
             assert payload["rng"]["cuda"] is not None
         else:
             assert payload["rng"]["cuda"] is None
+
+    def test_weights_only_true_round_trips(self, tmp_path: Path) -> None:
+        config = _config(tmp_path)
+        model = nn.Linear(2, 2)
+        optimizer = AdamW(model.parameters(), lr=1e-2)
+        path = tmp_path / "checkpoint.pt"
+        seed_everything(config.seed)
+        np.random.standard_normal()
+        save_checkpoint(
+            path,
+            models={"linear": model},
+            optimizer=optimizer,
+            step=1,
+            config=config,
+        )
+        payload = torch.load(path, map_location="cpu", weights_only=True)
+        _assert_plain_or_tensor(payload)
+        assert isinstance(payload["rng"]["numpy"][1], list)
+        expected = (
+            random.random(),
+            float(np.random.random()),
+            float(np.random.standard_normal()),
+            torch.rand(2).tolist(),
+        )
+        random.random()
+        np.random.random()
+        np.random.standard_normal()
+        torch.rand(2)
+        load_checkpoint(path, models={"linear": model}, optimizer=optimizer, config=config)
+        restored = (
+            random.random(),
+            float(np.random.random()),
+            float(np.random.standard_normal()),
+            torch.rand(2).tolist(),
+        )
+        assert restored == expected
 
     def test_a_different_config_hash_raises_and_does_not_write(self, tmp_path: Path) -> None:
         config = _config(tmp_path)
