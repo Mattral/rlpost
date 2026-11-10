@@ -1135,6 +1135,7 @@ Cover:
     `run-dpo` is still a placeholder and does not call `seed_everything`
     or write a checkpoint. Recorded under S0.8.
   - 2026-11-10. `1b3c304` is the collator. `a54e68e` is `run-dpo`.
+    Docs commit `0d9ef25`. Opened as PR #30.
     `collate_completions` right-pads each side to the longest row after
     truncation. Chosen and rejected can have different widths. Each row
     has its own prompt length, the shared prefix of the prompt ids and
