@@ -63,7 +63,7 @@ The package floor stays `torch>=2.15`. That floor was checked on torch 2.15. `to
 
 `run-ppo` checks that `alignment.method` is `ppo`, writes the config YAML, and returns. It does not call `PPOTrainer`.
 
-`run-dpo` prints a placeholder and exits 0. It does not construct `DPOTrainer`.
+`run-dpo --tiny` trains `tiny_lm` on CPU and writes `{output_dir}/run.json`. Without `--tiny` it exits non-zero and does not download a model.
 
 `python train.py` exits 2.
 

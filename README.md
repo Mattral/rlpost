@@ -58,9 +58,9 @@ loss            = -logsigmoid(chosen_reward - rejected_reward).mean()
 
 `beta` is `AlignmentConfig.dpo_beta` (default 0.1, must be > 0). It is not the PPO `kl_coefficient`. The margin is the mean of `chosen_reward - rejected_reward`. Accuracy is the fraction of rows with `chosen_reward > rejected_reward`.
 
-Parity is against TRL 1.17.1 `DPOTrainer._compute_loss` (`loss_type` sigmoid, `label_smoothing` 0). That method sums completion-token log-probs the same way. On CPU, torch 2.15, the tiny Llama, the loss matched within `1e-6`. The logged mean of the sums matched within `1e-5`. The measured gap on that mean was `1.907e-6`.
+Parity is against TRL 1.17.1 `DPOTrainer._compute_loss` (`loss_type` sigmoid, `label_smoothing` 0). That method sums completion-token log-probs the same way. On CPU, torch 2.15, the tiny Llama, the loss matched within `1e-6`. The logged mean of the sums matched within `1e-5`. The measured gap on that mean was `1.907e-6` on the two batch-of-2 layouts, seeds 0–5. A batch of 4 with unequal lengths passes those same absolute tolerances. A separate maximum for that batch was not recorded.
 
-`python -m rlpost.cli run-dpo` prints a placeholder and exits 0. It does not construct `DPOTrainer`.
+`python -m rlpost.cli run-dpo --tiny` trains `tiny_lm` on CPU. It does not download a model. Without `--tiny` the command exits non-zero and writes no `run.json`.
 
 ## PPO
 
@@ -76,7 +76,7 @@ The KL penalty is a per-token estimator on the sampled tokens. The loss differen
 
 The value and the gradient name different KLs for `k1` and `k3` because the backward does not differentiate through which token was sampled.
 
-`train_step` calls `gather_logprobs` for the policy and the reference. Logits at position `t` score token `t+1`. The policy ratio and the KL mean both use those log-probabilities, shape `[B, T-1]`. One response mask is built from the rollout lengths. Index `t` of the gathered mask is 1 when token `t+1` is a generated response token, and 0 for prompt and padding. Policy loss, entropy, KL, GAE, and the value loss all use that gathered mask, shape `[B, T-1]`. Each mean is `sum(x * mask) / sum(mask)`. Advantage normalisation uses only those positions. GAE reads the rollout values (`V_old = batch["values"]`), not the live value head, so advantages and returns stay fixed across epochs. Returns are `A + V_old`. The live head is the value prediction the value loss trains. The sequence reward sits on the last response token. The `[B, T]` mask only places that reward. `kl_estimator="k1"` is rejected when the config is built. The two step tests run on a tiny causal LM. The clipped surrogate, both value losses, the entropy term, and the KL estimators are tested. The entropy scalar is the mean of TRL 1.17.1 `entropy_from_logits` on the rows the mask keeps.
+`train_step` calls `gather_logprobs` for the policy and the reference. Logits at position `t` score token `t+1`. The policy ratio and the KL mean both use those log-probabilities, shape `[B, T-1]`. One response mask is built from the rollout lengths. Index `t` of the gathered mask is 1 when token `t+1` is a generated response token, and 0 for prompt and padding. Policy loss, entropy, KL, GAE, and the value loss all use that gathered mask, shape `[B, T-1]`. Each mean is `sum(x * mask) / sum(mask)`. Advantage normalisation uses only those positions. GAE reads the rollout values (`V_old = batch["values"]`), not the live value head, so advantages and returns stay fixed across epochs. Returns are `A + V_old`. The live value prediction is `value_out[:, :-1]`, the state before each action. The value loss trains that prediction. The sequence reward sits on the last response token. The `[B, T]` mask only places that reward. `kl_estimator="k1"` is rejected when the config is built. The two step tests run on a tiny causal LM. The clipped surrogate, both value losses, the entropy term, and the KL estimators are tested. The entropy scalar is the mean of TRL 1.17.1 `entropy_from_logits` on the rows the mask keeps.
 
 ## Command line
 
@@ -84,14 +84,14 @@ The value and the gradient name different KLs for `k1` and `k3` because the back
 python -m rlpost.cli train-sft --config configs/toy.yaml
 python -m rlpost.cli train-reward --config configs/toy.yaml
 python -m rlpost.cli run-ppo --toy
-python -m rlpost.cli run-dpo --toy
+python -m rlpost.cli run-dpo --tiny --steps 2 --output-dir ./outputs/dpo-tiny
 ```
 
-`train-sft` builds `SFTTrainer` and calls `train`. `train-reward` builds `RewardModelTrainer` and calls `train`. Both will download models and the HH-RLHF dataset. Neither command has a recorded runtime in this repo.
+`train-sft` builds `SFTTrainer` and calls `train`. `train-reward` builds `RewardModelTrainer` and calls `train`. Both import those trainers inside the command, so starting the CLI does not import peft. Both will download models and the HH-RLHF dataset. Neither command has a recorded runtime in this repo.
 
 `run-ppo` checks that `alignment.method` is `ppo`, writes the config YAML, and returns. The function body says the training loop is not wired up.
 
-`run-dpo` does not train.
+`run-dpo --tiny` builds two tiny Llamas, tokenizes a fixed list of preference strings, and takes `--steps` updates on CPU. The reference stays frozen. `--checkpoint` writes a checkpoint at the end. `--resume` loads that file first. A test runs 4 steps in one process and 2 plus 2 across processes. Losses and metrics match with `==`. Weights match with `torch.equal`.
 
 `TrainingConfig.toy_mode()` sets the policy and the reference model to `distilgpt2`, the reward model to `prajjwal1/bert-tiny`, the device to `cuda`, and the dataset name to `Anthropic/hh-rlhf`. Those are config defaults. They are not a measured run.
 

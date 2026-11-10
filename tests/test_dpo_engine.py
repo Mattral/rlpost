@@ -27,14 +27,16 @@ length on every row. Those masks are separate arguments on both sides.
 
 fp32 absolute tolerance on the loss, the margin, and the rewards is 1e-6.
 TRL logs the batch mean of those sums (``logps/chosen``, ``logps/rejected``).
-On CPU, torch 2.15, this Llama, that seed grid, and both mask layouts, the
-largest gap on that mean was 1.907e-6, one float32 ulp near magnitude 22.
-The tolerance on the logged means is 1e-5.
+On CPU, torch 2.15, this Llama, seeds 0-5, and the two batch-of-2 layouts,
+the largest gap on that mean was 1.907e-6, one float32 ulp near magnitude 22.
+The tolerance on the logged means is 1e-5. The batch of 4 passes that same
+tolerance. A separate maximum for that layout was not recorded.
 
 Policy-parameter gradients use absolute tolerance 1e-6. The two losses are
 backwarded from identical initial weights, with no optimizer step. On the
-same grid the largest |rlpost grad - TRL grad| was 9.686e-8. The reference
-parameters are frozen, and their grads stay None.
+batch-of-2 grid the largest |rlpost grad - TRL grad| was 9.686e-8. The batch
+of 4 passes the same tolerance. A separate maximum for that layout was not
+recorded. The reference parameters are frozen, and their grads stay None.
 """
 
 import logging

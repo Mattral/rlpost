@@ -1105,8 +1105,9 @@ Cover:
   config YAML and returns. `train-sft` and `train-reward` call their trainers, and
   neither has a CPU end-to-end test.
 - The notes that were on this item now sit on the sub-item that owns them.
+- 2026-11-10: S0.11a is done. `run-dpo --tiny` trains on CPU. `run-ppo`, `train-sft`, and `train-reward` are still the later sub-items.
 
-### [~] S0.11a DPO batched collation and `run-dpo`
+### [x] S0.11a DPO batched collation and `run-dpo`
 - Depends on: S0.8.
 - Branch: `feat/S0.11a-dpo-batch`.
 - Batched collation with a prompt length and a completion mask on each row.
@@ -1133,6 +1134,56 @@ Cover:
     `train_token_step` on `[2, 8]` rows. It does not tokenize text.
     `run-dpo` is still a placeholder and does not call `seed_everything`
     or write a checkpoint. Recorded under S0.8.
+  - 2026-11-10. `1b3c304` is the collator. `a54e68e` is `run-dpo`.
+    `collate_completions` right-pads each side to the longest row after
+    truncation. Chosen and rejected can have different widths. Each row
+    has its own prompt length, the shared prefix of the prompt ids and
+    `prompt + response`. The completion mask is 0 on that prefix and on
+    the pad. One string is one row. `pad_token_id` must be an int.
+    Left padding is not implemented. The model is not given
+    `position_ids`. On this tiny Llama a right-padded row matches that
+    row run alone within absolute tolerance 1e-6.
+  - The S0.6b parity test now also runs a batch of 4, width 10, seeds
+    0–5. Chosen prompt and completion lengths are (2, 6), (4, 2),
+    (1, 5), (3, 7). Rejected are (3, 4), (1, 9), (5, 3), (2, 5).
+    Loss, margin, and rewards stay at absolute tolerance 1e-6. The
+    logged completion-sum means stay at 1e-5. Gradients stay at 1e-6.
+    The earlier maximum on the batch-of-2 logged mean, 1.907e-6, and
+    the earlier gradient maximum, 9.686e-8, were not recomputed for
+    this layout. A separate maximum was not recorded.
+  - `run_dpo_training` calls `seed_everything` once, then samples
+    `TINY_DPO_PAIRS` and calls `train_step`. Python, NumPy, and torch
+    each draw, so a missed RNG restore changes the next batch. There
+    is no DataLoader. `tiny_dpo_config` sets device `cpu`, learning rate
+    `1e-2`, `max_seq_length` 32, and `log_to_wandb` false. The rate is
+    not a tuned or measured quality claim. Policy is
+    `tiny_causal_lm(seed)`. Reference is `tiny_causal_lm(seed + 1)`
+    and stays equal to a fresh model at that seed. The ids in the
+    config are the string `tiny_lm` and are not loaded.
+  - The end-to-end test is `tests/test_dpo_cli.py`. N is 2 and the seed
+    is 7. Batch size is 4. One process takes 4 steps. Another takes 2,
+    writes a checkpoint, and a third process resumes for 2 more. The
+    half run is read before resume overwrites `run.json`. Losses and
+    metrics use `==`. Policy and reference weights use `torch.equal`.
+    Seed 8 does not match. `test_seeds_once` counts one
+    `seed_everything` call. Without `--tiny` the process exits
+    non-zero and writes no `run.json`.
+  - `train_token_step` still has `max_grad_norm or 1.0` and
+    `getattr(config, "log_to_wandb", True)`. The tiny config sets
+    `log_to_wandb` false, so that branch does not call wandb. S0.11d
+    removes the fallbacks. S0.11d also owns the DataLoader generator.
+    This loop does not use one.
+  - `cli.py` imports `SFTTrainer` and `RewardModelTrainer` inside
+    `train-sft` and `train-reward`. `run-dpo` starts without peft.
+    accelerate stays undeclared. S0.11c still runs those two commands.
+  - The synthetic loop in `tests/repro_harness.py` is unchanged. It
+    still feeds `train_token_step` tensors. `DPOTrainer.save_model`
+    still calls `tokenizer.save_pretrained`. The CLI does not call it.
+    `TinyCharTokenizer` has no `save_pretrained`.
+  - Pytest on this branch, `.venv`, torch 2.15.0+cpu: 207 passed.
+    `pytest -q` exited 0 and printed 207 progress marks. It did not
+    print its own duration line. `pytest --collect-only -q` reports
+    207 tests. The 187 passed line under S0.8 is the count on `d10cd09`.
 
 ### [ ] S0.11b PPO gathered log-probs and `run-ppo`
 - Depends on: S0.8.
@@ -1176,9 +1227,11 @@ Cover:
     `dataset_size`). Declare and validate them here.
   - PEFT is the optional `[lora]` extra (`peft>=0.17`). `sft_engine.py` and
     `reward_engine.py` import it. No test calls those trainers, so the extra is
-    unverified. `cli.py` imports both trainers at import time, so
-    `python -m rlpost.cli` needs the extra. `import rlpost` does not.
-    Recorded under S0.5b. Not changed there.
+    unverified. `import rlpost` does not import peft. As of S0.11a, `cli.py`
+    imports the two trainers inside `train-sft` and `train-reward`, so
+    `run-dpo` starts without the extra. Those two commands still import peft
+    when they run. Recorded under S0.5b. The import move is S0.11a. Running
+    the commands is still this item.
   - Hugging Face `Trainer` needs `accelerate` at runtime. `sft_engine.py`
     constructs `Trainer`. The reward model is on the same SFT/reward path.
     Declare `accelerate` for that path, in the `[lora]` extra or in
@@ -1407,8 +1460,10 @@ Write `benchmarks/PREREG.md` **before** any GPU run. It fixes:
   same config.
 - A plotting script that reads JSON only.
 - Notes:
-  - DPO `train_step` is one pair, shape `[1, T]`. Batched collation is an
-    S0.11a note. It has to land before this harness.
+  - 2026-11-04: DPO `train_step` was one pair, shape `[1, T]`. Batched
+    collation had to land before this harness.
+  - 2026-11-10: S0.11a landed that collation. `train_step` accepts a
+    batch. This harness is still unbuilt.
   - Rollouts store full `[B, R, V]` policy and reference logits, and
     generation has no KV cache. `pad_token_id == eos_token_id` raises
     in `RolloutGenerator`. Those three are on the S0.11b note. They
@@ -1506,3 +1561,4 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-11-09 · S0.8 · One seed at startup, an atomic checkpoint, and exact CPU resume for PPO and DPO. 186 passed. · da877b8
 - 2026-11-09 · S0.8 · The toy loop lives in the tests. The checkpoint loads with weights_only=True. 187 passed. · d10cd09
 - 2026-11-10 · S0.11 · Split into S0.11a–d. DPO collation and run-dpo are S0.11a. PPO gathered log-probs and run-ppo are S0.11b. SFT, the reward model, accelerate, and the LoRA fields are S0.11c. Silent fallbacks and the dataloader generator are S0.11d. · 463e2f3
+- 2026-11-10 · S0.11a · Batched DPO collation, right-padded per side, and `run-dpo --tiny` on CPU. A batch of 4 passes the existing TRL tolerances. N=2 resume matches with `==` and `torch.equal`. 207 passed. · 1b3c304, a54e68e
