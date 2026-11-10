@@ -1020,10 +1020,11 @@ Cover:
 
 ### [x] S0.8 Determinism and resumable checkpoints
 - Branch: `feat/S0.8-determinism`.
-- One `seed_everything` seeds Python, NumPy, and torch, and CUDA when it is present. A run calls it once at startup.
+- One `seed_everything` seeds Python, NumPy, and torch, and CUDA when it is present. The test harness calls it once at startup.
 - The seed is `TrainingConfig.seed`. It is written into the checkpoint and into every run's `run.json`.
 - Two PPO runs of N steps with the same seed match losses at every step on CPU. Same for DPO. The comparison is `==`.
-- The checkpoint stores the models, the optimizer, the step, the RNG states, and the config. The write is a temp file in the same directory and `os.replace`.
+- The checkpoint stores the models, the optimizer, the step, the RNG states, and the config. NumPy's RNG keys are a list of ints. `torch.load` uses `weights_only=True`. The write is a temp file in the same directory and `os.replace`.
+- The synthetic PPO and DPO loops are `tests/repro_harness.py`. `rlpost.repro` keeps the seed, the hash, and the checkpoint.
 - N steps, save, a fresh process loads, then N more. The step-2N metrics and the weights match the uninterrupted run on CPU. A different config hash raises.
 - `TrainingConfig.checkpoint_path` is the checkpoint file. A Drive path or a Modal Volume path is that string. Nothing here mounts either one.
 - Notes:
@@ -1031,6 +1032,16 @@ Cover:
     (merge of PR #28). `9ed4afe` is the seed and the checkpoint.
     `da877b8` is the PPO and DPO runs. Docs commit `0e0b2a7`.
     Opened as PR #29.
+  - 2026-11-09 follow-up, `d10cd09`. The synthetic loops moved to
+    `tests/repro_harness.py`. `src/rlpost/repro.py` no longer steps a
+    trainer. The Typer commands in `cli.py` still use the names
+    `run_ppo` and `run_dpo`. They still do not train. The checkpoint
+    stores the NumPy RNG as a string, a list of ints, and three
+    numbers, and every other non-tensor the same way. `torch.load`
+    uses `weights_only=True`. There is no `weights_only=False`
+    fallback. `test_weights_only_true_round_trips` saves after a
+    cached Gaussian and checks the next Python, NumPy, and torch
+    draws.
   - The old item text said resume matches within a tolerance. The owner
     required exact equality on CPU. Losses and every metric field use
     `==`. Weights use `torch.equal`.
@@ -1063,12 +1074,13 @@ Cover:
     Same for DPO. The recorded PPO loss is `policy_loss`. The resume
     check compares every metric field, not only that loss. The weights
     move: the uninterrupted policy is not the initial policy.
-  - The checkpoint is a torch pickle. `save_checkpoint` creates a temp
+  - The checkpoint is a torch zip. `save_checkpoint` creates a temp
     file in the destination directory, fsyncs it, and `os.replace`s it
-    over the path. A different config hash raises before any weight is
-    written. `checkpoint_path` is not in the hash. Pointing the same run
-    at another file still loads. Changing `seed` changes the hash and
-    raises. The learning rate does too.
+    over the path. Load uses `weights_only=True`. A different config
+    hash raises before any weight is written. `checkpoint_path` is not
+    in the hash. Pointing the same run at another file still loads.
+    Changing `seed` changes the hash and raises. The learning rate
+    does too.
   - PPO's `kl_coefficient` is not in the optimizer.
     `adaptive_kl_penalty` changes it after each step, and the next loss
     uses the new value. The checkpoint stores it on `trainer_state`.
@@ -1081,9 +1093,10 @@ Cover:
   - `numpy` is imported by `rlpost.repro`. The project floor is
     `numpy>=1.26`. The CPU lock stays `numpy==2.5.4`, which is why the
     job stays on Python 3.12.
-  - Pytest on this branch, `.venv`, torch 2.15.0+cpu: 186 passed,
-    26.47s. Ruff check and ruff format check pass. The 167 passed line
-    under S0.7c is the count on `79ace06`.
+  - Pytest on this branch, `.venv`, torch 2.15.0+cpu: 187 passed,
+    26.18s. Ruff check and ruff format check pass. The 167 passed line
+    under S0.7c is the count on `79ace06`. The changelog line that
+    cites `da877b8` records 186 passed, the count before `d10cd09`.
 
 ### [ ] S0.11 CLI actually runs SFT/RM/DPO/PPO end-to-end on a tiny model on CPU
 - Depends on: S0.8, because a resumable run is what the CLI should be able to finish.
@@ -1432,3 +1445,4 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-11-09 · S0.7c · PPO forwards take an attention mask and position ids, so padding does not move real-token logits. train_step gathers log-probs from logits / temperature. RolloutBuffer and RolloutCollator are deleted. 166 passed. · 16b07d0
 - 2026-11-09 · S0.7c · Sampling and train_step share AlignmentConfig.temperature. A rollout recorded at another temperature raises. top_p stays a sampling filter; train log-probs stay the full softmax. 167 passed. · 64331c2
 - 2026-11-09 · S0.8 · One seed at startup, an atomic checkpoint, and exact CPU resume for PPO and DPO. 186 passed. · da877b8
+- 2026-11-09 · S0.8 · The toy loop lives in the tests. The checkpoint loads with weights_only=True. 187 passed. · d10cd09

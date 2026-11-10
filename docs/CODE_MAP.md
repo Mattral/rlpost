@@ -24,15 +24,17 @@ Tests: `tests/test_config.py`.
 
 ## `src/rlpost/repro.py`
 
-`seed_everything(seed)` seeds Python's `random`, the global NumPy RNG, and torch. When CUDA is present it also calls `torch.cuda.manual_seed_all`. A bool is rejected, because `True` would seed as `1`. `run_ppo` and `run_dpo` call it once at startup. A resumed call then loads the checkpoint, and that load replaces the RNG.
+`seed_everything(seed)` seeds Python's `random`, the global NumPy RNG, and torch. When CUDA is present it also calls `torch.cuda.manual_seed_all`. A bool is rejected, because `True` would seed as `1`. Call it once at startup. A resumed call then loads the checkpoint, and that load replaces the RNG.
+
+`capture_rng` stores the NumPy state as `(algorithm, keys, pos, has_gauss, cached_gaussian)`. `keys` is a list of ints. `restore_rng` rebuilds the `uint32` array that `np.random.set_state` expects. `save_checkpoint` walks the payload and stores every non-tensor as a list, a number, a string, or `None`. `load_checkpoint` reads the file with `torch.load(..., weights_only=True)`.
 
 `save_checkpoint` stores each named `state_dict`, the optimizer state, the step, the RNG states, the config, the config hash, and `trainer_state`. The CUDA RNG state is `None` when CUDA is absent. PPO's `trainer_state` is `kl_coefficient`, because `adaptive_kl_penalty` changes it after the step and the optimizer does not hold it. The write is a temp file in the destination directory and `os.replace`. `load_checkpoint` checks the hash before it copies any weight. A mismatch raises `ValueError` and leaves the modules alone. `checkpoint_path` is not part of the hash.
 
-`run_ppo` takes N steps. The batch is `[2, 8]`. Prompt length is 0 and response length is 8, right padding, so every token is a response token. `old_log_probs` is `[2, 7]`, `gather_logprobs` of `logits / temperature` on the current policy. `values` is the value head, detached, `[2, 8]`. `run_dpo` takes N steps of `train_token_step`. Chosen and rejected rows are `[2, 8]`. Python, NumPy, and torch each contribute to the batch, so a missed RNG restore changes the next step. Both write `{output_dir}/run.json`, which includes `seed`. When `checkpoint_path` is set they write that file at the end of the call. This loop is not `generate_rollout`. The CLI does not call it. See [S0.8](../ROADMAP.md#s08-determinism-and-resumable-checkpoints) and [S0.11](../ROADMAP.md#s011-cli-actually-runs-sftrmdpoppo-end-to-end-on-a-tiny-model-on-cpu).
+This module does not step a trainer. The N-step loops are `tests/repro_harness.py`. The PPO batch is `[2, 8]`. Prompt length is 0 and response length is 8, right padding, so every token is a response token. `old_log_probs` is `[2, 7]`, `gather_logprobs` of `logits / temperature` on the current policy. `values` is the value head, detached, `[2, 8]`. The DPO loop takes N steps of `train_token_step`. Chosen and rejected rows are `[2, 8]`. Python, NumPy, and torch each contribute to the batch, so a missed RNG restore changes the next step. Both write `{output_dir}/run.json`, which includes `seed`. When `checkpoint_path` is set they write that file at the end of the call. This loop is not `generate_rollout`. The CLI commands `run-ppo` and `run-dpo` are still the placeholders in `cli.py`. See [S0.8](../ROADMAP.md#s08-determinism-and-resumable-checkpoints) and [S0.11](../ROADMAP.md#s011-cli-actually-runs-sftrmdpoppo-end-to-end-on-a-tiny-model-on-cpu).
 
-Status: tested on CPU. Same-seed losses match with `==`. A fresh process that loads after N steps and takes N more matches step 2N and the weights with `torch.equal`.
+Status: tested on CPU. Same-seed losses match with `==`. A fresh process that loads after N steps and takes N more matches step 2N and the weights with `torch.equal`. A checkpoint round-trips under `weights_only=True`.
 
-Tests: `tests/test_repro.py`, `tests/test_determinism.py`.
+Tests: `tests/test_repro.py`, `tests/test_determinism.py`. The loops are `tests/repro_harness.py`.
 
 ## `src/rlpost/dataset.py`
 
@@ -93,9 +95,9 @@ TRL 1.17.1 `DPOTrainer._compute_loss`, sigmoid loss, `label_smoothing` 0, `ld_al
 
 `DPOMetrics` holds `dpo_loss`, `policy_diff_mean`, `margin_mean`, and `accuracy`. There is no value head, and no explained-variance field.
 
-`train_step` tokenizes one pair and calls `train_token_step`. That method runs the policy forward with gradients, the reference forward under `no_grad`, then `loss.backward()`. The six tensors are `[B, T]`. The completion masks are 1 on completion tokens, and the sum still uses the mask shifted by one. No test calls the string `train_step`. `run_dpo` calls `train_token_step`. See [S0.8](../ROADMAP.md#s08-determinism-and-resumable-checkpoints).
+`train_step` tokenizes one pair and calls `train_token_step`. That method runs the policy forward with gradients, the reference forward under `no_grad`, then `loss.backward()`. The six tensors are `[B, T]`. The completion masks are 1 on completion tokens, and the sum still uses the mask shifted by one. No test calls the string `train_step`. `tests/repro_harness.py` calls `train_token_step`. See [S0.8](../ROADMAP.md#s08-determinism-and-resumable-checkpoints).
 
-Status: the loss, the margin, the accuracy, `dpo_beta`, the completion-token sum, and construction on the tiny Llama are tested. The string `train_step` is untested. `train_token_step` is tested through `run_dpo`.
+Status: the loss, the margin, the accuracy, `dpo_beta`, the completion-token sum, and construction on the tiny Llama are tested. The string `train_step` is untested. `train_token_step` is tested through `tests/repro_harness.py`.
 
 Tests: `tests/test_dpo_engine.py`, `tests/test_determinism.py`.
 
