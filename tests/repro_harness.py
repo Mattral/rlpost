@@ -1,8 +1,9 @@
 """Synthetic PPO and DPO loops for the CPU resume tests.
 
 ``rlpost.repro`` seeds a run and writes the checkpoint. The N-step loop,
-the batches, and ``run.json`` live here. S0.11 builds the real loop on
-those utilities.
+the batches, and ``run.json`` live here. These batches are token ids.
+The CLI loop that tokenizes preference text is
+``rlpost.dpo_engine.run_dpo_training``.
 """
 
 from __future__ import annotations

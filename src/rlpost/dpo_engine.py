@@ -7,16 +7,24 @@ This module provides:
 - Comparable training loop to PPO
 """
 
+import json
 import logging
+import os
+import random
+import tempfile
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Tuple
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.nn import Module
 from torch.optim import AdamW
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+import rlpost.repro as repro
 from rlpost.config import TrainingConfig
 from rlpost.dataset import ToyDatasetLoader
 from rlpost.ops import gather_logprobs
@@ -639,6 +647,230 @@ class DPOTrainer:
         self.policy_model.save_pretrained(output_dir)
         self.tokenizer.save_pretrained(output_dir)
         logger.info(f"Model saved to {output_dir}")
+
+
+# Short preference texts for ``run-dpo --tiny``. Lengths differ so the
+# collator right-pads. This is not a DataLoader. S0.11d stores a DataLoader
+# generator. This list is fixed, and each step picks rows with the RNGs
+# the checkpoint already saves.
+TINY_DPO_PAIRS: tuple[dict[str, str], ...] = (
+    {"prompt": "Q: hi", "chosen": "yes", "rejected": "no"},
+    {
+        "prompt": "Q: longer prompt",
+        "chosen": "short",
+        "rejected": "a much longer rejected answer",
+    },
+    {"prompt": "P", "chosen": "one two three four", "rejected": "x"},
+    {"prompt": "Ask", "chosen": "alpha beta gamma", "rejected": "nope"},
+    {"prompt": "Go", "chosen": "stop now", "rejected": "keep going please"},
+    {"prompt": "Item", "chosen": "the chosen completion", "rejected": "bad"},
+)
+
+
+@dataclass
+class DPORunOutput:
+    """What one call of ``run_dpo_training`` did.
+
+    Attributes:
+        seed: ``TrainingConfig.seed``. Also written to ``output_path``.
+        step: Trainer step after this call. A resumed call continues, so
+            this is the global step, not ``len(losses)``.
+        losses: ``dpo_loss`` for each step taken in this call.
+        metrics: ``DPOMetrics.to_dict()`` for each of those steps.
+        output_path: ``{output_dir}/run.json``.
+        checkpoint_path: File written at the end, or None when the config
+            does not set one.
+    """
+
+    seed: int
+    step: int
+    losses: list[float]
+    metrics: list[dict[str, float]]
+    output_path: str
+    checkpoint_path: str | None
+
+
+def tiny_dpo_config(
+    *,
+    output_dir: str,
+    seed: int,
+    batch_size: int,
+    checkpoint_path: str | None,
+) -> TrainingConfig:
+    """CPU config for ``run-dpo --tiny``.
+
+    Starts from ``TrainingConfig.toy_mode`` and then sets the fields this
+    command actually uses. The learning rate is ``1e-2`` so a few CPU
+    steps move the tiny policy. That is not a tuned rate. ``device`` is
+    ``cpu``. ``log_to_wandb`` is false. ``max_seq_length`` is 32, under
+    the tiny Llama's position limit of 64. The policy and reference ids
+    are ``tiny_lm``. Those ids are not loaded.
+    """
+    if batch_size < 1:
+        raise ValueError(f"batch_size must be >= 1, got {batch_size}")
+    config = TrainingConfig.toy_mode()
+    config.seed = seed
+    config.device = "cpu"
+    config.log_to_wandb = False
+    config.output_dir = output_dir
+    config.checkpoint_path = checkpoint_path
+    config.alignment.method = "dpo"
+    config.model.policy_model_id = "tiny_lm"
+    config.model.reference_model_id = "tiny_lm"
+    config.optimization.learning_rate = 1e-2
+    config.dataset.batch_size = batch_size
+    config.dataset.max_seq_length = 32
+    return config
+
+
+def sample_preference_batch(
+    pairs: Sequence[Mapping[str, str]],
+    batch_size: int,
+) -> dict[str, list[str]]:
+    """Pick ``batch_size`` rows. Python, NumPy, and torch each draw once.
+
+    The strings themselves are fixed. Which rows appear is not. A resumed
+    run restores those three RNGs, so the next batch matches the
+    uninterrupted run. This is not a ``DataLoader`` and does not keep a
+    separate generator.
+    """
+    count = len(pairs)
+    if count < 1:
+        raise ValueError("pairs must be non-empty")
+    if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+        raise ValueError(f"batch_size must be an int >= 1, got {batch_size!r}")
+    start = random.randrange(count)
+    stride = int(np.random.randint(1, count)) if count > 1 else 1
+    shift = int(torch.randint(0, count, ()).item())
+    indices = [(start + stride * i + shift) % count for i in range(batch_size)]
+    return {
+        "prompt": [str(pairs[index]["prompt"]) for index in indices],
+        "chosen": [str(pairs[index]["chosen"]) for index in indices],
+        "rejected": [str(pairs[index]["rejected"]) for index in indices],
+    }
+
+
+def run_dpo_training(
+    trainer: DPOTrainer,
+    n_steps: int,
+    pairs: Sequence[Mapping[str, str]],
+    *,
+    resume_from: str | Path | None = None,
+) -> DPORunOutput:
+    """Run ``n_steps`` string DPO updates on ``tiny``-sized batches.
+
+    Calls ``seed_everything`` once. A resumed call then
+    ``load_checkpoint``, which replaces the RNG, the policy, the
+    reference, the optimizer, and ``step_count``. Each step samples a
+    batch and calls ``train_step``. When ``checkpoint_path`` is set, the
+    checkpoint is written once, at the end of this call.
+
+    Args:
+        trainer: DPO trainer. The policy is trained. The reference is
+            frozen and is still stored in the checkpoint.
+        n_steps: Updates to take in this call. At least 1.
+        pairs: Preference rows with ``prompt``, ``chosen``, and ``rejected``.
+        resume_from: Checkpoint to load before those updates. None starts
+            from the trainer as it was constructed.
+
+    Returns:
+        Losses and metrics for the steps taken in this call.
+    """
+    if isinstance(n_steps, bool) or not isinstance(n_steps, int) or n_steps < 1:
+        raise ValueError(f"n_steps must be an int >= 1, got {n_steps!r}")
+    repro.seed_everything(trainer.config.seed)
+    models = {
+        "policy": trainer.policy_model,
+        "reference": trainer.reference_model,
+    }
+    if resume_from is not None:
+        loaded = repro.load_checkpoint(
+            resume_from,
+            models=models,
+            optimizer=trainer.optimizer,
+            config=trainer.config,
+        )
+        trainer.step_count = loaded.step
+    losses: list[float] = []
+    metrics: list[dict[str, float]] = []
+    batch_size = trainer.config.dataset.batch_size
+    for _ in range(n_steps):
+        batch = sample_preference_batch(pairs, batch_size)
+        step_metrics = trainer.train_step(batch)
+        losses.append(step_metrics.dpo_loss)
+        metrics.append(step_metrics.to_dict())
+    return _finish_dpo_run(
+        trainer.config,
+        models=models,
+        optimizer=trainer.optimizer,
+        step=trainer.step_count,
+        losses=losses,
+        metrics=metrics,
+    )
+
+
+def _finish_dpo_run(
+    config: TrainingConfig,
+    *,
+    models: Mapping[str, Module],
+    optimizer: AdamW,
+    step: int,
+    losses: list[float],
+    metrics: list[dict[str, float]],
+) -> DPORunOutput:
+    """Write the checkpoint, if any, and ``run.json``."""
+    checkpoint = config.checkpoint_path
+    if checkpoint is not None:
+        repro.save_checkpoint(
+            checkpoint,
+            models=models,
+            optimizer=optimizer,
+            step=step,
+            config=config,
+            trainer_state={},
+        )
+    output_path = Path(config.output_dir) / "run.json"
+    output = DPORunOutput(
+        seed=config.seed,
+        step=step,
+        losses=losses,
+        metrics=metrics,
+        output_path=str(output_path),
+        checkpoint_path=checkpoint,
+    )
+    _atomic_text(
+        output_path,
+        json.dumps(
+            {
+                "checkpoint_path": output.checkpoint_path,
+                "config_hash": repro.config_hash(config),
+                "losses": output.losses,
+                "metrics": output.metrics,
+                "seed": output.seed,
+                "step": output.step,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+    )
+    return output
+
+
+def _atomic_text(path: Path, text: str) -> None:
+    """Write ``text`` via a temp file and ``os.replace``."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(text.encode())
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 if __name__ == "__main__":
