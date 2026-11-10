@@ -1,6 +1,7 @@
 run_name: rlhf_toy_run
 output_dir: ./outputs/toy_run
 seed: 42
+checkpoint_path: null
 device: cuda
 log_to_wandb: true
 wandb_project: rlpost-toy

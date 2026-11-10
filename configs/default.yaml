@@ -1,6 +1,7 @@
 run_name: rlpost_default_run
 output_dir: ./outputs/rlpost_default_run
 seed: 42
+checkpoint_path: null
 device: cuda
 log_to_wandb: true
 wandb_project: rlpost

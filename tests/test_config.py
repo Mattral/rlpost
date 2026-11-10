@@ -434,6 +434,7 @@ class TestConfigYAMLLoading:
             assert config.alignment.kl_estimator == "k2"
             assert config.alignment.missing_eos_penalty is None
             assert config.alignment.temperature == 1.0
+            assert config.checkpoint_path is None
 
     def test_load_default_yaml(self) -> None:
         """Verify default.yaml can be loaded from configs directory."""
@@ -445,6 +446,7 @@ class TestConfigYAMLLoading:
             assert config.alignment.kl_estimator == "k2"
             assert config.alignment.missing_eos_penalty is None
             assert config.alignment.temperature == 1.0
+            assert config.checkpoint_path is None
 
 
 class TestConfigConsistency:

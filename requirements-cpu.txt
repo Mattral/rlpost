@@ -2,8 +2,8 @@
 # The job runs:
 #   pip install -e ".[test]" -c requirements-cpu.txt \
 #     --extra-index-url https://download.pytorch.org/whl/cpu
-# numpy is constrained because the job resolves it transitively. The package
-# does not import numpy. accelerate is constrained because trl requires it.
+# numpy is imported by rlpost.repro. The pin stays so the job resolves one
+# version. accelerate is constrained because trl requires it.
 # The package does not import accelerate.
 --extra-index-url https://download.pytorch.org/whl/cpu
 

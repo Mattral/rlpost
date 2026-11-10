@@ -336,21 +336,17 @@ class DPOTrainer:
         return (token_log_probs * shift_completion).sum(dim=1)
 
     def train_step(self, batch: dict) -> DPOMetrics:
-        """Single DPO training step.
+        """Single DPO training step on one prompt and two response strings.
+
+        Tokenizes ``prompt``, ``chosen``, and ``rejected``, then calls
+        ``train_token_step``. Right padding is assumed.
 
         Args:
-            batch: Dictionary with keys:
-                - prompt: Prompt text
-                - chosen: Chosen response
-                - rejected: Rejected response
+            batch: Dictionary with keys ``prompt``, ``chosen``, and ``rejected``.
 
         Returns:
-            DPOMetrics with loss and other metrics
+            DPOMetrics for this step.
         """
-        self.policy_model.train()
-        self.reference_model.eval()
-
-        # Tokenize preference pair. The third tensor is the completion mask.
         prompt = batch["prompt"]
         chosen_input_ids, chosen_attn, chosen_completion = self._tokenize_for_loss(
             prompt, batch["chosen"]
@@ -358,23 +354,71 @@ class DPOTrainer:
         rejected_input_ids, rejected_attn, rejected_completion = self._tokenize_for_loss(
             prompt, batch["rejected"]
         )
+        return self.train_token_step(
+            chosen_input_ids,
+            chosen_attn,
+            chosen_completion,
+            rejected_input_ids,
+            rejected_attn,
+            rejected_completion,
+        )
+
+    def train_token_step(
+        self,
+        chosen_input_ids: torch.Tensor,
+        chosen_attention_mask: torch.Tensor,
+        chosen_completion_mask: torch.Tensor,
+        rejected_input_ids: torch.Tensor,
+        rejected_attention_mask: torch.Tensor,
+        rejected_completion_mask: torch.Tensor,
+    ) -> DPOMetrics:
+        """One DPO update on token batches.
+
+        Each tensor is ``[B, T]``. The completion masks are 1 on completion
+        tokens. ``compute_log_probs`` sums ``completion_mask[:, 1:]``, because
+        the score at ``t`` belongs to token ``t + 1``.
+
+        Args:
+            chosen_input_ids: Chosen token ids, ``[B, T]``.
+            chosen_attention_mask: ``[B, T]``. Forwarded to the model.
+            chosen_completion_mask: ``[B, T]``. 1 on chosen completion tokens.
+            rejected_input_ids: Rejected token ids, ``[B, T]``.
+            rejected_attention_mask: ``[B, T]``.
+            rejected_completion_mask: ``[B, T]``. 1 on rejected completion tokens.
+
+        Returns:
+            DPOMetrics for this step.
+        """
+        self.policy_model.train()
+        self.reference_model.eval()
 
         policy_chosen_log_probs = self.compute_log_probs(
-            self.policy_model, chosen_input_ids, chosen_attn, chosen_completion
+            self.policy_model,
+            chosen_input_ids,
+            chosen_attention_mask,
+            chosen_completion_mask,
         )
         policy_rejected_log_probs = self.compute_log_probs(
-            self.policy_model, rejected_input_ids, rejected_attn, rejected_completion
+            self.policy_model,
+            rejected_input_ids,
+            rejected_attention_mask,
+            rejected_completion_mask,
         )
 
         with torch.no_grad():
             ref_chosen_log_probs = self.compute_log_probs(
-                self.reference_model, chosen_input_ids, chosen_attn, chosen_completion
+                self.reference_model,
+                chosen_input_ids,
+                chosen_attention_mask,
+                chosen_completion_mask,
             )
             ref_rejected_log_probs = self.compute_log_probs(
-                self.reference_model, rejected_input_ids, rejected_attn, rejected_completion
+                self.reference_model,
+                rejected_input_ids,
+                rejected_attention_mask,
+                rejected_completion_mask,
             )
 
-        # Compute DPO loss
         loss, metrics = self.compute_dpo_loss(
             policy_chosen_log_probs,
             policy_rejected_log_probs,
@@ -382,7 +426,6 @@ class DPOTrainer:
             ref_rejected_log_probs,
         )
 
-        # Backward pass
         self.optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(
@@ -393,7 +436,6 @@ class DPOTrainer:
 
         self.step_count += 1
 
-        # Log to W&B if enabled
         if getattr(self.config, "log_to_wandb", True):
             try:
                 import wandb
