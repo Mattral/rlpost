@@ -1229,6 +1229,8 @@ Cover:
     `generate_rollout` or `train_step`. The synthetic PPO loop in
     `tests/repro_harness.py` is not `generate_rollout`. Recorded under
     S0.8.
+  - 2026-11-11. Opened as PR #31. Code commits `6319627` and
+    `a0b8110`. Docs commit `e8ccff7`.
   - 2026-11-11. `generate_rollout` stores `logprobs_policy` and
     `logprobs_reference`. The batch tensors are `[B, R]`, with `R`
     equal to `max_response_length`, including the pad columns after
