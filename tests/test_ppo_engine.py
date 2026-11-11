@@ -379,6 +379,7 @@ class TestMetricsComputation:
             reward_mean=0.5,
             advantage_mean=0.0,
             gae_mean=0.0,
+            clip_fraction=0.0,
         )
 
         assert metrics.policy_loss == 0.5

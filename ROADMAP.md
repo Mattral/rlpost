@@ -1107,6 +1107,7 @@ Cover:
 - The notes that were on this item now sit on the sub-item that owns them.
 - 2026-11-10: S0.11a is done. `run-dpo --tiny` trains on CPU. `run-ppo`, `train-sft`, and `train-reward` are still the later sub-items.
 - 2026-11-10: S0.11e added. A real model id, a chat template, and a fixed data slice. Prerequisite for S1.2. Not part of the original four-way split.
+- 2026-11-11: S0.11b is done. `run-ppo --tiny` trains on CPU. `train-sft` and `train-reward` remain S0.11c.
 
 ### [x] S0.11a DPO batched collation and `run-dpo`
 - Depends on: S0.8.
@@ -1198,8 +1199,9 @@ Cover:
     the initial policy. After that commit, `.venv`, torch 2.15.0+cpu:
     208 passed. `pytest -q` exited 0 and printed 208 progress marks.
 
-### [ ] S0.11b PPO gathered log-probs and `run-ppo`
+### [x] S0.11b PPO gathered log-probs and `run-ppo`
 - Depends on: S0.8.
+- Branch: `feat/S0.11b-ppo-logprobs`.
 - Rollouts store the gathered per-token log-prob of the sampled token,
   not `[B, R, V]` logits.
 - `run-ppo` does rollout, then `train_step`, on tiny_lm with a toy reward.
@@ -1227,6 +1229,71 @@ Cover:
     `generate_rollout` or `train_step`. The synthetic PPO loop in
     `tests/repro_harness.py` is not `generate_rollout`. Recorded under
     S0.8.
+  - 2026-11-11. Opened as PR #31. Code commits `6319627` and
+    `a0b8110`. Docs commit `e8ccff7`.
+  - 2026-11-11. `generate_rollout` stores `logprobs_policy` and
+    `logprobs_reference`. The batch tensors are `[B, R]`, with `R`
+    equal to `max_response_length`, including the pad columns after
+    EOS. Each `Rollout` row keeps only the real prefix, EOS included.
+    The value is `gather_logprobs(logits / temperature)` on one packed
+    forward of the finished `input_ids`, with the same
+    `padding_attention` as `train_step`, sliced to the response window.
+    A per-step prefix logit is not bit-identical to that packed gather,
+    so it is not stored. The sampler still calls the reference on every
+    prefix and discards those logits. `top_p` still only filters the
+    draw. The stored value is the full softmax.
+  - `response_logprobs_to_old` writes that `[B, R]` slice into
+    `old_log_probs` `[B, T - 1]` at `[:, prompt_width - 1 :]` and zeros
+    the columns before the window. Response column `r` is token column
+    `prompt_width + r`, scored from gathered index
+    `prompt_width + r - 1`. `prompt_width` must be at least 1.
+    `train_step` still takes `old_log_probs` of shape `[B, T - 1]`.
+    The columns before the response window are 0. The ratio check is
+    on the gathered response mask, and that mask is non-empty.
+  - `clip_fraction` is the last field of `PPOMetrics`. It is the masked
+    fraction of ratios strictly outside
+    `(1 - ppo_epsilon, 1 + ppo_epsilon)`. A ratio of exactly 1 counts
+    as not clipped.
+  - `run_ppo_training` calls `seed_everything` once, then samples
+    `TINY_PPO_PROMPTS` and calls `generate_rollout`, then `train_step`.
+    Python, NumPy, and torch each draw, so a missed RNG restore changes
+    the next batch. There is no DataLoader. `tiny_ppo_config` sets
+    device `cpu`, learning rate `1e-2`, `max_seq_length` 32, and
+    `log_to_wandb` false. The rate is not a tuned or measured quality
+    claim. Policy is `tiny_causal_lm(seed)`. The value head is
+    `tiny_value_model(seed)`, an embedding plus a linear map, with no
+    dropout. The reference is a frozen deep copy of the initial policy,
+    not a second seed. A resumed run reloads the saved copy and does
+    not call `frozen_reference_copy` again. The ids in the config are
+    the string `tiny_lm` and are not loaded. Prompts are left-padded.
+    Sampling uses `top_p` 1, EOS id 2, and pad id 0. The toy reward is
+    the sum of token ids in the response window. Pad id 0 adds nothing.
+    EOS id 2 is included. That scalar is written on the last real
+    response token. It is not a learned reward model.
+  - At step 0 the reference weights equal the initial policy with
+    `torch.equal`. On the gathered response mask, old log-probs equal
+    the new ones with `torch.equal`, the ratio is 1, `kl_divergence`
+    is 0.0 for k2 and for k3, and `clip_fraction` is 0.0. The mask sum
+    is greater than 0. Advantage whitening and entropy are not 0.
+  - The end-to-end test is `tests/test_ppo_cli.py`. N is 2 and the seed
+    is 7. Batch size is 4. One process takes 4 steps. Another takes 2,
+    writes a checkpoint, and a fresh process resumes for 2 more. The
+    half run is read before resume overwrites `run.json`. Losses and
+    metrics use `==`. Policy, value, and reference weights use
+    `torch.equal`. Seed 8 does not match. `test_seeds_once` counts one
+    `seed_everything` call. Without `--tiny` the process exits
+    non-zero and writes no `run.json`. The checkpoint stores
+    `kl_coefficient` on `trainer_state`. The config hash includes
+    `output_dir` and excludes `checkpoint_path`.
+  - The synthetic loop in `tests/repro_harness.py` is unchanged. It
+    still does not call `generate_rollout`. S0.11d still owns the
+    `max_grad_norm` and `log_to_wandb` fallbacks and the DataLoader
+    generator. This loop does not use one.
+  - Pytest on this branch, `.venv`, torch 2.15.0+cpu: 216 passed.
+    `pytest -q` exited 0 and printed 216 progress marks. It did not
+    print its own duration line. `/usr/bin/time` reported 72.38s for
+    that command. The per-file `--collect-only -q` counts sum to 216.
+    The 208 passed line under S0.11a is the count after `44a7604`.
 
 ### [ ] S0.11c SFT and the reward model on tiny_lm
 - Depends on: S0.8.
@@ -1295,6 +1362,15 @@ Cover:
     PR. `run-dpo --tiny` still builds `tiny_causal_lm` and reads the
     fixed string list `TINY_DPO_PAIRS`. It does not load a model id or
     a dataset split. `run-ppo` still does not train.
+  - 2026-11-11. `PPOTrainer.train_step` puts the policy and the value
+    head in `.train()` and the reference in `.eval()`. `DPOTrainer.train_step`
+    does the same for the policy and the reference. `tiny_causal_lm`
+    sets `attention_dropout` to 0.0 and has no dropout modules, so equal
+    weights still give a PPO ratio of 1, a KL of 0 for k2 and k3, and a
+    DPO loss of ln 2. A real model with dropout will not. The real-model
+    path must disable dropout in the policy (TRL's default for DPO) or
+    those step-0 checks fail. `run-ppo --tiny` and `run-dpo --tiny` still
+    build `tiny_causal_lm` and do not load a model id or a dataset split.
 
 ### [x] S0.9 Delete the orphaned distributed scaffolding
 - Branch: `chore/S0.9-delete-distributed`.
@@ -1594,3 +1670,4 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-11-10 · S0.11a · The run-dpo reference is a frozen copy of the initial policy. Step-0 loss is ln 2 within 1e-6, and both rewards are 0. 208 passed. · 44a7604
 - 2026-11-10 · S0.11a · Batch-of-4 parity maxima, seeds 0–5: |loss − TRL| 1.1920928955078125e-07, |grad| 8.940696716308594e-08, logged-mean gap 1.9073486328125e-06. · 76e5000
 - 2026-11-10 · S0.11e · Added the real model id, chat template, and fixed data slice. Not implemented. Prerequisite for S1.2. · 76e5000
+- 2026-11-11 · S0.11b · Rollouts store gathered response log-probs. `run-ppo --tiny` trains tiny_lm on CPU with a frozen copy of the initial policy. Step 0 has ratio 1, KL 0, and clip fraction 0. N=2 resume matches with `==` and `torch.equal`. 216 passed. · 6319627, a0b8110

@@ -3,7 +3,7 @@
 Provides:
 - train-sft: Supervised fine-tuning on instruction-following data
 - train-reward: Reward model training on preference pairs
-- run-ppo: PPO training for policy alignment
+- run-ppo: PPO on tiny_lm when ``--tiny`` is set. Does not download a model.
 - run-dpo: DPO on tiny_lm when ``--tiny`` is set. Does not download a model.
 - Global --toy flag for small-model testing on T4 (<20 minutes)
 - Config validation before execution
@@ -25,7 +25,7 @@ app = typer.Typer(
     name="rlpost",
     help=(
         "SFT, reward-model, PPO, and DPO commands. "
-        "run-ppo does not train. run-dpo --tiny trains tiny_lm on CPU."
+        "run-ppo --tiny and run-dpo --tiny train tiny_lm on CPU."
     ),
 )
 
@@ -232,25 +232,40 @@ def train_reward(
 
 @app.command()
 def run_ppo(
-    config: Optional[str] = typer.Option(
-        None,
-        "--config",
-        help="Path to training config YAML",
-    ),
     output_dir: Optional[str] = typer.Option(
         None,
         "--output-dir",
-        help="Output directory for checkpoints",
+        help="Directory for run.json. Required with --tiny.",
     ),
-    num_epochs: int = typer.Option(
-        3,
-        "--epochs",
-        help="Number of training epochs",
-    ),
-    toy: bool = typer.Option(
+    tiny: bool = typer.Option(
         False,
-        "--toy",
-        help="Use toy dataset for quick testing",
+        "--tiny",
+        help="Train tiny_lm on CPU. Does not download a model.",
+    ),
+    steps: int = typer.Option(
+        1,
+        "--steps",
+        help="PPO updates to take in this call. At least 1.",
+    ),
+    batch_size: int = typer.Option(
+        4,
+        "--batch-size",
+        help="Prompts per update.",
+    ),
+    seed: Optional[int] = typer.Option(
+        None,
+        "--seed",
+        help="TrainingConfig.seed. Default 42.",
+    ),
+    checkpoint: Optional[str] = typer.Option(
+        None,
+        "--checkpoint",
+        help="Checkpoint file written at the end of this call.",
+    ),
+    resume: bool = typer.Option(
+        False,
+        "--resume",
+        help="Load --checkpoint before the first step.",
     ),
     verbose: bool = typer.Option(
         False,
@@ -258,72 +273,84 @@ def run_ppo(
         help="Enable debug logging",
     ),
 ) -> None:
-    """Run PPO (Proximal Policy Optimization) training.
+    """Train PPO on tiny_lm.
 
-    Fine-tunes the policy to maximize rewards while staying close
-    to the reference model (KL constraint).
+    ``--tiny`` builds one tiny Llama, a value head, and freezes a copy of
+    the initial policy as the reference. It does not draw a second
+    initialization. The prompts are a fixed list. The reward is the sum
+    of token ids in the response window. Pass ``--checkpoint`` to write a
+    checkpoint at the end, and ``--resume`` to load that file first. A
+    Hugging Face model id is not loaded.
 
     Example:
-        python -m rlpost.cli run-ppo --toy --epochs 1
+        python -m rlpost.cli run-ppo --tiny --steps 2 --output-dir ./outputs/ppo
     """
+    from torch.optim import AdamW
+
+    from rlpost.dpo_engine import frozen_reference_copy
+    from rlpost.ppo_engine import (
+        TINY_PPO_PROMPTS,
+        PPOTrainer,
+        run_ppo_training,
+        tiny_ppo_config,
+    )
+    from rlpost.tiny_lm import TinyCharTokenizer, tiny_causal_lm, tiny_value_model
+
     setup_logging(verbose)
 
+    if not tiny:
+        raise typer.BadParameter(
+            "Pass --tiny. run-ppo trains tiny_lm on CPU and does not download a model."
+        )
+    if output_dir is None:
+        raise typer.BadParameter("--output-dir is required")
+    if isinstance(steps, bool) or steps < 1:
+        raise typer.BadParameter("--steps must be an int >= 1")
+    if isinstance(batch_size, bool) or batch_size < 1:
+        raise typer.BadParameter("--batch-size must be an int >= 1")
+    if resume and checkpoint is None:
+        raise typer.BadParameter("--resume needs --checkpoint")
+    run_seed = 42 if seed is None else seed
+    if isinstance(run_seed, bool) or run_seed < 0:
+        raise typer.BadParameter("--seed must be an int >= 0")
+
     try:
-        # Load config
-        if config:
-            train_config = TrainingConfig.from_yaml(config)
-        else:
-            if toy:
-                train_config = TrainingConfig.toy_mode()
-            else:
-                train_config = TrainingConfig.from_yaml("configs/default.yaml")
-
-        # Validate alignment config
-        if train_config.alignment.method != "ppo":
-            raise ValueError(
-                f"Alignment method must be 'ppo', got '{train_config.alignment.method}'"
-            )
-
-        console.print(
-            f"[dim]Config: {train_config.model.policy_model_id}, "
-            f"ppo_epsilon={train_config.alignment.ppo_epsilon}, "
-            f"target_kl={train_config.alignment.target_kl}[/dim]"
+        train_config = tiny_ppo_config(
+            output_dir=output_dir,
+            seed=run_seed,
+            batch_size=batch_size,
+            checkpoint_path=checkpoint,
         )
-
-        # Setup output directory
-        if output_dir is None:
-            from datetime import datetime
-
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_dir = f"output/ppo_{timestamp}"
-
-        output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
-
-        console.print("\n[bold cyan]Starting PPO training...[/bold cyan]")
-        console.print("[dim]This requires pre-trained SFT and reward models.[/dim]")
-
-        # NOTE: Full PPO training requires:
-        # 1. Pre-trained SFT model
-        # 2. Reward model
-        # 3. Rollout trajectories
-        # 4. Policy + value networks
-        # For now, just validate config and show setup instructions
-
-        console.print(
-            "\n[yellow]⚠ PPO training requires:[/yellow]\n"
-            "  1. Pre-trained SFT model from 'train-sft'\n"
-            "  2. Trained reward model from 'train-reward'\n"
-            "  3. Inference pipeline for trajectory generation\n"
-            "\n[dim]Full integration coming in Phase 3.5[/dim]"
+        policy = tiny_causal_lm(train_config.seed)
+        value = tiny_value_model(train_config.seed)
+        reference = frozen_reference_copy(policy)
+        optimizer = AdamW(
+            list(policy.parameters()) + list(value.parameters()),
+            lr=train_config.optimization.learning_rate,
         )
-
-        # Save config for reference
-        train_config.to_yaml(str(output_path / "ppo_config.yaml"))
-        console.print(f"[green]✓[/green] Config saved to {output_path}")
-
+        trainer = PPOTrainer(
+            train_config,
+            policy_model=policy,
+            value_model=value,
+            reference_model=reference,
+            optimizer=optimizer,
+        )
+        result = run_ppo_training(
+            trainer,
+            steps,
+            TINY_PPO_PROMPTS,
+            TinyCharTokenizer(),
+            resume_from=checkpoint if resume else None,
+        )
+        console.print(
+            f"[green]run-ppo finished[/green] step={result.step} "
+            f"loss={result.losses[-1]:.6f}\n"
+            f"  run: {result.output_path}"
+        )
+        if result.checkpoint_path is not None:
+            console.print(f"  checkpoint: {result.checkpoint_path}")
     except Exception as e:
-        console.print(f"[red]✗ Error: {e}[/red]", style="bold")
+        console.print(f"[red]Error: {e}[/red]", style="bold")
         raise typer.Exit(1)
 
 

@@ -16,12 +16,14 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.nn as nn
+from tests.tiny_lm import tiny_causal_lm
 
 from rlpost.alignment.rollout import (
     RolloutGenerator,
+    response_logprobs_to_old,
 )
 from rlpost.config import AlignmentConfig
-from rlpost.ops import response_token_mask
+from rlpost.ops import gather_logprobs, padding_attention, response_token_mask
 from rlpost.ppo_engine import GeneralizedAdvantageEstimation
 
 EOS = 2
@@ -87,8 +89,10 @@ def test_rollout_generator_creates_valid_rollouts():
     assert isinstance(rollouts, list)
     assert len(rollouts) == 2
     assert rollouts[0].response_tokens.shape == (3,)
-    assert rollouts[0].logits_policy.shape == (3, 16)
-    assert rollouts[0].logits_reference.shape == (3, 16)
+    assert rollouts[0].logprobs_policy.shape == (3,)
+    assert rollouts[0].logprobs_reference.shape == (3,)
+    assert generated.logprobs_policy.shape == (2, 3)
+    assert generated.logprobs_reference.shape == (2, 3)
     assert rollouts[0].reward.shape == () or rollouts[0].reward.shape == (1,)
 
 
@@ -143,6 +147,10 @@ class ScriptedLM(nn.Module):
     ) -> SimpleNamespace:
         del attention_mask, position_ids
         batch, length = input_ids.shape
+        # generate_rollout also runs one packed forward after the last
+        # sample, to store gathered log-probs. That call is past the plan.
+        if self.step >= self.plan.shape[1]:
+            return SimpleNamespace(logits=torch.zeros(batch, length, self.vocab))
         logits = torch.full((batch, length, self.vocab), -1.0e9)
         choice = self.plan[:, self.step]
         logits[torch.arange(batch), -1, choice] = 0.0
@@ -262,8 +270,10 @@ def test_each_row_stops_at_its_own_eos_in_the_mixed_layout() -> None:
 
     assert generated.rollouts[0].response_tokens.tolist() == [8, EOS]
     assert generated.rollouts[1].response_tokens.tolist() == [8, 8, 8]
-    assert generated.rollouts[0].logits_policy.shape == (2, VOCAB)
-    assert generated.rollouts[1].logits_policy.shape == (3, VOCAB)
+    assert generated.rollouts[0].logprobs_policy.shape == (2,)
+    assert generated.rollouts[1].logprobs_policy.shape == (3,)
+    assert generated.logprobs_policy.shape == (2, 3)
+    assert generated.logprobs_reference.shape == (2, 3)
 
 
 def test_sequence_reward_sits_on_eos_and_on_the_truncated_token() -> None:
@@ -399,3 +409,64 @@ def test_missing_eos_penalty_hits_only_the_truncated_row() -> None:
     assert torch.count_nonzero(penalized.rewards[1]) == 1
     assert penalized.rollouts[0].reward.item() == pytest.approx(5.0)
     assert penalized.rollouts[1].reward.item() == pytest.approx(4.5)
+
+
+def test_stored_logprobs_match_the_packed_gather_not_the_vocab() -> None:
+    """The batch stores ``[B, R]`` log-probs from the finished sequence.
+
+    ``top_p`` filters the draw only. The stored value is
+    ``gather_logprobs(logits / temperature)`` on that sequence, including
+    when the temperature is not 1. It is not a ``[R, V]`` logit row.
+    """
+    temperature = 0.5
+    policy = tiny_causal_lm(0).eval()
+    reference = tiny_causal_lm(1).eval()
+    generator = RolloutGenerator(
+        policy_model=policy,
+        reference_model=reference,
+        reward_model=DummyRewardModel(),
+        tokenizer=None,
+        alignment_config=AlignmentConfig(temperature=temperature),
+        max_response_length=3,
+        top_p=0.1,
+        eos_token_id=EOS,
+        pad_token_id=PAD,
+    )
+    query = torch.randint(1, 120, (2, 4))
+    torch.manual_seed(0)
+    generated = generator.generate_rollout(query, torch.tensor([4, 2]))
+
+    assert generated.logprobs_policy.shape == (2, 3)
+    assert generated.logprobs_reference.shape == (2, 3)
+    assert generated.rollouts[0].logprobs_policy.ndim == 1
+    attention, position_ids = padding_attention(
+        generated.prompt_lengths,
+        generated.response_lengths,
+        int(generated.input_ids.shape[1]),
+        "mixed",
+        prompt_width=generated.prompt_width,
+    )
+    with torch.no_grad():
+        policy_logits = policy(
+            input_ids=generated.input_ids,
+            attention_mask=attention,
+            position_ids=position_ids,
+        ).logits
+        reference_logits = reference(
+            input_ids=generated.input_ids,
+            attention_mask=attention,
+            position_ids=position_ids,
+        ).logits
+    expected_policy = gather_logprobs(policy_logits / temperature, generated.input_ids)
+    expected_reference = gather_logprobs(reference_logits / temperature, generated.input_ids)
+    start = generated.prompt_width - 1
+    assert torch.equal(generated.logprobs_policy, expected_policy[:, start:])
+    assert torch.equal(generated.logprobs_reference, expected_reference[:, start:])
+    placed = response_logprobs_to_old(
+        generated.logprobs_policy,
+        prompt_width=generated.prompt_width,
+        seq_len=int(generated.input_ids.shape[1]),
+    )
+    assert placed.shape == (2, generated.input_ids.shape[1] - 1)
+    assert torch.equal(placed[:, start:], generated.logprobs_policy)
+    assert torch.equal(placed[:, :start], torch.zeros(2, start))

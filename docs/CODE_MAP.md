@@ -30,7 +30,7 @@ Tests: `tests/test_config.py`.
 
 `save_checkpoint` stores each named `state_dict`, the optimizer state, the step, the RNG states, the config, the config hash, and `trainer_state`. The CUDA RNG state is `None` when CUDA is absent. PPO's `trainer_state` is `kl_coefficient`, because `adaptive_kl_penalty` changes it after the step and the optimizer does not hold it. The write is a temp file in the destination directory and `os.replace`. `load_checkpoint` checks the hash before it copies any weight. A mismatch raises `ValueError` and leaves the modules alone. `checkpoint_path` is not part of the hash.
 
-This module does not step a trainer. The N-step loops are `tests/repro_harness.py`. The PPO batch is `[2, 8]`. Prompt length is 0 and response length is 8, right padding, so every token is a response token. `old_log_probs` is `[2, 7]`, `gather_logprobs` of `logits / temperature` on the current policy. `values` is the value head, detached, `[2, 8]`. The DPO loop takes N steps of `train_token_step`. Chosen and rejected rows are `[2, 8]`. Python, NumPy, and torch each contribute to the batch, so a missed RNG restore changes the next step. Both write `{output_dir}/run.json`, which includes `seed`. When `checkpoint_path` is set they write that file at the end of the call. This loop is not `generate_rollout`. `run-ppo` is still the placeholder in `cli.py`. `run-dpo --tiny` calls `rlpost.dpo_engine.run_dpo_training`, which uses this seed and this checkpoint. DPO `trainer_state` on that path is empty. See [S0.8](../ROADMAP.md#s08-determinism-and-resumable-checkpoints) and [S0.11a](../ROADMAP.md#s011a-dpo-batched-collation-and-run-dpo).
+This module does not step a trainer. The N-step loops are `tests/repro_harness.py`. The PPO batch is `[2, 8]`. Prompt length is 0 and response length is 8, right padding, so every token is a response token. `old_log_probs` is `[2, 7]`, `gather_logprobs` of `logits / temperature` on the current policy. `values` is the value head, detached, `[2, 8]`. The DPO loop takes N steps of `train_token_step`. Chosen and rejected rows are `[2, 8]`. Python, NumPy, and torch each contribute to the batch, so a missed RNG restore changes the next step. Both write `{output_dir}/run.json`, which includes `seed`. When `checkpoint_path` is set they write that file at the end of the call. This loop is not `generate_rollout`. `run-ppo --tiny` calls `rlpost.ppo_engine.run_ppo_training`, which does use `generate_rollout`, this seed, and this checkpoint. Its `trainer_state` is `kl_coefficient`. `run-dpo --tiny` calls `rlpost.dpo_engine.run_dpo_training`. DPO `trainer_state` on that path is empty. See [S0.8](../ROADMAP.md#s08-determinism-and-resumable-checkpoints), [S0.11a](../ROADMAP.md#s011a-dpo-batched-collation-and-run-dpo), and [S0.11b](../ROADMAP.md#s011b-ppo-gathered-log-probs-and-run-ppo).
 
 Status: tested on CPU. Same-seed losses match with `==`. A fresh process that loads after N steps and takes N more matches step 2N and the weights with `torch.equal`. A checkpoint round-trips under `weights_only=True`.
 
@@ -128,7 +128,7 @@ ratio = exp(log_probs_new - log_probs_old)
 loss  = -mean(min(ratio * A, clip(ratio, 1-eps, 1+eps) * A))    # scalar
 ```
 
-`eps` is `ppo_epsilon`. `log_probs_old` and `advantages` are detached, so the gradient reaches `log_probs_new` only. `ratio` has the same shape as the inputs. The closed form in `tests/test_ppo_loss.py` clips on both sides, including `A < 0`. It also keeps `1.5 * A` when `A < 0` and `0.5 * A` when `A > 0`, and checks that always using the clipped ratio is a different loss on that input.
+`eps` is `ppo_epsilon`. `log_probs_old` and `advantages` are detached, so the gradient reaches `log_probs_new` only. `ratio` has the same shape as the inputs. The closed form in `tests/test_ppo_loss.py` clips on both sides, including `A < 0`. It also keeps `1.5 * A` when `A < 0` and `0.5 * A` when `A > 0`, and checks that always using the clipped ratio is a different loss on that input. `train_step` records `clip_fraction`, the masked fraction of ratios strictly outside `(1 - eps, 1 + eps)`. A ratio of 1 is not clipped. The mask is the gathered response mask.
 
 `compute_value_loss(value_pred, returns, old_values=None)` returns a scalar. `returns` and `old_values` are detached, so the gradient reaches `value_pred` only. Both modes use `value_loss_coefficient * mean(0.5 * squared error)`. When `alignment.value_clip` is `None`, the squared error is `(V - R)^2` and `old_values` is ignored. When `value_clip` is `c >= 0`, `old_values` is required:
 
@@ -182,9 +182,13 @@ The value at the sampled token is the wrong baseline for the action that emitted
 
 `value_pred` is the current critic on `[B, T-1]` and is what the value loss trains. `batch["values"][:, :-1]` is `V_old` for GAE and, when `value_clip` is set, for the clip. `test_advantages_and_returns_stay_fixed_across_epochs` runs `train_step` twice on one batch. The advantages and the returns match. The live prediction does not, because the critic stepped.
 
-Status: GAE, the clipped surrogate, both value losses, entropy against the TRL helper, the k1/k2/k3 estimators (k3 matched to TRL 1.17.1 GRPO on identical log-probabilities), explained variance, the adaptive coefficient, and `train_step` on a tiny causal LM are tested. See [S0.4](../ROADMAP.md#s04-code-ownership-pass), [S0.6](../ROADMAP.md#s06-numerical-parity-tests-core-correctness), and [S0.7](../ROADMAP.md#s07-classic-rlhf-edge-case-tests).
+`run_ppo_training` is the tiny CPU loop. It calls `seed_everything` once. On a fresh run it then sets the reference to `frozen_reference_copy` of the policy. A resumed run does not take that copy. `load_checkpoint` restores the policy, the value head, the reference, the optimizer, the step, and `kl_coefficient`. Each step left-pads a prompt batch, calls `generate_rollout`, and passes the stored `[B, R]` policy log-probs to `train_step` as `old_log_probs` through `response_logprobs_to_old`. The toy reward is `ResponseTokenSumReward`: the sum of token ids from column `prompt_width` on, written on the last real response token. Pad id 0 adds nothing. EOS is included. It is not a learned reward model. `top_p` on this loop is 1. EOS id is 2 and pad id is 0. The prompt list is `TINY_PPO_PROMPTS`. `tiny_ppo_config` sets device `cpu`, `log_to_wandb` false, learning rate `1e-2`, and `max_seq_length` 32. The learning rate is high enough that a few steps move this policy. It is not a tuned rate. The model ids are the string `tiny_lm` and are not loaded. When `checkpoint_path` is set it writes that file at the end and writes `{output_dir}/run.json`. See [S0.11b](../ROADMAP.md#s011b-ppo-gathered-log-probs-and-run-ppo).
 
-Tests: `tests/test_ppo_engine.py`, `tests/test_ppo_loss.py`, `tests/test_gae.py`, `tests/test_logprob_gather.py`, `tests/test_kl.py`, `tests/test_response_mask.py`, and `tests/test_padding.py`.
+`train_step` sets the policy and the value head to `train` and the reference to `eval` before the forwards. `tiny_lm` has no dropout, so those two modes match when the weights match.
+
+Status: GAE, the clipped surrogate, both value losses, entropy against the TRL helper, the k1/k2/k3 estimators (k3 matched to TRL 1.17.1 GRPO on identical log-probabilities), explained variance, the adaptive coefficient, and `train_step` on a tiny causal LM are tested. `run-ppo --tiny` is tested, including a fresh-process resume and the step-0 ratio. See [S0.4](../ROADMAP.md#s04-code-ownership-pass), [S0.6](../ROADMAP.md#s06-numerical-parity-tests-core-correctness), [S0.7](../ROADMAP.md#s07-classic-rlhf-edge-case-tests), and [S0.11b](../ROADMAP.md#s011b-ppo-gathered-log-probs-and-run-ppo).
+
+Tests: `tests/test_ppo_engine.py`, `tests/test_ppo_loss.py`, `tests/test_gae.py`, `tests/test_logprob_gather.py`, `tests/test_kl.py`, `tests/test_response_mask.py`, `tests/test_padding.py`, and `tests/test_ppo_cli.py`.
 
 ## `src/rlpost/tiny_lm.py`
 
@@ -192,23 +196,27 @@ Tests: `tests/test_ppo_engine.py`, `tests/test_ppo_loss.py`, `tests/test_gae.py`
 
 `TinyCharTokenizer` maps one character to one id, `max(min(ord(ch), 120), 1)`, truncated to `max_length`. It does not pad, and it does not insert BOS or EOS. `pad_token_id` is 0. It has no `save_pretrained`. `collate_completions` does the right padding.
 
-`tests/tiny_lm.py` re-exports the same three names. Pytest does not collect that file.
+`tiny_value_model(seed)` builds `TinyValueModel`: an embedding of vocab 128 to 32, then a linear map to one value per token, shape `[B, T]`. No dropout. `torch.manual_seed(seed)` runs before the weights are created. The PPO checkpoint replaces those weights on resume.
 
-Status: used by the CPU DPO tests and by `run-dpo --tiny`. See [S0.11a](../ROADMAP.md#s011a-dpo-batched-collation-and-run-dpo).
+`tests/tiny_lm.py` re-exports `VOCAB`, `TinyCharTokenizer`, `tiny_causal_lm`, and `tiny_value_model`. Pytest does not collect that file.
 
-Tests: `tests/test_dpo_engine.py`, `tests/test_dpo_cli.py`, and the other CPU tests that import `tests/tiny_lm.py`.
+Status: used by the CPU DPO and PPO tests and by `run-dpo --tiny` and `run-ppo --tiny`. See [S0.11a](../ROADMAP.md#s011a-dpo-batched-collation-and-run-dpo) and [S0.11b](../ROADMAP.md#s011b-ppo-gathered-log-probs-and-run-ppo).
+
+Tests: `tests/test_dpo_engine.py`, `tests/test_dpo_cli.py`, `tests/test_ppo_cli.py`, and the other CPU tests that import `tests/tiny_lm.py`.
 
 ## `src/rlpost/cli.py`
 
-Typer commands. `train-sft` and `train-reward` import `SFTTrainer` and `RewardModelTrainer` inside the command, then build the trainer and call `train`. Importing the CLI does not import peft. `run-ppo` checks `alignment.method == "ppo"`, writes the config YAML, and returns. It does not call `PPOTrainer`. The body still prints "Phase 3.5". That string is not a measurement.
+Typer commands. `train-sft` and `train-reward` import `SFTTrainer` and `RewardModelTrainer` inside the command, then build the trainer and call `train`. Importing the CLI does not import peft.
+
+`run-ppo` requires `--tiny`. It builds `tiny_causal_lm(seed)`, `tiny_value_model(seed)`, and a frozen copy of the policy, then calls `run_ppo_training` on `TINY_PPO_PROMPTS`. That function copies the policy again on a fresh run and does not copy on resume. Without `--tiny` it raises `typer.BadParameter` and writes nothing. `--output-dir` is required. `--steps` and `--batch-size` must be integers at least 1. `--resume` requires `--checkpoint`. The default seed is 42.
 
 `run-dpo` requires `--tiny`. It builds `tiny_causal_lm(seed)`, freezes a deep copy as the reference, builds a `TinyCharTokenizer`, and calls `run_dpo_training` on `TINY_DPO_PAIRS`. That function copies the policy again on a fresh run. Without `--tiny` it raises `typer.BadParameter` and writes nothing. `--output-dir` is required. `--steps` and `--batch-size` must be integers at least 1. `--resume` requires `--checkpoint`. The default seed is 42.
 
 `train-sft` still has a `--toy` help string that mentions a T4. That string is not a measurement. `train-sft` and `train-reward` still download when they run. See [S0.11c](../ROADMAP.md#s011c-sft-and-the-reward-model-on-tiny_lm).
 
-Status: `run-dpo --tiny` is tested on CPU, including a fresh-process resume. `train-sft`, `train-reward`, and `run-ppo` are untested. See [S0.11a](../ROADMAP.md#s011a-dpo-batched-collation-and-run-dpo).
+Status: `run-dpo --tiny` and `run-ppo --tiny` are tested on CPU, including a fresh-process resume. `train-sft` and `train-reward` are untested. See [S0.11a](../ROADMAP.md#s011a-dpo-batched-collation-and-run-dpo) and [S0.11b](../ROADMAP.md#s011b-ppo-gathered-log-probs-and-run-ppo).
 
-Tests: `tests/test_dpo_cli.py`.
+Tests: `tests/test_dpo_cli.py`, `tests/test_ppo_cli.py`.
 
 ## `src/rlpost/alignment/__init__.py`
 
@@ -218,13 +226,13 @@ Status: untested as an import. The rollout pieces below are what the tests impor
 
 ## `src/rlpost/alignment/rollout.py`
 
-`Rollout` is one trajectory. Per row after `RolloutGenerator`: `query_tokens` `[T_query]` long, `response_tokens` `[T_response]` long, `reward` a scalar (or `[1]` if a head squeezes that way), `logits_policy` `[T_response, V]`, `logits_reference` `[T_response, V]`. `T_response` is the real response, EOS included, padding omitted. The generator's forward sees a batch. The stored row does not.
+`Rollout` is one trajectory. Per row after `RolloutGenerator`: `query_tokens` `[T_query]` long, `response_tokens` `[T_response]` long, `reward` a scalar (or `[1]` if a head squeezes that way), `logprobs_policy` `[T_response]`, `logprobs_reference` `[T_response]`. `T_response` is the real response, EOS included, padding omitted. The generator's forward sees a batch. The stored row does not. The batch tensors `logprobs_policy` and `logprobs_reference` are `[B, R]`, `R = max_response_length`, and include the pad columns after EOS.
 
 `generate_rollout` returns a `RolloutBatch`. `rollouts` is that per-row view.
 
 `RolloutBuffer` and `RolloutCollator` were removed in [S0.7c](../ROADMAP.md#s07c-hide-padding-from-the-models). Nothing called them. The collator zero-padded logits and returned no mask. A random replay is not the rollout whose advantages `train_step` holds fixed.
 
-`RolloutGenerator` takes an `AlignmentConfig`. It has no `temperature` argument. `generate_rollout(query_tokens [B, prompt_width], prompt_lengths=None)` samples up to `max_response_length` tokens. `query_tokens` is already left-padded. The last column is the last real prompt token, which is what `logits[:, -1]` reads. `prompt_lengths` defaults to `prompt_width` on every row. Each step builds `padding_attention` from the real response length so far and passes that `attention_mask` and `position_ids` to the policy and the reference, then reads `logits[:, -1, :]`, shape `[B, V]`, and appends a token of shape `[B, 1]`. `_sample_token` divides by `AlignmentConfig.temperature`, read once at the start of the call. `RolloutBatch.temperature` stores that number. `train_step` raises when its config field differs. When `top_p < 1`, the draw drops tokens whose sorted cumulative probability is already above `top_p`, always keeping the top token. That filter is not applied to the stored logits or to the train-time log-probs, which are the full `log_softmax(logits / temperature)`. The stored row is still the raw logits, shape `[R, V]`.
+`RolloutGenerator` takes an `AlignmentConfig`. It has no `temperature` argument. `generate_rollout(query_tokens [B, prompt_width], prompt_lengths=None)` samples up to `max_response_length` tokens. `query_tokens` is already left-padded. The last column is the last real prompt token, which is what `logits[:, -1]` reads. `prompt_lengths` defaults to `prompt_width` on every row. Each step builds `padding_attention` from the real response length so far and passes that `attention_mask` and `position_ids` to the policy and the reference, then reads `logits[:, -1, :]`, shape `[B, V]`, and appends a token of shape `[B, 1]`. `_sample_token` divides by `AlignmentConfig.temperature`, read once at the start of the call. `RolloutBatch.temperature` stores that number. `train_step` raises when its config field differs. When `top_p < 1`, the draw drops tokens whose sorted cumulative probability is already above `top_p`, always keeping the top token. That filter is not applied to the stored log-probs. After the row is finished, the policy and the reference each run once on the padded sequence. The stored value is `gather_logprobs(logits / temperature)` sliced to the response window, shape `[B, R]`. That is the gather `train_step` repeats. A prefix logit and that packed gather are not bit-identical, so the prefix logit is not what is stored. `response_logprobs_to_old` places `[B, R]` into `[B, T-1]` starting at index `prompt_width - 1`. `prompt_width` must be at least 1. Columns before that window are 0. The gathered response mask drops them.
 
 Each row stops when it samples `eos_token_id`. That token counts in `response_lengths` and in the mask. Later columns of that row are `pad_token_id`. A row with no EOS id, or that never samples it, runs to `max_response_length` and is truncated. `eos_token_id` comes from the argument, else `tokenizer.eos_token_id`, else `None` (never stop). `pad_token_id` comes from the argument, else the tokenizer, else `0`. Equal pad and EOS ids raise.
 
@@ -238,7 +246,7 @@ Each row stops when it samples `eos_token_id`. That token counts in `response_le
 - With `token_mask` `[B, T]`, the return is `[B, T]`: the score at the last 1, and 0 elsewhere. Right padding and the mixed layout both use that index. `train_step` then reads it at index `last - 1`.
 - Without `token_mask`, the return is the score `[B]`. Per-token scores then use the last index, which is the last response token only when the row is not right-padded.
 
-Status: generator, EOS stop, truncation, the penalty, the reward index, and padding-invariant logits are tested on CPU. See [S0.9](../ROADMAP.md#s09-delete-the-orphaned-distributed-scaffolding) for the old CPU pin fix, [S0.7](../ROADMAP.md#s07-classic-rlhf-edge-case-tests) for the reward position, [S0.7b](../ROADMAP.md#s07b-eos-truncation-and-the-reference-gradient) for EOS and truncation, and [S0.7c](../ROADMAP.md#s07c-hide-padding-from-the-models) for the attention mask.
+Status: generator, EOS stop, truncation, the penalty, the reward index, padding-invariant logits, and the stored `[B, R]` log-probs are tested on CPU. See [S0.9](../ROADMAP.md#s09-delete-the-orphaned-distributed-scaffolding) for the old CPU pin fix, [S0.7](../ROADMAP.md#s07-classic-rlhf-edge-case-tests) for the reward position, [S0.7b](../ROADMAP.md#s07b-eos-truncation-and-the-reference-gradient) for EOS and truncation, [S0.7c](../ROADMAP.md#s07c-hide-padding-from-the-models) for the attention mask, and [S0.11b](../ROADMAP.md#s011b-ppo-gathered-log-probs-and-run-ppo) for the gathered log-probs.
 
 Tests: `tests/test_rollout.py` (6 tests, passing) and `tests/test_padding.py`.
 
