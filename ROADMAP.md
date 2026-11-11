@@ -1348,6 +1348,12 @@ Cover:
     RNG. It does not store a DataLoader generator. A shuffled loader
     rebuilt after resume does not continue the same order. Save that
     generator state with the checkpoint.
+  - 2026-11-11. `frozen_reference_copy` is defined in `dpo_engine.py`.
+    `ppo_engine.py` imports it, and `run-ppo` uses that import.
+    Move it to a shared module when `dpo_engine.py` or `ppo_engine.py`
+    is next edited. S0.11c does not edit those files. This item does
+    edit `dpo_engine.py` for the fallbacks, so the move belongs with
+    that edit.
 
 ### [ ] S0.11e Real model and data path
 - Depends on: S0.11a and S0.11b. Prerequisite for S1.2.
@@ -1371,6 +1377,18 @@ Cover:
     path must disable dropout in the policy (TRL's default for DPO) or
     those step-0 checks fail. `run-ppo --tiny` and `run-dpo --tiny` still
     build `tiny_causal_lm` and do not load a model id or a dataset split.
+  - 2026-11-11. Not done here. `PPOTrainer.train_step` forwards the
+    frozen reference and gathers log-probs again. `generate_rollout`
+    already stores `logprobs_reference` with shape `[B, R]`. `R` is
+    `max_response_length`, pad columns included. Each value is
+    `gather_logprobs(logits / temperature)` on the packed forward,
+    with the same attention mask `train_step` builds. On the response
+    tokens the KL mean keeps, the stored values and that second
+    gather are the same numbers. Use the stored values. The update
+    then does one fewer reference forward. `frozen_reference_copy`
+    still lives in `dpo_engine.py` while PPO imports it. Move it to
+    a shared module when `dpo_engine.py` or `ppo_engine.py` is next
+    edited. S0.11d edits `dpo_engine.py`, so that edit is the move.
 
 ### [x] S0.9 Delete the orphaned distributed scaffolding
 - Branch: `chore/S0.9-delete-distributed`.
@@ -1569,10 +1587,14 @@ Write `benchmarks/PREREG.md` **before** any GPU run. It fixes:
     batch. This harness is still unbuilt. The real model id, the
     tokenizer chat template, and the fixed dataset slice are S0.11e.
     That item is a prerequisite for this harness.
-  - Rollouts store full `[B, R, V]` policy and reference logits, and
-    generation has no KV cache. `pad_token_id == eos_token_id` raises
-    in `RolloutGenerator`. Those three are on the S0.11b note. They
-    land before this harness measures generation time and memory.
+  - 2026-11-11. S0.11b stores gathered response log-probs `[B, R]`,
+    not full `[B, R, V]` logits. Generation still has no KV cache.
+    `pad_token_id == eos_token_id` still raises in `RolloutGenerator`.
+    `PPOTrainer.train_step` still forwards the frozen reference and
+    gathers again. The stored `logprobs_reference` is that gather on
+    the response window. Use it. The KL term is the same number, and
+    the update does one fewer reference forward. Not implemented.
+    Recorded under S0.11e.
 
 ### [ ] S1.3 Evaluation module
 - Held-out reward scoring, a length-controlled win-rate judge, and KL and length statistics.
