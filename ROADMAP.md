@@ -1592,3 +1592,5 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-11-10 · S0.11 · Split into S0.11a–d. DPO collation and run-dpo are S0.11a. PPO gathered log-probs and run-ppo are S0.11b. SFT, the reward model, accelerate, and the LoRA fields are S0.11c. Silent fallbacks and the dataloader generator are S0.11d. · 463e2f3
 - 2026-11-10 · S0.11a · Batched DPO collation, right-padded per side, and `run-dpo --tiny` on CPU. A batch of 4 passes the existing TRL tolerances. N=2 resume matches with `==` and `torch.equal`. 207 passed. · 1b3c304, a54e68e
 - 2026-11-10 · S0.11a · The run-dpo reference is a frozen copy of the initial policy. Step-0 loss is ln 2 within 1e-6, and both rewards are 0. 208 passed. · 44a7604
+- 2026-11-10 · S0.11a · Batch-of-4 parity maxima, seeds 0–5: |loss − TRL| 1.1920928955078125e-07, |grad| 8.940696716308594e-08, logged-mean gap 1.9073486328125e-06. · 76e5000
+- 2026-11-10 · S0.11e · Added the real model id, chat template, and fixed data slice. Not implemented. Prerequisite for S1.2. · 76e5000
