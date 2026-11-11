@@ -106,10 +106,18 @@ tensor. When ``value_clip`` is unset, ``L_v`` is the masked mean of
 ``0.5 * (V - R)^2``. The target ``R`` is ``A + V_old`` in both modes.
 """
 
+import json
 import logging
-from dataclasses import dataclass
+import os
+import random
+import tempfile
+from collections.abc import Sequence
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Literal, Tuple
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -120,12 +128,19 @@ try:
 except ImportError:
     wandb = None
 
+import rlpost.repro as repro
+from rlpost.alignment.rollout import (
+    RolloutBatch,
+    RolloutGenerator,
+    response_logprobs_to_old,
+)
 from rlpost.config import (
     K1_LOSS_REJECTED,
     AlignmentConfig,
     OptimizationConfig,
     TrainingConfig,
 )
+from rlpost.dpo_engine import frozen_reference_copy
 from rlpost.ops import gather_logprobs, padding_attention, response_token_mask
 
 logger = logging.getLogger(__name__)
@@ -191,6 +206,9 @@ class PPOMetrics:
         advantage_mean: Masked mean of advantages before normalisation.
             The mask is the gathered response mask.
         gae_mean: Masked mean of advantages after normalisation.
+        clip_fraction: Masked fraction of ratios outside
+            ``(1 - ppo_epsilon, 1 + ppo_epsilon)``. A ratio of 1 counts
+            as not clipped.
     """
 
     policy_loss: float
@@ -202,6 +220,7 @@ class PPOMetrics:
     reward_mean: float
     advantage_mean: float
     gae_mean: float
+    clip_fraction: float
 
 
 def per_token_kl(
@@ -748,6 +767,11 @@ class PPOTrainer:
                 "Sampling and the train-step log-prob gather use that one field."
             )
 
+        # The policy and the value head train. The reference stays in eval.
+        self.policy_model.train()
+        self.value_model.train()
+        self.reference_model.eval()
+
         # Extract batch data
         input_ids = batch["input_ids"].to(self.device)
         rewards = batch["rewards"].to(self.device)
@@ -872,9 +896,12 @@ class PPOTrainer:
         # One mask for every reduction. value_pred is the live head.
         # old_action_values is V_old for the clip. The returns are already
         # A + V_old.
-        policy_loss, _ratio = self.compute_policy_loss(
+        policy_loss, ratio = self.compute_policy_loss(
             token_logprobs, old_log_probs, advantages, gathered_mask
         )
+        epsilon = self.alignment_config.ppo_epsilon
+        outside = (ratio < (1.0 - epsilon)) | (ratio > (1.0 + epsilon))
+        clip_fraction = masked_mean(outside.to(dtype=ratio.dtype), gathered_mask)
         value_loss = self.compute_value_loss(
             action_values, returns, old_action_values, gathered_mask
         )
@@ -915,6 +942,7 @@ class PPOTrainer:
             reward_mean=masked_mean(action_rewards, gathered_mask).item(),
             advantage_mean=advantage_mean.item(),
             gae_mean=gae_mean.item(),
+            clip_fraction=clip_fraction.item(),
         )
 
         # Log to W&B
@@ -929,6 +957,7 @@ class PPOTrainer:
                     "ppo/adaptive_kl_coefficient": metrics.adaptive_kl_coefficient,
                     "ppo/reward_mean": metrics.reward_mean,
                     "ppo/advantage_mean": metrics.advantage_mean,
+                    "ppo/clip_fraction": metrics.clip_fraction,
                     "ppo/global_step": self.global_step,
                 },
                 step=self.global_step,
@@ -937,3 +966,392 @@ class PPOTrainer:
         self.global_step += 1
 
         return metrics
+
+
+# Fixed prompt list for ``run-ppo --tiny``. Lengths differ so a batch
+# left-pads. The strings are not a dataset split.
+TINY_PPO_PROMPTS: tuple[str, ...] = (
+    "a",
+    "go",
+    "cat",
+    "stay",
+    "left",
+    "respond",
+)
+TINY_PPO_MAX_RESPONSE = 4
+TINY_PPO_EOS_ID = 2
+TINY_PPO_PAD_ID = 0
+
+
+class ResponseTokenSumReward(nn.Module):
+    """Sequence score is the sum of token ids in the response window.
+
+    ``prompt_width`` is the left-padded query width. Columns at and after
+    that index are the response window. Pad id 0 adds nothing, so right
+    padding does not change the sum. EOS is included. The return is
+    ``logits`` of shape ``[B, 1]``. ``generate_rollout`` treats that as
+    the sequence score and writes it on the last real response token.
+
+    This is not a learned reward model.
+    """
+
+    def __init__(self, prompt_width: int) -> None:
+        super().__init__()
+        if isinstance(prompt_width, bool) or not isinstance(prompt_width, int) or prompt_width < 1:
+            raise ValueError(f"prompt_width must be an int >= 1, got {prompt_width!r}")
+        self.prompt_width = prompt_width
+
+    def forward(
+        self,
+        input_ids: Tensor,
+        attention_mask: Tensor | None = None,
+        position_ids: Tensor | None = None,
+    ) -> SimpleNamespace:
+        del attention_mask, position_ids
+        if input_ids.ndim != 2 or input_ids.shape[1] < self.prompt_width:
+            raise ValueError(
+                "input_ids must be [B, T] with T >= "
+                f"prompt_width {self.prompt_width}, got {tuple(input_ids.shape)}"
+            )
+        window = input_ids[:, self.prompt_width :].to(dtype=torch.float32)
+        return SimpleNamespace(logits=window.sum(dim=-1, keepdim=True))
+
+
+@dataclass
+class PPORunOutput:
+    """What one call of ``run_ppo_training`` did.
+
+    Attributes:
+        seed: ``TrainingConfig.seed``. Also written to ``output_path``.
+        step: Trainer step after this call. A resumed call continues, so
+            this is the global step, not ``len(losses)``.
+        losses: ``policy_loss`` for each step taken in this call.
+        metrics: ``asdict(PPOMetrics)`` for each of those steps.
+        output_path: ``{output_dir}/run.json``.
+        checkpoint_path: File written at the end, or None when the config
+            does not set one.
+    """
+
+    seed: int
+    step: int
+    losses: list[float]
+    metrics: list[dict[str, float]]
+    output_path: str
+    checkpoint_path: str | None
+
+
+def tiny_ppo_config(
+    *,
+    output_dir: str,
+    seed: int,
+    batch_size: int,
+    checkpoint_path: str | None,
+) -> TrainingConfig:
+    """CPU config for ``run-ppo --tiny``.
+
+    Starts from ``TrainingConfig.toy_mode`` and then sets the fields this
+    command actually uses. The learning rate is ``1e-2`` so a few CPU
+    steps move the tiny policy. That is not a tuned rate. ``device`` is
+    ``cpu``. ``log_to_wandb`` is false. ``max_seq_length`` is 32, under
+    the tiny Llama's position limit of 64. The policy and reference ids
+    are ``tiny_lm``. Those ids are not loaded. ``method`` is ``ppo``.
+    """
+    if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+        raise ValueError(f"batch_size must be an int >= 1, got {batch_size!r}")
+    config = TrainingConfig.toy_mode()
+    config.seed = seed
+    config.device = "cpu"
+    config.log_to_wandb = False
+    config.output_dir = output_dir
+    config.checkpoint_path = checkpoint_path
+    config.alignment.method = "ppo"
+    config.model.policy_model_id = "tiny_lm"
+    config.model.reference_model_id = "tiny_lm"
+    config.optimization.learning_rate = 1e-2
+    config.dataset.batch_size = batch_size
+    config.dataset.max_seq_length = 32
+    return config
+
+
+def sample_prompt_batch(prompts: Sequence[str], batch_size: int) -> list[str]:
+    """Pick ``batch_size`` prompts. Python, NumPy, and torch each draw once.
+
+    The strings themselves are fixed. Which rows appear is not. A resumed
+    run restores those three RNGs, so the next batch matches the
+    uninterrupted run. This is not a ``DataLoader`` and does not keep a
+    separate generator.
+    """
+    count = len(prompts)
+    if count < 1:
+        raise ValueError("prompts must be non-empty")
+    if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+        raise ValueError(f"batch_size must be an int >= 1, got {batch_size!r}")
+    start = random.randrange(count)
+    stride = int(np.random.randint(1, count)) if count > 1 else 1
+    shift = int(torch.randint(0, count, ()).item())
+    indices = [(start + stride * i + shift) % count for i in range(batch_size)]
+    return [str(prompts[index]) for index in indices]
+
+
+def collate_prompts(
+    tokenizer: object,
+    prompts: Sequence[str],
+    *,
+    max_length: int,
+    pad_token_id: int,
+) -> tuple[Tensor, Tensor]:
+    """Left-pad prompts so the last column is the last real token.
+
+    Returns ``query_tokens`` ``[B, prompt_width]`` and ``prompt_lengths``
+    ``[B]``. ``prompt_width`` is the longest row after truncation, not
+    ``max`` of a separate length list. An empty tokenization raises.
+    """
+    if isinstance(max_length, bool) or not isinstance(max_length, int) or max_length < 1:
+        raise ValueError(f"max_length must be an int >= 1, got {max_length!r}")
+    rows: list[list[int]] = []
+    for text in prompts:
+        encoded = tokenizer(str(text), max_length=max_length)
+        ids = [int(token) for token in encoded["input_ids"]]
+        if not ids:
+            raise ValueError("a prompt tokenized to no tokens")
+        rows.append(ids[:max_length])
+    width = max(len(row) for row in rows)
+    query = torch.full((len(rows), width), int(pad_token_id), dtype=torch.long)
+    lengths = torch.zeros(len(rows), dtype=torch.long)
+    for index, row in enumerate(rows):
+        query[index, width - len(row) :] = torch.tensor(row, dtype=torch.long)
+        lengths[index] = len(row)
+    return query, lengths
+
+
+def _rollout_values(value_model: nn.Module, rollout: RolloutBatch) -> Tensor:
+    """Detached value head on the finished rollout. Shape ``[B, T]``.
+
+    The mask and the position ids are the same pair ``train_step`` builds.
+    This tensor is ``V_old``. The live head is a later forward.
+    """
+    device = next(value_model.parameters()).device
+    input_ids = rollout.input_ids.to(device)
+    prompt_lengths = rollout.prompt_lengths.to(device)
+    response_lengths = rollout.response_lengths.to(device)
+    attention, position_ids = padding_attention(
+        prompt_lengths,
+        response_lengths,
+        int(input_ids.shape[1]),
+        rollout.padding_side,
+        prompt_width=rollout.prompt_width,
+    )
+    value_model.eval()
+    with torch.no_grad():
+        value_out = value_model(
+            input_ids=input_ids,
+            attention_mask=attention,
+            position_ids=position_ids,
+        )
+    values = value_out.value if hasattr(value_out, "value") else value_out
+    if values.ndim == input_ids.ndim + 1 and values.shape[-1] == 1:
+        values = values.squeeze(-1)
+    if values.shape != input_ids.shape:
+        raise ValueError(
+            f"value head shape {tuple(values.shape)} must match input_ids {tuple(input_ids.shape)}"
+        )
+    return values.detach().cpu()
+
+
+def run_ppo_training(
+    trainer: PPOTrainer,
+    n_steps: int,
+    prompts: Sequence[str],
+    tokenizer: object,
+    *,
+    resume_from: str | Path | None = None,
+    max_response_length: int = TINY_PPO_MAX_RESPONSE,
+) -> PPORunOutput:
+    """Run ``n_steps`` PPO updates: rollout, then ``train_step``.
+
+    Calls ``seed_everything`` once. On a fresh run the reference is then
+    replaced with ``frozen_reference_copy`` of the policy, so the
+    reference is the initial policy and not whatever module the caller
+    passed. A resumed call does not take that copy. ``load_checkpoint``
+    replaces the RNG, the policy, the value head, the reference, the
+    optimizer, ``global_step``, and ``kl_coefficient``. The saved
+    reference is the frozen copy from the start of the run.
+
+    Each step samples a prompt batch, left-pads it, and calls
+    ``generate_rollout``. The toy reward is the sum of token ids in the
+    response window (pad id 0 adds nothing, EOS is included), written on
+    the last real response token. ``old_log_probs`` are the stored
+    ``[B, R]`` policy log-probs placed into ``[B, T - 1]``. Sampling uses
+    ``top_p`` 1, so the draw is the full softmax. EOS id is 2 and pad id
+    is 0. When ``checkpoint_path`` is set, the checkpoint is written
+    once, at the end of this call. ``trainer_state`` is
+    ``kl_coefficient``.
+
+    Args:
+        trainer: PPO trainer. Policy and value are trained. The reference
+            stored in the checkpoint is a frozen copy of the initial policy.
+        n_steps: Updates to take in this call. At least 1.
+        prompts: Fixed prompt strings.
+        tokenizer: Maps one string to ``{"input_ids": [...]}``.
+        resume_from: Checkpoint to load before those updates. None starts
+            from the trainer as it was constructed.
+        max_response_length: Response cap passed to ``generate_rollout``.
+
+    Returns:
+        Losses and metrics for the steps taken in this call.
+    """
+    if isinstance(n_steps, bool) or not isinstance(n_steps, int) or n_steps < 1:
+        raise ValueError(f"n_steps must be an int >= 1, got {n_steps!r}")
+    if (
+        isinstance(max_response_length, bool)
+        or not isinstance(max_response_length, int)
+        or max_response_length < 1
+    ):
+        raise ValueError(f"max_response_length must be an int >= 1, got {max_response_length!r}")
+    repro.seed_everything(trainer.config.seed)
+    if resume_from is None:
+        trainer.reference_model = frozen_reference_copy(trainer.policy_model)
+    models = {
+        "policy": trainer.policy_model,
+        "value": trainer.value_model,
+        "reference": trainer.reference_model,
+    }
+    if resume_from is not None:
+        loaded = repro.load_checkpoint(
+            resume_from,
+            models=models,
+            optimizer=trainer.optimizer,
+            config=trainer.config,
+        )
+        trainer.global_step = loaded.step
+        if "kl_coefficient" not in loaded.trainer_state:
+            raise KeyError("PPO checkpoint trainer_state is missing kl_coefficient")
+        trainer.kl_coefficient = float(loaded.trainer_state["kl_coefficient"])
+        trainer.reference_model.requires_grad_(False)
+        trainer.reference_model.eval()
+    losses: list[float] = []
+    metrics: list[dict[str, float]] = []
+    batch_size = trainer.config.dataset.batch_size
+    pad_id = getattr(tokenizer, "pad_token_id", TINY_PPO_PAD_ID)
+    if pad_id is None:
+        pad_id = TINY_PPO_PAD_ID
+    pad_id = int(pad_id)
+    if pad_id == TINY_PPO_EOS_ID:
+        raise ValueError("pad_token_id and eos_token_id must differ")
+    for _ in range(n_steps):
+        texts = sample_prompt_batch(prompts, batch_size)
+        query, prompt_lengths = collate_prompts(
+            tokenizer,
+            texts,
+            max_length=trainer.config.dataset.max_seq_length,
+            pad_token_id=pad_id,
+        )
+        trainer.policy_model.eval()
+        trainer.reference_model.eval()
+        trainer.value_model.eval()
+        reward = ResponseTokenSumReward(int(query.shape[1]))
+        generator = RolloutGenerator(
+            policy_model=trainer.policy_model,
+            reference_model=trainer.reference_model,
+            reward_model=reward,
+            tokenizer=tokenizer,
+            alignment_config=trainer.alignment_config,
+            max_response_length=max_response_length,
+            top_p=1.0,
+            eos_token_id=TINY_PPO_EOS_ID,
+            pad_token_id=pad_id,
+        )
+        rollout = generator.generate_rollout(query, prompt_lengths)
+        old_log_probs = response_logprobs_to_old(
+            rollout.logprobs_policy,
+            prompt_width=rollout.prompt_width,
+            seq_len=int(rollout.input_ids.shape[1]),
+        )
+        batch = {
+            "input_ids": rollout.input_ids,
+            "rewards": rollout.rewards,
+            "values": _rollout_values(trainer.value_model, rollout),
+            "dones": rollout.dones,
+            "prompt_lengths": rollout.prompt_lengths,
+            "response_lengths": rollout.response_lengths,
+            "padding_side": rollout.padding_side,
+            "prompt_width": rollout.prompt_width,
+            "temperature": rollout.temperature,
+        }
+        step_metrics = trainer.train_step(batch, old_log_probs)
+        losses.append(step_metrics.policy_loss)
+        metrics.append(asdict(step_metrics))
+    return _finish_ppo_run(
+        trainer.config,
+        models=models,
+        optimizer=trainer.optimizer,
+        step=trainer.global_step,
+        trainer_state={"kl_coefficient": float(trainer.kl_coefficient)},
+        losses=losses,
+        metrics=metrics,
+    )
+
+
+def _finish_ppo_run(
+    config: TrainingConfig,
+    *,
+    models: dict[str, nn.Module],
+    optimizer: torch.optim.Optimizer,
+    step: int,
+    trainer_state: dict[str, float],
+    losses: list[float],
+    metrics: list[dict[str, float]],
+) -> PPORunOutput:
+    """Write the checkpoint, if any, and ``run.json``."""
+    checkpoint = config.checkpoint_path
+    if checkpoint is not None:
+        repro.save_checkpoint(
+            checkpoint,
+            models=models,
+            optimizer=optimizer,
+            step=step,
+            config=config,
+            trainer_state=trainer_state,
+        )
+    output_path = Path(config.output_dir) / "run.json"
+    output = PPORunOutput(
+        seed=config.seed,
+        step=step,
+        losses=losses,
+        metrics=metrics,
+        output_path=str(output_path),
+        checkpoint_path=checkpoint,
+    )
+    _atomic_text(
+        output_path,
+        json.dumps(
+            {
+                "checkpoint_path": output.checkpoint_path,
+                "config_hash": repro.config_hash(config),
+                "losses": output.losses,
+                "metrics": output.metrics,
+                "seed": output.seed,
+                "step": output.step,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+    )
+    return output
+
+
+def _atomic_text(path: Path, text: str) -> None:
+    """Write ``text`` via a temp file and ``os.replace``."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(text.encode())
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise

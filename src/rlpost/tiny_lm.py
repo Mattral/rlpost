@@ -1,7 +1,8 @@
 """Tiny random-init Llama and a character tokenizer that fits its vocab.
 
-CPU tests and ``run-dpo --tiny`` both use this model. It does not download
-weights. Vocab size is 128. Pad id is 0, bos is 1, eos is 2.
+CPU tests, ``run-dpo --tiny``, and ``run-ppo --tiny`` use this model.
+It does not download weights. Vocab size is 128. Pad id is 0, bos is 1,
+eos is 2. ``TinyValueModel`` is the PPO value head.
 """
 
 from __future__ import annotations
@@ -10,6 +11,37 @@ import torch
 from transformers import LlamaConfig, LlamaForCausalLM
 
 VOCAB = 128
+
+
+class TinyValueModel(torch.nn.Module):
+    """Per-token value head for ``run-ppo --tiny``. Output shape ``[B, T]``.
+
+    An embedding of the tiny vocab and a linear map to one value. No
+    dropout. ``seed`` sets ``torch.manual_seed`` before the weights are
+    created. A resumed run replaces those weights from the checkpoint.
+    """
+
+    def __init__(self, seed: int) -> None:
+        super().__init__()
+        if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
+            raise ValueError(f"seed must be an int >= 0, got {seed!r}")
+        torch.manual_seed(seed)
+        self.embed = torch.nn.Embedding(VOCAB, 32)
+        self.proj = torch.nn.Linear(32, 1)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        del attention_mask, position_ids
+        return self.proj(self.embed(input_ids)).squeeze(-1)
+
+
+def tiny_value_model(seed: int) -> TinyValueModel:
+    """Build ``TinyValueModel``. ``seed`` is the run seed."""
+    return TinyValueModel(seed)
 
 
 def tiny_causal_lm(seed: int) -> LlamaForCausalLM:
