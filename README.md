@@ -58,7 +58,7 @@ loss            = -logsigmoid(chosen_reward - rejected_reward).mean()
 
 `beta` is `AlignmentConfig.dpo_beta` (default 0.1, must be > 0). It is not the PPO `kl_coefficient`. The margin is the mean of `chosen_reward - rejected_reward`. Accuracy is the fraction of rows with `chosen_reward > rejected_reward`.
 
-Parity is against TRL 1.17.1 `DPOTrainer._compute_loss` (`loss_type` sigmoid, `label_smoothing` 0). That method sums completion-token log-probs the same way. On CPU, torch 2.15, the tiny Llama, the loss matched within `1e-6`. The logged mean of the sums matched within `1e-5`. The measured gap on that mean was `1.907e-6` on the two batch-of-2 layouts, seeds 0–5. A batch of 4 with unequal lengths passes those same absolute tolerances. A separate maximum for that batch was not recorded.
+Parity is against TRL 1.17.1 `DPOTrainer._compute_loss` (`loss_type` sigmoid, `label_smoothing` 0). That method sums completion-token log-probs the same way. On CPU, torch 2.15, the tiny Llama, the loss matched within `1e-6`. The logged mean of the sums matched within `1e-5`. The measured gap on that mean was `1.907e-6` on the two batch-of-2 layouts, seeds 0–5. On the batch of 4 the largest |loss − TRL loss| was `1.1920928955078125e-07`, the largest |gradient| gap was `8.940696716308594e-08`, and the largest logged-mean gap was `1.9073486328125e-06`.
 
 `python -m rlpost.cli run-dpo --tiny` trains `tiny_lm` on CPU. It does not download a model. Without `--tiny` the command exits non-zero and writes no `run.json`.
 

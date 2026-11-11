@@ -1106,6 +1106,7 @@ Cover:
   neither has a CPU end-to-end test.
 - The notes that were on this item now sit on the sub-item that owns them.
 - 2026-11-10: S0.11a is done. `run-dpo --tiny` trains on CPU. `run-ppo`, `train-sft`, and `train-reward` are still the later sub-items.
+- 2026-11-10: S0.11e added. A real model id, a chat template, and a fixed data slice. Prerequisite for S1.2. Not part of the original four-way split.
 
 ### [x] S0.11a DPO batched collation and `run-dpo`
 - Depends on: S0.8.
@@ -1149,9 +1150,14 @@ Cover:
     (1, 5), (3, 7). Rejected are (3, 4), (1, 9), (5, 3), (2, 5).
     Loss, margin, and rewards stay at absolute tolerance 1e-6. The
     logged completion-sum means stay at 1e-5. Gradients stay at 1e-6.
-    The earlier maximum on the batch-of-2 logged mean, 1.907e-6, and
-    the earlier gradient maximum, 9.686e-8, were not recomputed for
-    this layout. A separate maximum was not recorded.
+    The batch-of-2 maxima stay 1.907e-6 on the logged mean and 9.686e-8
+    on the gradient.
+  - 2026-11-10. Batch-of-4 maxima, seeds 0–5, beta 0.2, CPU, torch
+    2.15.0+cpu. Same comparison as the parity tests. The largest
+    |rlpost loss − TRL loss| was 1.1920928955078125e-07. The largest
+    |rlpost grad − TRL grad| was 8.940696716308594e-08. The largest gap
+    on the logged completion-sum mean was 1.9073486328125e-06, the same
+    float32 ulp as the batch-of-2 figure.
   - `run_dpo_training` calls `seed_everything` once, then samples
     `TINY_DPO_PAIRS` and calls `train_step`. Python, NumPy, and torch
     each draw, so a missed RNG restore changes the next batch. There
@@ -1188,6 +1194,9 @@ Cover:
     `pytest -q` exited 0 and printed 207 progress marks. It did not
     print its own duration line. `pytest --collect-only -q` reports
     207 tests. The 187 passed line under S0.8 is the count on `d10cd09`.
+  - 2026-11-10 follow-up, `44a7604`. The reference is a frozen copy of
+    the initial policy. After that commit, `.venv`, torch 2.15.0+cpu:
+    208 passed. `pytest -q` exited 0 and printed 208 progress marks.
 
 ### [ ] S0.11b PPO gathered log-probs and `run-ppo`
 - Depends on: S0.8.
@@ -1246,7 +1255,7 @@ Cover:
     command runs without an eval dataset.
 
 ### [ ] S0.11d Config cleanup and dataloader state
-- Depends on: S0.8. It does not block S0.11a–c.
+- Depends on: S0.8. It does not block S0.11a–c or S0.11e.
 - Remove the remaining silent fallbacks: `max_grad_norm or 1.0`,
   `getattr(config, "log_to_wandb", True)`, and any other `getattr` default
   on a config field. Read the fields.
@@ -1272,6 +1281,20 @@ Cover:
     RNG. It does not store a DataLoader generator. A shuffled loader
     rebuilt after resume does not continue the same order. Save that
     generator state with the checkpoint.
+
+### [ ] S0.11e Real model and data path
+- Depends on: S0.11a and S0.11b. Prerequisite for S1.2.
+- `run-dpo` and `run-ppo` accept a Hugging Face model id and a tokenizer.
+  The chat template is applied.
+- A preference loader for DPO and a prompt loader for PPO. Each uses a
+  fixed slice and a fixed split.
+- A CPU test uses a tiny Hugging Face checkpoint, or the tiny_lm stand-in.
+  No GPU run.
+- Notes:
+  - 2026-11-10. Added on PR #30, before merge. Not implemented in this
+    PR. `run-dpo --tiny` still builds `tiny_causal_lm` and reads the
+    fixed string list `TINY_DPO_PAIRS`. It does not load a model id or
+    a dataset split. `run-ppo` still does not train.
 
 ### [x] S0.9 Delete the orphaned distributed scaffolding
 - Branch: `chore/S0.9-delete-distributed`.
@@ -1467,7 +1490,9 @@ Write `benchmarks/PREREG.md` **before** any GPU run. It fixes:
   - 2026-11-04: DPO `train_step` was one pair, shape `[1, T]`. Batched
     collation had to land before this harness.
   - 2026-11-10: S0.11a landed that collation. `train_step` accepts a
-    batch. This harness is still unbuilt.
+    batch. This harness is still unbuilt. The real model id, the
+    tokenizer chat template, and the fixed dataset slice are S0.11e.
+    That item is a prerequisite for this harness.
   - Rollouts store full `[B, R, V]` policy and reference logits, and
     generation has no KV cache. `pad_token_id == eos_token_id` raises
     in `RolloutGenerator`. Those three are on the S0.11b note. They
@@ -1566,3 +1591,4 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-11-09 · S0.8 · The toy loop lives in the tests. The checkpoint loads with weights_only=True. 187 passed. · d10cd09
 - 2026-11-10 · S0.11 · Split into S0.11a–d. DPO collation and run-dpo are S0.11a. PPO gathered log-probs and run-ppo are S0.11b. SFT, the reward model, accelerate, and the LoRA fields are S0.11c. Silent fallbacks and the dataloader generator are S0.11d. · 463e2f3
 - 2026-11-10 · S0.11a · Batched DPO collation, right-padded per side, and `run-dpo --tiny` on CPU. A batch of 4 passes the existing TRL tolerances. N=2 resume matches with `==` and `torch.equal`. 207 passed. · 1b3c304, a54e68e
+- 2026-11-10 · S0.11a · The run-dpo reference is a frozen copy of the initial policy. Step-0 loss is ln 2 within 1e-6, and both rewards are 0. 208 passed. · 44a7604
