@@ -1,32 +1,9 @@
-"""Tiny random-init causal LM for CPU tests.
+"""Re-export the tiny Llama used by the CPU tests.
 
-Not collected by pytest (``python_files = test_*.py``).
+Not collected by pytest (``python_files = test_*.py``). The builder lives
+in ``rlpost.tiny_lm`` so ``run-dpo --tiny`` can construct the same model.
 """
 
-import torch
-from transformers import LlamaConfig, LlamaForCausalLM
+from rlpost.tiny_lm import VOCAB, TinyCharTokenizer, tiny_causal_lm
 
-VOCAB = 128
-
-
-def tiny_causal_lm(seed: int) -> LlamaForCausalLM:
-    """Llama with 2 layers, hidden 32, vocab 128. Weights come from ``seed``."""
-    torch.manual_seed(seed)
-    config = LlamaConfig(
-        vocab_size=VOCAB,
-        hidden_size=32,
-        intermediate_size=64,
-        num_hidden_layers=2,
-        num_attention_heads=4,
-        num_key_value_heads=4,
-        max_position_embeddings=64,
-        attention_dropout=0.0,
-        hidden_act="silu",
-        rms_norm_eps=1e-5,
-        pad_token_id=0,
-        bos_token_id=1,
-        eos_token_id=2,
-    )
-    model = LlamaForCausalLM(config)
-    model.eval()
-    return model
+__all__ = ["VOCAB", "TinyCharTokenizer", "tiny_causal_lm"]
