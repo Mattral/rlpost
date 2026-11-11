@@ -61,7 +61,7 @@ The package floor stays `torch>=2.15`. That floor was checked on torch 2.15. `to
 
 `python -m rlpost.cli train-sft` and `train-reward` construct their trainers and call `train`. Both will try to download models and data. Neither has a recorded CPU run.
 
-`run-ppo` checks that `alignment.method` is `ppo`, writes the config YAML, and returns. It does not call `PPOTrainer`.
+`run-ppo --tiny` trains `tiny_lm` on CPU and writes `{output_dir}/run.json`. The reference is a frozen copy of the initial policy. Without `--tiny` it exits non-zero and does not download a model.
 
 `run-dpo --tiny` trains `tiny_lm` on CPU and writes `{output_dir}/run.json`. Without `--tiny` it exits non-zero and does not download a model.
 

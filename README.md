@@ -83,13 +83,13 @@ The value and the gradient name different KLs for `k1` and `k3` because the back
 ```bash
 python -m rlpost.cli train-sft --config configs/toy.yaml
 python -m rlpost.cli train-reward --config configs/toy.yaml
-python -m rlpost.cli run-ppo --toy
+python -m rlpost.cli run-ppo --tiny --steps 2 --output-dir ./outputs/ppo-tiny
 python -m rlpost.cli run-dpo --tiny --steps 2 --output-dir ./outputs/dpo-tiny
 ```
 
 `train-sft` builds `SFTTrainer` and calls `train`. `train-reward` builds `RewardModelTrainer` and calls `train`. Both import those trainers inside the command, so starting the CLI does not import peft. Both will download models and the HH-RLHF dataset. Neither command has a recorded runtime in this repo.
 
-`run-ppo` checks that `alignment.method` is `ppo`, writes the config YAML, and returns. The function body says the training loop is not wired up.
+`run-ppo --tiny` builds one tiny Llama, a value head, and freezes a copy of that initial policy as the reference. It does not download a model. The prompts are a fixed list. The reward on each row is the sum of the response-window token ids. Pad id 0 adds nothing, and EOS is included. That sum is written on the last real response token. Without `--tiny` the command exits non-zero and writes no `run.json`. At step 0 the reference matches the policy, so on the response mask the ratio is 1, the KL is 0 for `k2` and `k3`, and the clip fraction is 0. A test runs 4 steps in one process and 2 plus 2 across processes. Losses and metrics match with `==`. Policy, value, and reference weights match with `torch.equal`.
 
 `run-dpo --tiny` builds one tiny Llama and freezes a copy of that initial policy as the reference. It tokenizes a fixed list of preference strings and takes `--steps` updates on CPU. `--checkpoint` writes a checkpoint at the end. `--resume` loads that file first. At step 0 the loss is ln 2, within absolute tolerance `1e-6`, and the margin is 0. A test runs 4 steps in one process and 2 plus 2 across processes. Losses and metrics match with `==`. Weights match with `torch.equal`.
 
