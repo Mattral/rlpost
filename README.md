@@ -32,11 +32,11 @@ There is no coverage number in this README. A green coverage run has not been re
 | `src/rlpost/config.py` | Pydantic configs. `TrainingConfig.toy_mode()` and `from_yaml`. Tested in `tests/test_config.py`. |
 | `src/rlpost/ops.py` | `gather_logprobs`: logits at position `t` score token `t+1`. Shape `[B, T, V]` in, `[B, T-1]` out. `response_token_mask` marks generated response tokens in that layout. |
 | `src/rlpost/ppo_engine.py` | The only PPO implementation: `PPOTrainer`. GAE, a clipped policy loss, a value loss (unclipped unless `value_clip` is set), entropy, and a per-token KL (default `k2`). Losses and advantages use the response-token mask. `train_step` uses `gather_logprobs`. |
-| `src/rlpost/dpo_engine.py` | `DPOTrainer`. The CLI does not call it. |
-| `src/rlpost/sft_engine.py` | LoRA SFT through the Hugging Face `Trainer`. |
-| `src/rlpost/reward_engine.py` | Preference reward-model trainer. |
+| `src/rlpost/dpo_engine.py` | `DPOTrainer`. `run-dpo --tiny` calls it. |
+| `src/rlpost/sft_engine.py` | Completion-token SFT. `train-sft --tiny` trains `tiny_lm` on CPU. |
+| `src/rlpost/reward_engine.py` | Bradley-Terry reward model. `train-reward --tiny` trains a tiny scorer on CPU. |
 | `src/rlpost/dataset.py` | Preference-pair loading. Toy mode slices Anthropic HH-RLHF to 1,000 rows when it builds the cache. |
-| `src/rlpost/cli.py` | Four Typer commands. Two of them do not train. See below. |
+| `src/rlpost/cli.py` | Four Typer commands. Each `--tiny` path trains on CPU. See below. |
 | `train.py` | Exits with status 2. It does not call `PPOTrainer`. |
 | `configs/` | YAML for a toy run and a default run. |
 
@@ -78,16 +78,34 @@ The value and the gradient name different KLs for `k1` and `k3` because the back
 
 `train_step` calls `gather_logprobs` for the policy and the reference. Logits at position `t` score token `t+1`. The policy ratio and the KL mean both use those log-probabilities, shape `[B, T-1]`. One response mask is built from the rollout lengths. Index `t` of the gathered mask is 1 when token `t+1` is a generated response token, and 0 for prompt and padding. Policy loss, entropy, KL, GAE, and the value loss all use that gathered mask, shape `[B, T-1]`. Each mean is `sum(x * mask) / sum(mask)`. Advantage normalisation uses only those positions. GAE reads the rollout values (`V_old = batch["values"]`), not the live value head, so advantages and returns stay fixed across epochs. Returns are `A + V_old`. The live value prediction is `value_out[:, :-1]`, the state before each action. The value loss trains that prediction. The sequence reward sits on the last response token. The `[B, T]` mask only places that reward. `kl_estimator="k1"` is rejected when the config is built. The two step tests run on a tiny causal LM. The clipped surrogate, both value losses, the entropy term, and the KL estimators are tested. The entropy scalar is the mean of TRL 1.17.1 `entropy_from_logits` on the rows the mask keeps.
 
+## SFT
+
+`train-sft --tiny` trains `tiny_causal_lm` on a fixed list of prompt and completion strings. The loss is the mean negative log-likelihood of the completion tokens. Logits at position `t` score token `t+1`, and the kept mask is `completion_mask[:, 1:]`. Prompt tokens and padding are not targets. The logit on the last prompt position stays in the loss, because it predicts the first completion token.
+
+The learning rate on that command is `1e-2`. That is not a tuned rate. The decrease test uses 8 steps, seed 7, and batch size 4. The check is the completion-token NLL of every tiny row. After those 8 updates it is lower than before any update.
+
+## Reward model
+
+`train-reward --tiny` trains `tiny_reward_model` on a fixed list of preference pairs. One score per sequence. The loss is:
+
+```
+loss = -logsigmoid(r_chosen - r_rejected).mean()
+```
+
+Equal scores give `ln 2`. The learning rate on that command is `1e-1`. That is not a tuned rate. The separation test uses 8 steps, seed 7, and batch size 4. After those updates every tiny pair has `r_chosen > r_rejected`, and the mean of `r_chosen - r_rejected` is higher than before any update.
+
 ## Command line
 
 ```bash
-python -m rlpost.cli train-sft --config configs/toy.yaml
-python -m rlpost.cli train-reward --config configs/toy.yaml
+python -m rlpost.cli train-sft --tiny --steps 2 --output-dir ./outputs/sft-tiny
+python -m rlpost.cli train-reward --tiny --steps 2 --output-dir ./outputs/reward-tiny
 python -m rlpost.cli run-ppo --tiny --steps 2 --output-dir ./outputs/ppo-tiny
 python -m rlpost.cli run-dpo --tiny --steps 2 --output-dir ./outputs/dpo-tiny
 ```
 
-`train-sft` builds `SFTTrainer` and calls `train`. `train-reward` builds `RewardModelTrainer` and calls `train`. Both import those trainers inside the command, so starting the CLI does not import peft. Both will download models and the HH-RLHF dataset. Neither command has a recorded runtime in this repo.
+`train-sft --tiny` builds one tiny Llama and trains it on CPU. It does not download a model. Without `--tiny` the command exits non-zero and writes no `run.json`. `--checkpoint` writes a checkpoint at the end. `--resume` loads that file first. A test runs 4 steps in one process and 2 plus 2 across processes. Losses and metrics match with `==`. Policy weights match with `torch.equal`.
+
+`train-reward --tiny` builds one tiny sequence scorer and trains it on CPU. It does not download a model. Without `--tiny` the command exits non-zero and writes no `run.json`. The same 4-step and 2-plus-2 check matches losses, metrics, and the reward weights.
 
 `run-ppo --tiny` builds one tiny Llama, a value head, and freezes a copy of that initial policy as the reference. It does not download a model. The prompts are a fixed list. The reward on each row is the sum of the response-window token ids. Pad id 0 adds nothing, and EOS is included. That sum is written on the last real response token. Without `--tiny` the command exits non-zero and writes no `run.json`. At step 0 the reference matches the policy, so on the response mask the ratio is 1, the KL is 0 for `k2` and `k3`, and the clip fraction is 0. A test runs 4 steps in one process and 2 plus 2 across processes. Losses and metrics match with `==`. Policy, value, and reference weights match with `torch.equal`.
 
@@ -103,7 +121,7 @@ Required packages are the ones the code imports: torch, transformers, datasets, 
 pip install -e ".[test]"
 ```
 
-`[test]` pins pytest 9.2.0, ruff 0.17.3, and TRL 1.17.1. `[lora]` adds peft for the SFT and reward trainers. The CPU job installs `.[test]` under `requirements-cpu.txt` and the CPU torch index. See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+`[test]` pins pytest 9.2.0, ruff 0.17.3, and TRL 1.17.1. `[lora]` adds peft for the Hugging Face LoRA loaders. `[train]` adds accelerate, which `transformers.Trainer` imports. The tiny commands use neither extra. The CPU job installs `.[test]` under `requirements-cpu.txt` and the CPU torch index. See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 The measured-scope check above used a virtualenv with the CPU wheel of torch 2.15.0 and `PYTHONPATH=src`. It did not run `pip install -e .`.
 
@@ -112,7 +130,7 @@ The measured-scope check above used a virtualenv with the CPU wheel of torch 2.1
 ```
 src/rlpost/            package
 configs/               toy and default YAML
-tests/                 CPU unit tests; the full run is not green
+tests/                 CPU unit tests
 docs/                  notes and older write-ups
 train.py               exits 2; does not call PPOTrainer
 ROADMAP.md             status of the work
