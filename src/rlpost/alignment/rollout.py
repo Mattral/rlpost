@@ -14,7 +14,7 @@ import torch
 import torch.nn.functional as F
 
 from rlpost.config import AlignmentConfig
-from rlpost.ops import padding_attention, response_token_mask
+from rlpost.ops import gather_logprobs, padding_attention, response_token_mask
 
 
 @dataclass
@@ -24,8 +24,8 @@ class Rollout:
     query_tokens: torch.Tensor
     response_tokens: torch.Tensor
     reward: torch.Tensor
-    logits_policy: torch.Tensor
-    logits_reference: torch.Tensor
+    logprobs_policy: torch.Tensor
+    logprobs_reference: torch.Tensor
 
 
 @dataclass
@@ -54,6 +54,14 @@ class RolloutBatch:
     ``temperature`` is the ``AlignmentConfig.temperature`` this call
     sampled with. ``PPOTrainer.train_step`` raises when its config
     field is a different number. There is no second temperature.
+
+    ``logprobs_policy`` and ``logprobs_reference`` are ``[B, R]``.
+    ``R`` is ``max_response_length``. Column ``r`` is the log-prob of
+    the token in response column ``r``, including the pad columns after
+    EOS. The value is ``gather_logprobs(logits / temperature)`` on the
+    finished sequence, the same gather ``train_step`` repeats. It is
+    not a ``[B, R, V]`` logit tensor, and it is not renormalized inside
+    the ``top_p`` nucleus.
     """
 
     rollouts: list[Rollout]
@@ -66,6 +74,53 @@ class RolloutBatch:
     rewards: torch.Tensor
     token_mask: torch.Tensor
     temperature: float
+    logprobs_policy: torch.Tensor
+    logprobs_reference: torch.Tensor
+
+
+def response_logprobs_to_old(
+    response_logprobs: torch.Tensor,
+    *,
+    prompt_width: int,
+    seq_len: int,
+) -> torch.Tensor:
+    """Place ``[B, R]`` response log-probs into the gathered layout ``[B, T - 1]``.
+
+    Response column ``r`` is token column ``prompt_width + r``.
+    ``gather_logprobs`` scores that token from logits at
+    ``prompt_width + r - 1``. ``prompt_width`` must be at least 1, so
+    the first response token has a logit. Columns before that window
+    are 0. The gathered response mask drops them. ``R`` is
+    ``seq_len - prompt_width``.
+
+    Args:
+        response_logprobs: Policy log-probs of the response window,
+            shape ``[B, R]``.
+        prompt_width: Padded query width. Not ``max(prompt_lengths)``.
+        seq_len: ``T``, the padded length of ``input_ids``.
+
+    Returns:
+        ``old_log_probs`` of shape ``[B, T - 1]`` for ``train_step``.
+    """
+    if response_logprobs.ndim != 2:
+        raise ValueError(f"response_logprobs must be [B, R], got {tuple(response_logprobs.shape)}")
+    if isinstance(prompt_width, bool) or not isinstance(prompt_width, int):
+        raise TypeError(f"prompt_width must be an int, got {type(prompt_width).__name__}")
+    if prompt_width < 1:
+        raise ValueError(
+            f"prompt_width must be >= 1 so the first response token has a logit, got {prompt_width}"
+        )
+    if isinstance(seq_len, bool) or not isinstance(seq_len, int) or seq_len <= prompt_width:
+        raise ValueError(f"seq_len must be an int > prompt_width ({prompt_width}), got {seq_len!r}")
+    response_len = seq_len - prompt_width
+    if response_logprobs.shape[1] != response_len:
+        raise ValueError(
+            f"response_logprobs width {response_logprobs.shape[1]} must be "
+            f"seq_len - prompt_width = {response_len}"
+        )
+    old = response_logprobs.new_zeros(response_logprobs.shape[0], seq_len - 1)
+    old[:, prompt_width - 1 :] = response_logprobs
+    return old
 
 
 def last_response_index(token_mask: torch.Tensor) -> torch.Tensor:
@@ -200,8 +255,13 @@ class RolloutGenerator:
         read once at the start of this call and stored on the returned
         batch. ``train_step`` gathers log-probs at that same number and
         raises when its config field differs. ``top_p`` only filters
-        the tokens that can be drawn. It does not change the stored
-        logits or the train-time log-probs.
+        the tokens that can be drawn. The stored log-probs are
+        ``gather_logprobs(logits / temperature)`` on the finished
+        sequence, sliced to the response window ``[B, R]``. That is the
+        gather ``train_step`` repeats, so at the first update the stored
+        policy log-probs match the new ones. A prefix logit and that
+        packed gather are not bit-identical, so the prefix logit is not
+        what is stored. The nucleus is not applied to the stored value.
         """
         temperature = self.alignment_config.temperature
         if query_tokens.ndim != 2:
@@ -228,8 +288,6 @@ class RolloutGenerator:
         )
         finished = torch.zeros(batch, dtype=torch.bool, device=device)
         lengths = torch.zeros(batch, dtype=torch.long, device=device)
-        policy_steps: list[torch.Tensor] = []
-        ref_steps: list[torch.Tensor] = []
         current = query_tokens.clone()
 
         for step in range(self.max_response_length):
@@ -246,13 +304,13 @@ class RolloutGenerator:
                 attention_mask=attention_mask,
                 position_ids=position_ids,
             ).logits[:, -1, :]
-            ref_logits = self.reference_model(
+            # The reference is scored on the same prefix. Its logits are not
+            # stored. The packed gather below is the log-prob train_step uses.
+            self.reference_model(
                 input_ids=current,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
-            ).logits[:, -1, :]
-            policy_steps.append(policy_logits)
-            ref_steps.append(ref_logits)
+            )
             sampled = self._sample_token(
                 policy_logits,
                 temperature=temperature,
@@ -281,6 +339,22 @@ class RolloutGenerator:
             "mixed",
             prompt_width=prompt_width,
         )
+        logprobs_policy = self._response_logprobs(
+            self.policy_model,
+            input_ids,
+            attention_mask,
+            position_ids,
+            temperature,
+            prompt_width,
+        )
+        logprobs_reference = self._response_logprobs(
+            self.reference_model,
+            input_ids,
+            attention_mask,
+            position_ids,
+            temperature,
+            prompt_width,
+        )
         reward_out = self.reward_model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -302,8 +376,6 @@ class RolloutGenerator:
             rows = torch.arange(batch, device=dones.device)[hit_eos]
             dones[rows, last[hit_eos]] = 1
 
-        policy_logits_all = torch.stack(policy_steps, dim=1)
-        ref_logits_all = torch.stack(ref_steps, dim=1)
         rollouts: list[Rollout] = []
         for index in range(batch):
             length = int(lengths[index].item())
@@ -311,8 +383,8 @@ class RolloutGenerator:
                 Rollout(
                     query_tokens=query_tokens[index].detach().cpu(),
                     response_tokens=response[index, :length].detach().cpu(),
-                    logits_policy=policy_logits_all[index, :length].detach().cpu(),
-                    logits_reference=ref_logits_all[index, :length].detach().cpu(),
+                    logprobs_policy=logprobs_policy[index, :length].detach().cpu(),
+                    logprobs_reference=logprobs_reference[index, :length].detach().cpu(),
                     reward=scores[index].detach().cpu(),
                 )
             )
@@ -328,7 +400,44 @@ class RolloutGenerator:
             rewards=rewards.detach().cpu(),
             token_mask=token_mask.detach().cpu(),
             temperature=temperature,
+            logprobs_policy=logprobs_policy.detach().cpu(),
+            logprobs_reference=logprobs_reference.detach().cpu(),
         )
+
+    def _response_logprobs(
+        self,
+        model: torch.nn.Module,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        position_ids: torch.Tensor,
+        temperature: float,
+        prompt_width: int,
+    ) -> torch.Tensor:
+        """Gathered log-prob of the response window. Shape ``[B, R]``.
+
+        This is the packed forward ``train_step`` repeats: logits divided
+        by ``temperature``, then ``gather_logprobs``, then the columns
+        that score response tokens. ``R`` is ``max_response_length``.
+        """
+        if prompt_width < 1:
+            raise ValueError(
+                "prompt_width must be >= 1 so the first response token has a logit, "
+                f"got {prompt_width}"
+            )
+        outputs = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+        )
+        logits = outputs.logits if hasattr(outputs, "logits") else outputs
+        gathered = gather_logprobs(logits / temperature, input_ids)
+        response = gathered[:, prompt_width - 1 :]
+        if response.shape[1] != self.max_response_length:
+            raise ValueError(
+                f"response log-probs width {response.shape[1]} must be "
+                f"max_response_length {self.max_response_length}"
+            )
+        return response
 
     @staticmethod
     def _decode_reward(
@@ -412,9 +521,9 @@ class RolloutGenerator:
         The distribution is ``softmax(logits / temperature)``.
         ``temperature`` is ``AlignmentConfig.temperature``, read by
         ``generate_rollout``. When ``top_p < 1``, tokens past the
-        nucleus are dropped before the draw. The stored logits stay
-        the raw model outputs. Train-time log-probs are the full
-        ``log_softmax(logits / temperature)``, not the nucleus.
+        nucleus are dropped before the draw. The stored log-probs stay
+        the full ``log_softmax(logits / temperature)`` of the finished
+        sequence, not the nucleus.
         """
         scaled_logits = logits / temperature
         if top_p < 1.0:
