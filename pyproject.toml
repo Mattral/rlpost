@@ -46,6 +46,10 @@ test = [
 lora = [
     "peft>=0.17",
 ]
+train = [
+    # Hugging Face Trainer imports accelerate. The CPU lock pins 1.15.0.
+    "accelerate>=1.15",
+]
 
 [project.urls]
 Homepage = "https://github.com/Mattral/rlpost"

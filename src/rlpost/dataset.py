@@ -168,8 +168,8 @@ class PreferencePairDataset(IterableDataset):
                 )
             )
 
-        # Limit to dataset_size if specified
-        if self.config.dataset_size:
+        # None keeps the split. The field is validated ge=1 when set.
+        if self.config.dataset_size is not None:
             pairs = pairs[: self.config.dataset_size]
 
         return pairs

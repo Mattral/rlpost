@@ -22,6 +22,9 @@ model:
   lora_rank: 4
   lora_alpha: 8
   lora_dropout: 0.05
+  lora_target_modules:
+    - q_proj
+    - v_proj
   attn_implementation: eager
 
 optimization:
@@ -56,6 +59,7 @@ alignment:
 dataset:
   dataset_name: Anthropic/hh-rlhf
   dataset_split: train
+  dataset_size: null
   preference_field: chosen
   rejected_field: rejected
   prompt_field: prompt
