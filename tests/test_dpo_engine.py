@@ -20,7 +20,11 @@ labels by one. ``_compute_loss`` then sums the row when ``ld_alpha`` is
 
 The parity tests run seeds 0 through 5. The policy is ``tiny_causal_lm(seed)``,
 the reference is ``tiny_causal_lm(seed + 10)``, and the token batch uses that
-same seed. Each seed runs three times: the same masks on both sides, a batch
+same seed. Those two models are different initializations on purpose.
+``run_dpo_training`` freezes a copy of the initial policy, so its first loss
+is ln 2 and the gap is identically zero. This file keeps the models distinct
+so the beta-scaled gap is what gets compared with TRL.
+Each seed runs three times: the same masks on both sides, a batch
 of 2 where chosen and rejected have different completion lengths and different
 padding, and a batch of 4 with a different prompt length and completion
 length on every row. Those masks are separate arguments on both sides.
@@ -108,6 +112,8 @@ def _trainer(
     beta: float | None = None,
     learning_rate: float | None = None,
 ) -> DPOTrainer:
+    # Distinct models. The training path copies the policy; this helper
+    # does not, because a copy would make the TRL gap identically zero.
     config = TrainingConfig.toy_mode()
     config.log_to_wandb = False
     if beta is not None:

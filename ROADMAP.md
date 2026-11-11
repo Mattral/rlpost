@@ -1158,9 +1158,12 @@ Cover:
     is no DataLoader. `tiny_dpo_config` sets device `cpu`, learning rate
     `1e-2`, `max_seq_length` 32, and `log_to_wandb` false. The rate is
     not a tuned or measured quality claim. Policy is
-    `tiny_causal_lm(seed)`. Reference is `tiny_causal_lm(seed + 1)`
-    and stays equal to a fresh model at that seed. The ids in the
-    config are the string `tiny_lm` and are not loaded.
+    `tiny_causal_lm(seed)`. The reference is a frozen deep copy of that
+    initial policy, not a second seed. A resumed run reloads the saved
+    copy. The ids in the config are the string `tiny_lm` and are not
+    loaded. At step 0, with the two models equal, the loss is ln 2
+    within absolute tolerance 1e-6, the margin is 0, and both reward
+    tensors are 0.
   - The end-to-end test is `tests/test_dpo_cli.py`. N is 2 and the seed
     is 7. Batch size is 4. One process takes 4 steps. Another takes 2,
     writes a checkpoint, and a third process resumes for 2 more. The

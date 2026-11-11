@@ -91,7 +91,7 @@ python -m rlpost.cli run-dpo --tiny --steps 2 --output-dir ./outputs/dpo-tiny
 
 `run-ppo` checks that `alignment.method` is `ppo`, writes the config YAML, and returns. The function body says the training loop is not wired up.
 
-`run-dpo --tiny` builds two tiny Llamas, tokenizes a fixed list of preference strings, and takes `--steps` updates on CPU. The reference stays frozen. `--checkpoint` writes a checkpoint at the end. `--resume` loads that file first. A test runs 4 steps in one process and 2 plus 2 across processes. Losses and metrics match with `==`. Weights match with `torch.equal`.
+`run-dpo --tiny` builds one tiny Llama and freezes a copy of that initial policy as the reference. It tokenizes a fixed list of preference strings and takes `--steps` updates on CPU. `--checkpoint` writes a checkpoint at the end. `--resume` loads that file first. At step 0 the loss is ln 2, within absolute tolerance `1e-6`, and the margin is 0. A test runs 4 steps in one process and 2 plus 2 across processes. Losses and metrics match with `==`. Weights match with `torch.equal`.
 
 `TrainingConfig.toy_mode()` sets the policy and the reference model to `distilgpt2`, the reward model to `prajjwal1/bert-tiny`, the device to `cuda`, and the dataset name to `Anthropic/hh-rlhf`. Those are config defaults. They are not a measured run.
 

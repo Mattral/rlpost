@@ -372,15 +372,22 @@ def run_dpo(
 ) -> None:
     """Train DPO on tiny_lm.
 
-    ``--tiny`` builds two tiny Llamas, tokenizes a fixed list of preference
-    strings, and runs ``steps`` updates. The reference stays frozen. Pass
-    ``--checkpoint`` to write a checkpoint at the end, and ``--resume`` to
-    load that file first. A Hugging Face model id is not loaded.
+    ``--tiny`` builds one tiny Llama and freezes a copy of it as the
+    reference. It does not draw a second initialization. The strings are
+    a fixed list. Pass ``--checkpoint`` to write a checkpoint at the end,
+    and ``--resume`` to load that file first. A Hugging Face model id is
+    not loaded.
 
     Example:
         python -m rlpost.cli run-dpo --tiny --steps 2 --output-dir ./outputs/dpo
     """
-    from rlpost.dpo_engine import TINY_DPO_PAIRS, DPOTrainer, run_dpo_training, tiny_dpo_config
+    from rlpost.dpo_engine import (
+        TINY_DPO_PAIRS,
+        DPOTrainer,
+        frozen_reference_copy,
+        run_dpo_training,
+        tiny_dpo_config,
+    )
     from rlpost.tiny_lm import TinyCharTokenizer, tiny_causal_lm
 
     setup_logging(verbose)
@@ -409,7 +416,7 @@ def run_dpo(
             checkpoint_path=checkpoint,
         )
         policy = tiny_causal_lm(train_config.seed)
-        reference = tiny_causal_lm(train_config.seed + 1)
+        reference = frozen_reference_copy(policy)
         trainer = DPOTrainer(
             train_config,
             policy_model=policy,

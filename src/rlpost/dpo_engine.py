@@ -7,6 +7,7 @@ This module provides:
 - Comparable training loop to PPO
 """
 
+import copy
 import json
 import logging
 import os
@@ -690,6 +691,19 @@ class DPORunOutput:
     checkpoint_path: str | None
 
 
+def frozen_reference_copy(policy: Module) -> Module:
+    """Frozen deep copy of the policy as it is right now.
+
+    The training path uses this as π_ref. It is not a second random
+    initialization. A resumed run does not call this: the checkpoint
+    already holds the copy from the start of that run.
+    """
+    reference = copy.deepcopy(policy)
+    reference.requires_grad_(False)
+    reference.eval()
+    return reference
+
+
 def tiny_dpo_config(
     *,
     output_dir: str,
@@ -759,15 +773,19 @@ def run_dpo_training(
 ) -> DPORunOutput:
     """Run ``n_steps`` string DPO updates on ``tiny``-sized batches.
 
-    Calls ``seed_everything`` once. A resumed call then
-    ``load_checkpoint``, which replaces the RNG, the policy, the
-    reference, the optimizer, and ``step_count``. Each step samples a
-    batch and calls ``train_step``. When ``checkpoint_path`` is set, the
-    checkpoint is written once, at the end of this call.
+    Calls ``seed_everything`` once. On a fresh run the reference is then
+    replaced with ``frozen_reference_copy`` of the policy, so π_ref is
+    the initial policy and not whatever module the caller passed. A
+    resumed call does not take that copy. ``load_checkpoint`` replaces
+    the RNG, the policy, the reference, the optimizer, and
+    ``step_count``. The saved reference is the frozen copy from the
+    start of the run. Each step samples a batch and calls ``train_step``.
+    When ``checkpoint_path`` is set, the checkpoint is written once, at
+    the end of this call.
 
     Args:
-        trainer: DPO trainer. The policy is trained. The reference is
-            frozen and is still stored in the checkpoint.
+        trainer: DPO trainer. The policy is trained. The reference stored
+            in the checkpoint is a frozen copy of the initial policy.
         n_steps: Updates to take in this call. At least 1.
         pairs: Preference rows with ``prompt``, ``chosen``, and ``rejected``.
         resume_from: Checkpoint to load before those updates. None starts
@@ -779,6 +797,8 @@ def run_dpo_training(
     if isinstance(n_steps, bool) or not isinstance(n_steps, int) or n_steps < 1:
         raise ValueError(f"n_steps must be an int >= 1, got {n_steps!r}")
     repro.seed_everything(trainer.config.seed)
+    if resume_from is None:
+        trainer.reference_model = frozen_reference_copy(trainer.policy_model)
     models = {
         "policy": trainer.policy_model,
         "reference": trainer.reference_model,

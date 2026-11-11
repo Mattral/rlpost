@@ -9,6 +9,7 @@ and metrics use ``==``. Weights use ``torch.equal``.
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -126,6 +127,89 @@ class TestRunDpoTraining:
         run_dpo_training(trainer, N, TINY_DPO_PAIRS)
         assert calls == [SEED]
 
+    def test_step_zero_loss_is_log_two(self, tmp_path: Path) -> None:
+        """A copied reference makes the first loss ln 2.
+
+        Absolute tolerance is 1e-6. The caller passes a different
+        initialization. ``run_dpo_training`` replaces it with a frozen
+        copy of the policy before the first step. Both reward tensors
+        are 0, and the margin is 0. After the step the reference still
+        matches the initial policy.
+        """
+        policy = tiny_causal_lm(SEED)
+        initial = {key: value.detach().clone() for key, value in policy.state_dict().items()}
+        other = tiny_causal_lm(SEED + 1)
+        config = tiny_dpo_config(
+            output_dir=str(tmp_path),
+            seed=SEED,
+            batch_size=4,
+            checkpoint_path=None,
+        )
+        trainer = DPOTrainer(
+            config,
+            policy_model=policy,
+            reference_model=other,
+            tokenizer=TinyCharTokenizer(),
+        )
+        seen: dict[str, torch.Tensor] = {}
+        real_step = trainer.train_step
+
+        def spy(batch: dict) -> object:
+            collated = collate_preference_pairs(
+                trainer.tokenizer,
+                batch["prompt"],
+                batch["chosen"],
+                batch["rejected"],
+                max_length=config.dataset.max_seq_length,
+                pad_token_id=0,
+            )
+            trainer.policy_model.train()
+            trainer.reference_model.eval()
+            with torch.no_grad():
+                policy_chosen = trainer.compute_log_probs(
+                    trainer.policy_model,
+                    collated["chosen_ids"],
+                    collated["chosen_attention_mask"],
+                    collated["chosen_completion_mask"],
+                )
+                policy_rejected = trainer.compute_log_probs(
+                    trainer.policy_model,
+                    collated["rejected_ids"],
+                    collated["rejected_attention_mask"],
+                    collated["rejected_completion_mask"],
+                )
+                ref_chosen = trainer.compute_log_probs(
+                    trainer.reference_model,
+                    collated["chosen_ids"],
+                    collated["chosen_attention_mask"],
+                    collated["chosen_completion_mask"],
+                )
+                ref_rejected = trainer.compute_log_probs(
+                    trainer.reference_model,
+                    collated["rejected_ids"],
+                    collated["rejected_attention_mask"],
+                    collated["rejected_completion_mask"],
+                )
+            seen["chosen"] = trainer.beta * (policy_chosen - ref_chosen)
+            seen["rejected"] = trainer.beta * (policy_rejected - ref_rejected)
+            return real_step(batch)
+
+        trainer.train_step = spy
+        result = run_dpo_training(trainer, 1, TINY_DPO_PAIRS)
+        assert result.losses[0] == pytest.approx(math.log(2), abs=1e-6)
+        assert result.metrics[0]["margin_mean"] == pytest.approx(0.0, abs=1e-6)
+        assert seen["chosen"].shape[0] == 4
+        assert torch.allclose(seen["chosen"], torch.zeros_like(seen["chosen"]), atol=1e-6, rtol=0)
+        assert torch.allclose(
+            seen["rejected"], torch.zeros_like(seen["rejected"]), atol=1e-6, rtol=0
+        )
+        assert trainer.reference_model is not other
+        assert all(
+            not parameter.requires_grad for parameter in trainer.reference_model.parameters()
+        )
+        for key, value in trainer.reference_model.state_dict().items():
+            assert torch.equal(value, initial[key]), key
+
 
 class TestRunDpoCommand:
     def test_without_tiny_does_not_train(self, tmp_path: Path) -> None:
@@ -186,8 +270,7 @@ class TestRunDpoCommand:
             assert torch.equal(full_reference[key], resume_reference[key]), key
 
         initial_policy = tiny_causal_lm(SEED).state_dict()
-        initial_reference = tiny_causal_lm(SEED + 1).state_dict()
         assert any(not torch.equal(initial_policy[key], full_policy[key]) for key in initial_policy)
-        assert all(
-            torch.equal(initial_reference[key], full_reference[key]) for key in initial_reference
-        )
+        assert all(torch.equal(initial_policy[key], full_reference[key]) for key in initial_policy)
+        assert full_run["losses"][0] == pytest.approx(math.log(2), abs=1e-6)
+        assert full_run["metrics"][0]["margin_mean"] == pytest.approx(0.0, abs=1e-6)
