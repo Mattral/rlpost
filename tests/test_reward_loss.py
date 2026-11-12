@@ -20,7 +20,6 @@ from torch.optim import AdamW
 
 from rlpost.reward_engine import (
     TINY_REWARD_PAIRS,
-    RewardModelTrainer,
     bradley_terry_loss,
     run_reward_training,
     score_preference_pairs,
@@ -52,11 +51,14 @@ class TestBradleyTerry:
             math.log(2), abs=1e-6
         )
 
-    def test_compute_loss_matches_and_counts_strict_wins(self) -> None:
+    def test_strict_win_fraction_is_half_this_batch(self) -> None:
+        """One of two rows has chosen above rejected. The metric uses strict ``>``."""
         chosen = torch.tensor([1.0, 2.0])
         rejected = torch.tensor([0.0, 3.0])
-        loss, accuracy = RewardModelTrainer.compute_loss(object(), chosen, rejected)
-        assert torch.equal(loss, bradley_terry_loss(chosen, rejected))
+        loss = bradley_terry_loss(chosen, rejected)
+        accuracy = (chosen > rejected).float().mean()
+        expected = (_neg_log_sigmoid(1.0) + _neg_log_sigmoid(-1.0)) / 2
+        assert float(loss) == pytest.approx(expected, abs=1e-6)
         assert float(accuracy) == pytest.approx(0.5)
 
     def test_empty_and_wrong_rank_raise(self) -> None:

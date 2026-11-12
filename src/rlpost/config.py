@@ -99,7 +99,7 @@ class ModelConfig(BaseConfig):
         lora_rank: LoRA rank for low-rank adaptation.
         lora_alpha: LoRA scaling factor (effective learning rate).
         lora_dropout: Dropout probability in LoRA layers.
-        lora_target_modules: Module names LoRA adapts. No per-loader fallback.
+        lora_target_modules: Module names LoRA adapts when a real model is loaded. No current trainer applies LoRA.
         attn_implementation: Attention mechanism ('flash_attention_2' or 'eager').
     """
 
@@ -154,8 +154,7 @@ class ModelConfig(BaseConfig):
     lora_target_modules: list[str] = Field(
         default_factory=lambda: ["q_proj", "v_proj"],
         description=(
-            "Module names LoRA adapts. SFT and the reward loader read this "
-            "field. There is no per-loader fallback."
+            "Module names LoRA adapts when a real model is loaded. No current trainer applies LoRA."
         ),
     )
     attn_implementation: Literal["flash_attention_2", "eager"] = Field(
@@ -197,7 +196,6 @@ class OptimizationConfig(BaseConfig):
         weight_decay: L2 regularization coefficient.
         gradient_accumulation_steps: Number of batches to accumulate before backward pass.
         max_grad_norm: Gradient clipping threshold (L2 norm).
-        warmup_ratio: Fraction of total steps for learning rate warmup.
         lr_scheduler_type: Learning rate schedule ('linear', 'cosine', 'constant').
         num_train_epochs: Number of complete passes through training dataset.
         mixed_precision: Mixed precision training mode ('bf16', 'fp16', or 'no').
@@ -227,12 +225,6 @@ class OptimizationConfig(BaseConfig):
         default=1.0,
         gt=0.0,
         description="Gradient clipping threshold (L2 norm)",
-    )
-    warmup_ratio: float = Field(
-        default=0.1,
-        ge=0.0,
-        le=1.0,
-        description="Fraction of total training steps for warmup",
     )
     lr_scheduler_type: Literal["linear", "cosine", "constant"] = Field(
         default="linear",
@@ -677,7 +669,6 @@ class TrainingConfig(BaseConfig):
                 weight_decay=0.01,
                 gradient_accumulation_steps=1,
                 max_grad_norm=1.0,
-                warmup_ratio=0.1,
                 lr_scheduler_type="linear",
                 num_train_epochs=1,
                 mixed_precision="no",
@@ -756,7 +747,6 @@ class TrainingConfig(BaseConfig):
                 weight_decay=0.01,
                 gradient_accumulation_steps=4,
                 max_grad_norm=1.0,
-                warmup_ratio=0.1,
                 lr_scheduler_type="cosine",
                 num_train_epochs=3,
                 mixed_precision="bf16",

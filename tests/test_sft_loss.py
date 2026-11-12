@@ -18,15 +18,12 @@ from pathlib import Path
 import pytest
 import torch
 from torch.optim import AdamW
-from torch.utils.data import Dataset
-from transformers import IntervalStrategy, Trainer
 
 from rlpost.dpo_engine import collate_completions
 from rlpost.sft_engine import (
     TINY_SFT_ROWS,
     completion_cross_entropy,
     run_sft_training,
-    sft_training_arguments,
     tiny_sft_config,
 )
 from rlpost.tiny_lm import TinyCharTokenizer, tiny_causal_lm
@@ -209,78 +206,6 @@ class TestCompletionMask:
             )
         with pytest.raises(TypeError, match="int32 or int64"):
             completion_cross_entropy(logits, ids.to(torch.float32), torch.tensor([[0, 1, 0]]))
-
-
-class _OneRow(Dataset):
-    def __len__(self) -> int:
-        return 1
-
-    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
-        del index
-        ids = torch.tensor([1, 2, 3], dtype=torch.long)
-        return {
-            "input_ids": ids,
-            "attention_mask": torch.ones_like(ids),
-            "labels": ids,
-        }
-
-
-class TestTrainingArguments:
-    def test_no_eval_dataset_leaves_eval_off(self, tmp_path: Path) -> None:
-        config = tiny_sft_config(
-            output_dir=str(tmp_path),
-            seed=SEED,
-            batch_size=2,
-            checkpoint_path=None,
-        )
-        args = sft_training_arguments(
-            config,
-            str(tmp_path),
-            num_train_epochs=1,
-            eval_steps=None,
-            eval_dataset=None,
-            report_to_wandb=False,
-        )
-        assert args.eval_strategy == IntervalStrategy.NO
-        assert args.load_best_model_at_end is False
-        trainer = Trainer(
-            model=tiny_causal_lm(SEED),
-            args=args,
-            train_dataset=_OneRow(),
-            eval_dataset=None,
-            processing_class=TinyCharTokenizer(),
-        )
-        assert trainer.args.eval_strategy == IntervalStrategy.NO
-        assert trainer.args.load_best_model_at_end is False
-
-    def test_eval_dataset_sets_strategy_and_best_checkpoint(self, tmp_path: Path) -> None:
-        config = tiny_sft_config(
-            output_dir=str(tmp_path),
-            seed=SEED,
-            batch_size=2,
-            checkpoint_path=None,
-        )
-        omitted = sft_training_arguments(
-            config,
-            str(tmp_path),
-            num_train_epochs=1,
-            eval_steps=None,
-            eval_dataset=object(),
-            report_to_wandb=False,
-        )
-        assert omitted.eval_strategy == IntervalStrategy.STEPS
-        assert omitted.load_best_model_at_end is True
-        assert omitted.eval_steps == 500
-        explicit = sft_training_arguments(
-            config,
-            str(tmp_path),
-            num_train_epochs=1,
-            eval_steps=250,
-            eval_dataset=object(),
-            report_to_wandb=False,
-        )
-        # save_steps is 1000. load_best_model_at_end requires that to be a multiple of eval_steps.
-        assert explicit.eval_steps == 250
 
 
 class TestTinySftDecreases:

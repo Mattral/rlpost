@@ -3,10 +3,8 @@
 #   pip install -e ".[test]" -c requirements-cpu.txt \
 #     --extra-index-url https://download.pytorch.org/whl/cpu
 # numpy is imported by rlpost.repro. The pin stays so the job resolves one
-# version. accelerate is pinned because trl requires it and because the
-# [train] extra declares it for the Hugging Face Trainer path.
-# import rlpost does not import accelerate. SFTTrainer.train does,
-# through transformers.Trainer.
+# version. accelerate is pinned because trl requires it. rlpost does not
+# import accelerate and does not declare a [train] extra.
 --extra-index-url https://download.pytorch.org/whl/cpu
 
 torch==2.15.0+cpu

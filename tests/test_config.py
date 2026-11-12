@@ -108,17 +108,6 @@ class TestOptimizationConfig:
         with pytest.raises(ValueError):
             OptimizationConfig(learning_rate=-1e-5)
 
-    def test_warmup_ratio_validation(self) -> None:
-        """Verify warmup_ratio is bounded [0, 1]."""
-        config = OptimizationConfig(warmup_ratio=0.0)
-        assert config.warmup_ratio == 0.0
-
-        config = OptimizationConfig(warmup_ratio=1.0)
-        assert config.warmup_ratio == 1.0
-
-        with pytest.raises(ValueError):
-            OptimizationConfig(warmup_ratio=1.5)
-
     def test_mixed_precision_literal(self) -> None:
         """Verify mixed_precision is restricted to valid values."""
         for mode in ["bf16", "fp16", "no"]:
@@ -488,16 +477,14 @@ class TestConfigConsistency:
         # This should be allowed (no validation), but users should follow convention
         assert config.dataset.eval_batch_size == 8
 
-    def test_learning_rate_and_warmup(self) -> None:
-        """Verify warmup and learning rate are compatible."""
+    def test_learning_rate(self) -> None:
+        """Verify a set learning rate is stored."""
         config = TrainingConfig(
             optimization=OptimizationConfig(
                 learning_rate=1e-4,
-                warmup_ratio=0.1,
             )
         )
         assert config.optimization.learning_rate == 1e-4
-        assert config.optimization.warmup_ratio == 0.1
 
     def test_alignment_and_optimization_consistency(self) -> None:
         """Verify alignment and optimization configs are compatible."""
