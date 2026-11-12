@@ -19,7 +19,7 @@ Install the package and the `[test]` extra under the CPU lock:
 python -m pip install -e ".[test]" -c requirements-cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu
 ```
 
-`requirements-cpu.txt` pins `torch==2.15.0+cpu` from the CPU wheel index, plus pytest, ruff, pydantic, PyYAML, numpy, transformers, datasets, accelerate, and `trl==1.17.1`.
+`requirements-cpu.txt` pins `torch==2.15.0+cpu` from the CPU wheel index, plus pytest, ruff, pydantic, PyYAML, numpy, transformers, datasets, accelerate, and `trl==1.17.1`. The accelerate pin stays because TRL requires it. rlpost does not import accelerate.
 
 Without the lock, the same extra is:
 
@@ -27,7 +27,7 @@ Without the lock, the same extra is:
 pip install -e ".[test]"
 ```
 
-That command resolves torch from PyPI. The `[lora]` extra adds `peft` for the Hugging Face LoRA loaders. The `[train]` extra adds `accelerate` for `transformers.Trainer`. The `--tiny` commands do not import either package. Weights & Biases is optional: the engines import it only when it is installed.
+That command resolves torch from PyPI. The `[lora]` extra adds `peft`. No current trainer applies LoRA. There is no `[train]` extra. Weights & Biases is optional: the DPO and PPO engines import it only when it is installed and logging is on.
 
 Then:
 
@@ -59,7 +59,7 @@ The package floor stays `torch>=2.15`. That floor was checked on torch 2.15. `to
 
 ## Commands
 
-`train-sft --tiny` and `train-reward --tiny` train `tiny_lm` on CPU and write `{output_dir}/run.json`. Without `--tiny` each exits non-zero and does not download a model. The Hugging Face `SFTTrainer` and `RewardModelTrainer` classes still load a model id when something constructs them. The CLI does not construct them.
+`train-sft --tiny` and `train-reward --tiny` train `tiny_lm` on CPU and write `{output_dir}/run.json`. Without `--tiny` each exits non-zero and does not download a model. `run_sft_training` and `run_reward_training` are the only SFT and reward training paths.
 
 `run-ppo --tiny` trains `tiny_lm` on CPU and writes `{output_dir}/run.json`. The reference is a frozen copy of the initial policy. Without `--tiny` it exits non-zero and does not download a model.
 

@@ -13,8 +13,8 @@ Unit-tested on CPU. No GPU benchmark yet.
 
 Check on 2026-10-30, Python 3.12, torch 2.15.0+cpu, `PYTHONPATH=src`:
 
-- `pytest -q -m "not slow and not gpu"` collects 80 tests: 69 passed, 11 failed.
-- The 11 failures are DPO and PPO tests. A judgment on each one is in [ROADMAP.md](ROADMAP.md) under S0.6. They are not marked xfail.
+- `pytest --collect-only -q` collects 235 tests. The per-file counts sum to 235.
+- `pytest -q` exits 0 and prints 235 progress marks. `/usr/bin/time` reported 121.42s.
 - `ruff check .` and `ruff format --check .` pass under the config in `pyproject.toml`.
 
 Recount after you change tests:
@@ -121,7 +121,7 @@ Required packages are the ones the code imports: torch, transformers, datasets, 
 pip install -e ".[test]"
 ```
 
-`[test]` pins pytest 9.2.0, ruff 0.17.3, and TRL 1.17.1. `[lora]` adds peft for the Hugging Face LoRA loaders. `[train]` adds accelerate, which `transformers.Trainer` imports. The tiny commands use neither extra. The CPU job installs `.[test]` under `requirements-cpu.txt` and the CPU torch index. See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+`[test]` pins pytest 9.2.0, ruff 0.17.3, and TRL 1.17.1. `[lora]` adds peft. No current trainer applies LoRA. The package does not import accelerate and does not declare a `[train]` extra. `requirements-cpu.txt` still pins `accelerate==1.15.0` because TRL requires it. The CPU job installs `.[test]` under that lock and the CPU torch index. See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 The measured-scope check above used a virtualenv with the CPU wheel of torch 2.15.0 and `PYTHONPATH=src`. It did not run `pip install -e .`.
 

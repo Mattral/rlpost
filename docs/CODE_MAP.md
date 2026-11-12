@@ -14,7 +14,7 @@ Status: untested. The version string is `"0.1.0"`.
 
 Pydantic models for a run: `ModelConfig`, `OptimizationConfig`, `AlignmentConfig`, `DatasetConfig`, `TrainingConfig`. No tensors. YAML and JSON round-trip through `from_yaml`, `to_yaml`, `from_json_file`, and `to_json_file`. `TrainingConfig.toy_mode()` builds a small config the unit tests use.
 
-`PPOTrainer` reads `alignment.gamma`, `gae_lambda`, `kl_coefficient`, `kl_estimator`, `target_kl`, `ppo_epsilon`, `entropy_coefficient`, `value_loss_coefficient`, `value_clip`, `advantage_normalization`, and `optimization.max_grad_norm`, plus `log_to_wandb`. It does not read `alignment.ppo_num_epochs`. The tiny SFT and reward loops read learning rate, weight decay, `max_grad_norm`, and batch size. The Hugging Face SFT arguments also read mixed precision. `ModelConfig.lora_target_modules` is a field, default `["q_proj", "v_proj"]`, and the LoRA loaders pass that list. `DatasetConfig.dataset_size` is `None` or an int >= 1. `None` keeps every loaded pair. `model.use_peft_lora` and `model.attn_implementation` are stored. `tests/test_config.py` checks both. No loader reads `attn_implementation`, and the trainers apply LoRA without reading `use_peft_lora`.
+`PPOTrainer` reads `alignment.gamma`, `gae_lambda`, `kl_coefficient`, `kl_estimator`, `target_kl`, `ppo_epsilon`, `entropy_coefficient`, `value_loss_coefficient`, `value_clip`, `advantage_normalization`, and `optimization.max_grad_norm`, plus `log_to_wandb`. It does not read `alignment.ppo_num_epochs`. The tiny SFT and reward loops read learning rate, weight decay, `max_grad_norm`, and batch size. The learning rate is constant. `ModelConfig.lora_target_modules` is a field, default `["q_proj", "v_proj"]`. No current trainer applies LoRA. S0.11e reads that list when a real model is loaded onto `run_sft_training` or `run_reward_training`. `DatasetConfig.dataset_size` is `None` or an int >= 1. `None` keeps every loaded pair. `model.use_peft_lora` and `model.attn_implementation` are stored. `tests/test_config.py` checks both. Nothing reads `attn_implementation` or `use_peft_lora`.
 
 Status: tested for construction, validation, and YAML load. `AlignmentConfig.dpo_beta` is a field, default `0.1`, and it must be `> 0`. It is not `kl_coefficient`. `AlignmentConfig.kl_estimator` names `k1`, `k2`, or `k3`, default `k2`. Validation rejects `k1` with the same message as `compute_kl_divergence`. `k2` and `k3` are legal. `AlignmentConfig.value_clip` defaults to `None` and, when set, must be `>= 0`. It is not `ppo_epsilon`. `AlignmentConfig.missing_eos_penalty` defaults to `None` and, when set, must be `> 0`. `None` leaves a truncated sequence reward unchanged. `PPOTrainer` does not read the field. `RolloutGenerator` subtracts it once, inside `generate_rollout`, from rows that never emit EOS. TRL 1.17.1 `OnlineDPOConfig.missing_eos_penalty` is the same subtraction, and that release does not check the sign. `configs/toy.yaml` and `configs/default.yaml` leave it null. See [S0.7b](../ROADMAP.md#s07b-eos-truncation-and-the-reference-gradient). `ModelConfig.lora_target_modules` and `DatasetConfig.dataset_size` are fields. See [S0.11c](../ROADMAP.md#s011c-sft-and-the-reward-model-on-tiny_lm).
 
@@ -38,9 +38,7 @@ Tests: `tests/test_repro.py`, `tests/test_determinism.py`. The loops are `tests/
 
 ## `src/rlpost/dataset.py`
 
-Loads preference pairs as strings: `prompt`, `chosen`, `rejected`, and optional reward floats. `PreferencePairDataset.load` prefers a local JSONL cache, then Hugging Face `datasets`. `get_dataloader` tokenizes `prompt + chosen` with `return_tensors="pt"` (each field is `[1, L]` before padding) and collates with `IgnorePaddingLabelCollator`.
-
-The collator asks the tokenizer to pad to `max_seq_length`. It then sets `labels = input_ids` and `labels[attention_mask == 0] = -100`. After a successful collate the batch is `input_ids` `[B, max_seq]`, `attention_mask` `[B, max_seq]`, `labels` `[B, max_seq]`. No test builds that batch. The class only sets padding labels to -100. It does not look at a LoRA module.
+Loads preference pairs as strings: `prompt`, `chosen`, `rejected`, and optional reward floats. `PreferencePairDataset.load` prefers a local JSONL cache, then Hugging Face `datasets`. There is no training `DataLoader`. `get_dataloader` and `IgnorePaddingLabelCollator` were deleted with the Hugging Face SFT path. That collator set padding labels to -100 and still left prompt tokens as targets.
 
 `ToyDatasetLoader` and the HH-RLHF branch both require a `prompt` column. The public Anthropic HH-RLHF split is `chosen` and `rejected` dialogues, not `prompt` / `chosen` / `rejected`. A real load raises `KeyError` or `ValueError`. Nothing in `tests/` loads it.
 
@@ -52,29 +50,21 @@ Tests: `tests/test_dataset.py`.
 
 ## `src/rlpost/sft_engine.py`
 
-`load_model_with_lora` loads `AutoModelForCausalLM` and wraps it with PEFT LoRA (`task_type="CAUSAL_LM"`). It always applies LoRA. It does not read `use_peft_lora`. Optional 4-bit or 8-bit quantization goes through `BitsAndBytesConfig`. peft is imported inside the function. `target_modules` is `list(config.lora_target_modules)`.
-
 `completion_cross_entropy(logits [B, T, V], input_ids [B, T], completion_mask [B, T])` is the mean NLL of the completion tokens. Logits at `t` score token `t+1`. The kept mask is `completion_mask[:, 1:]`. A prompt token is not a target. The logit on the last prompt position is kept when it predicts a completion token. An empty shifted mask raises. `T < 2` raises. `input_ids` must be int32 or int64.
 
-`sft_training_arguments` builds `TrainingArguments`. With no eval dataset, `eval_strategy` stays `no` and `load_best_model_at_end` stays false. Both are set only when an eval dataset is passed (`eval_strategy="steps"`, `load_best_model_at_end=True`). `evaluation_strategy` is not passed. transformers 5.22 rejects that name. `warmup_ratio` is not a parameter of that class (`warmup_steps` is), so the config field is not passed. The `or` fallbacks on `weight_decay`, `gradient_accumulation_steps`, and `max_grad_norm` stay. S0.11d removes them. `SFTTrainer.train` passes `processing_class` and calls `trainer.train()`. The CLI does not call `SFTTrainer`. The module's `__main__` block still constructs it.
+`run_sft_training` is the only SFT training path. It calls `seed_everything` once, optionally loads a checkpoint over the `policy` module, and takes completion-masked AdamW steps. The clip threshold is `optimization.max_grad_norm`. The learning rate is constant. `{output_dir}/run.json` records the batch losses and the full-list completion NLL before and after the call. S0.11e builds a real model and data path on this loop. The Hugging Face `SFTTrainer`, `sft_training_arguments`, and the module `__main__` block were deleted. That `train()` masked only padding, so prompt tokens were trained, and it did not call `seed_everything` or the checkpoint helpers.
 
-`run_sft_training` is the `--tiny` loop. It calls `seed_everything` once, optionally loads a checkpoint over the `policy` module, and takes completion-masked AdamW steps. The clip threshold is `optimization.max_grad_norm`. `{output_dir}/run.json` records the batch losses and the full-list completion NLL before and after the call.
-
-Status: the tiny loop, the completion mask, and the eval-argument defaults are tested on CPU. The Hugging Face `train()` call is untested and would download a model. See [S0.11c](../ROADMAP.md#s011c-sft-and-the-reward-model-on-tiny_lm).
+Status: the tiny loop and the completion mask are tested on CPU. See [S0.11c](../ROADMAP.md#s011c-sft-and-the-reward-model-on-tiny_lm).
 
 Tests: `tests/test_sft_loss.py`, `tests/test_sft_cli.py`.
 
 ## `src/rlpost/reward_engine.py`
 
-`load_reward_model_with_lora` loads `AutoModelForSequenceClassification` with `num_labels=1` and PEFT LoRA (`task_type="SEQ_CLS"`). peft and `AutoModelForSequenceClassification` are imported inside the functions that need them. `target_modules` is `list(config.lora_target_modules)`.
+`bradley_terry_loss(chosen_scores [B], rejected_scores [B])` is the mean of `-log sigmoid(r_chosen - r_rejected)`. Equal scores are `ln 2`. An empty tensor or a rank other than 1 raises. The training metric's accuracy is the fraction of rows with `chosen > rejected`.
 
-`bradley_terry_loss(chosen_scores [B], rejected_scores [B])` is the mean of `-log sigmoid(r_chosen - r_rejected)`. Equal scores are `ln 2`. An empty tensor or a rank other than 1 raises. `compute_loss` returns that scalar and the fraction of rows with `chosen > rejected`.
+`run_reward_training` is the only reward training path. `tiny_reward_model` returns one score per row, shape `[B]`. The loop calls `seed_everything` once, optionally loads a checkpoint over the `reward` module, and takes Bradley-Terry AdamW steps. The learning rate is constant. `{output_dir}/run.json` records the batch losses and the full-list margin before and after the call. S0.11e builds a real model and data path on this loop. `RewardModelTrainer`, `load_reward_model_with_lora`, and the module `__main__` block were deleted. That `train()` downloaded a model id and did not call `seed_everything` or the checkpoint helpers.
 
-`_tokenize_preference_pair` returns a dict of length-`max_seq_length` vectors (the batch dim from the tokenizer is squeezed). `RewardModelTrainer.train` runs one pair at a time: `input_ids` `[1, max_seq]`. The score is `logits.squeeze(-1)`. For a one-label head, `logits` is `[1, 1]` and the score is `[1]`. That loop still uses `max_grad_norm or 1.0`. It returns `{"loss": float, "accuracy": float}`. `score` returns a Python float. `score_batch` returns `list[float]` and loops one row at a time. The CLI does not call this trainer. The module's `__main__` block still constructs it.
-
-`run_reward_training` is the `--tiny` loop. `tiny_reward_model` returns one score per row, shape `[B]`. The loop calls `seed_everything` once, optionally loads a checkpoint over the `reward` module, and takes Bradley-Terry AdamW steps. `{output_dir}/run.json` records the batch losses and the full-list margin before and after the call.
-
-Status: the closed form, the tiny separation check, and the fresh-process resume are tested on CPU. The download loop is untested. See [S0.11c](../ROADMAP.md#s011c-sft-and-the-reward-model-on-tiny_lm).
+Status: the closed form, the strict-win fraction, the tiny separation check, and the fresh-process resume are tested on CPU. See [S0.11c](../ROADMAP.md#s011c-sft-and-the-reward-model-on-tiny_lm).
 
 Tests: `tests/test_reward_loss.py`, `tests/test_reward_cli.py`.
 
@@ -216,7 +206,7 @@ Tests: `tests/test_dpo_engine.py`, `tests/test_dpo_cli.py`, `tests/test_ppo_cli.
 
 ## `src/rlpost/cli.py`
 
-Typer commands. Importing the CLI does not import peft. `train-sft` and `train-reward` do not construct `SFTTrainer` or `RewardModelTrainer`.
+Typer commands. Importing the CLI does not import peft or accelerate. `train-sft` calls `run_sft_training`. `train-reward` calls `run_reward_training`. Those are the only SFT and reward training paths.
 
 `train-sft` requires `--tiny`. It builds `tiny_causal_lm(seed)` and an AdamW optimizer, then calls `run_sft_training` on `TINY_SFT_ROWS` with `TinyCharTokenizer`. Without `--tiny` it raises `typer.BadParameter` and writes nothing. `--output-dir` is required. `--steps` and `--batch-size` must be integers at least 1. `--resume` requires `--checkpoint`. The default seed is 42.
 
@@ -290,11 +280,11 @@ Tests: none.
 
 External history on the current files: Kyle (`insiderzzz0005@gmail.com`) wrote the first versions of `config.py`, `dataset.py`, `sft_engine.py`, `reward_engine.py`, `dpo_engine.py`, `ppo_engine.py`, `cli.py`, and the config and PPO tests. thitsarhmwe-commits wrote `tests/test_dpo_engine.py`. Later edits on those files are from the repo owner. I can walk the PPO and DPO formulas above. The items below are the parts I would not defend.
 
-S0.4b removed four of these. `IgnorePaddingLabelCollator` sets padding labels to -100. `EarlyStoppingCallback` is gone. `DPOMetrics` has no explained-variance field. `tests/run_benchmark_comparison.py` is deleted.
+S0.4b removed four of these. `IgnorePaddingLabelCollator` set padding labels to -100. That collator was later deleted with the Hugging Face SFT path. `EarlyStoppingCallback` is gone. `DPOMetrics` has no explained-variance field. `tests/run_benchmark_comparison.py` is deleted.
 
 From Kyle, resolved on 2026-11-11:
 
-- `sft_engine.py` and `reward_engine.py` read `ModelConfig.lora_target_modules`. `dataset.py` reads `DatasetConfig.dataset_size`. Those fields were not declared. S0.11c declares and validates them. The LoRA list defaults to `["q_proj", "v_proj"]`. `dataset_size` is `None` or an int >= 1.
+- `sft_engine.py` and `reward_engine.py` read `ModelConfig.lora_target_modules`. `dataset.py` reads `DatasetConfig.dataset_size`. Those fields were not declared. S0.11c declares and validates them. The LoRA list defaults to `["q_proj", "v_proj"]`. `dataset_size` is `None` or an int >= 1. On 2026-11-12 the LoRA loaders were deleted with the Hugging Face trainers. The field stays declared for S0.11e. No current trainer applies LoRA.
 
 From thitsarhmwe-commits:
 

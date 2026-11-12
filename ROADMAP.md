@@ -182,12 +182,17 @@ The exit criteria for Stage 0:
     `EarlyStoppingCallback` is deleted. `DPOMetrics` no longer has
     `explained_variance`. `tests/run_benchmark_comparison.py` is deleted. It was not
     collected by pytest, so the failure set did not shrink.
+    2026-11-12: that collator was deleted with the Hugging Face SFT path.
   - `SFTTrainer.train` still sets `evaluation_strategy="steps"` and
     `load_best_model_at_end=True` with `eval_dataset=None`. No test calls `train`.
     S0.11c meets this when the command actually runs.
     2026-11-11: S0.11c sets `eval_strategy` and `load_best_model_at_end`
     only when an eval dataset is passed. transformers 5.22 rejects
     `evaluation_strategy`. The tiny command does not call `SFTTrainer.train`.
+    2026-11-12: that Hugging Face train path was deleted, along with
+    `sft_training_arguments` and `IgnorePaddingLabelCollator`.
+    `run_sft_training` is the only SFT training code. The collator
+    only masked padding, so prompt tokens were still trained.
   - CPU pytest on this branch, `.venv`, torch 2.15.0+cpu, `PYTHONPATH=src`,
     `pytest -m "not slow and not gpu"`: 82 collected, 71 passed, 11 failed. The 11
     names are the ones already listed under S0.6. No other test failed.
@@ -1112,6 +1117,7 @@ Cover:
 - 2026-11-10: S0.11e added. A real model id, a chat template, and a fixed data slice. Prerequisite for S1.2. Not part of the original four-way split.
 - 2026-11-11: S0.11b is done. `run-ppo --tiny` trains on CPU. `train-sft` and `train-reward` remain S0.11c.
 - 2026-11-11: S0.11c is done. `train-sft --tiny` and `train-reward --tiny` train on CPU. S0.11d still owns the silent fallbacks and the DataLoader generator.
+- 2026-11-12: The Hugging Face SFT and reward trainers are deleted. `run_sft_training` and `run_reward_training` are the only training code for those methods. `warmup_ratio` is removed. There is no `[train]` extra. S0.11d still owns the silent fallbacks in `dpo_engine.py`. There is no shuffled training DataLoader today. The generator-state item stays for when S0.11e adds a loader.
 
 ### [x] S0.11a DPO batched collation and `run-dpo`
 - Depends on: S0.8.
@@ -1194,6 +1200,9 @@ Cover:
     2026-11-11: S0.11c declares accelerate in the `[train]` extra.
     `train-sft` and `train-reward` on that branch train `tiny_lm` and
     do not construct those trainers.
+    2026-11-12: those two classes are deleted. There is no `[train]`
+    extra. `train-sft` calls `run_sft_training` and `train-reward`
+    calls `run_reward_training`.
   - The synthetic loop in `tests/repro_harness.py` is unchanged. It
     still feeds `train_token_step` tensors. `DPOTrainer.save_model`
     still calls `tokenizer.save_pretrained`. The CLI does not call it.
@@ -1310,6 +1319,7 @@ Cover:
 - Fix the eval settings that require an eval dataset when none is passed.
 - Declare and validate `lora_target_modules` and `dataset_size`.
 - `train-sft` and `train-reward` run end to end on tiny_lm on CPU.
+- 2026-11-12, before merge: the Hugging Face train paths are deleted. `run_sft_training` and `run_reward_training` are the only training code. accelerate is unused, so there is no `[train]` extra. `warmup_ratio` is removed from the config and both YAML files.
 - Notes:
   - SFT and the reward model read undeclared config fields (`lora_target_modules`,
     `dataset_size`). Declare and validate them here.
@@ -1399,11 +1409,36 @@ Cover:
   - This item does not edit `dpo_engine.py` or `ppo_engine.py`.
     It does not reuse the stored reference log-probs, and it does not
     move `frozen_reference_copy`. Those stay on S0.11e and S0.11d.
-  - Pytest on this branch, `.venv`, torch 2.15.0+cpu: 238 passed.
-    `pytest -q` exited 0 and printed 238 progress marks. It did not
-    print its own duration line. `/usr/bin/time` reported 111.27s.
-    `pytest --collect-only -q` lists per-file counts that sum to 238.
-    The 216 passed line under S0.11b is the count on `ec2426e`.
+  - 2026-11-12, before merge. `SFTTrainer`, `sft_training_arguments`,
+    the eval wiring, `load_model_with_lora`, `RewardModelTrainer`,
+    `load_reward_model_with_lora`, both module `__main__` blocks,
+    `get_dataloader`, and `IgnorePaddingLabelCollator` are deleted.
+    `SFTTrainer.train` masked only padding, so prompt tokens were
+    trained, and it did not call `seed_everything` or the checkpoint
+    helpers. `RewardModelTrainer.train` was a second loop that
+    downloaded a model id. `run_sft_training` and `run_reward_training`
+    are the only training code. S0.11e builds the real model and data
+    path on those loops.
+    `[project.optional-dependencies] train` is removed. Nothing in the
+    package imports accelerate. The CPU lock still pins
+    `accelerate==1.15.0` because trl requires it.
+    `warmup_ratio` is removed from `OptimizationConfig`, `toy_mode`,
+    `default_config`, `configs/toy.yaml`, and `configs/default.yaml`.
+    It was accepted and not read. A schedule with
+    `warmup_steps = ceil(ratio * n_steps)` on this call's step count
+    would make a 2-step run differ from the first half of a 4-step
+    run. The resume test requires `==`. The learning rate stays constant.
+    `lora_target_modules` stays declared and validated. No current
+    trainer applies LoRA.
+    The 2026-11-11 bullets above describe the tree before this deletion.
+  - Pytest on this branch before this deletion, `.venv`, torch 2.15.0+cpu:
+    238 passed. That is the count on `c1a365d`. `/usr/bin/time` then
+    reported 111.27s. The 216 passed line under S0.11b is the count on
+    `ec2426e`.
+  - Pytest after the deletion, `.venv`, torch 2.15.0+cpu: 235 passed.
+    `pytest --collect-only -q` lists per-file counts that sum to 235.
+    `pytest -q` exited 0 and printed 235 progress marks. It did not
+    print its own duration line. `/usr/bin/time` reported 121.42s.
 
 ### [ ] S0.11d Config cleanup and dataloader state
 - Depends on: S0.8. It does not block S0.11a–c or S0.11e.
@@ -1435,11 +1470,28 @@ Cover:
     on `SFTTrainer`, in the reward model's download loop, and in
     `dpo_engine.py` `train_step`. The tiny SFT and reward loops read
     `max_grad_norm` and `weight_decay` with no `or`.
+  - 2026-11-12. `sft_training_arguments`, `SFTTrainer`, and
+    `RewardModelTrainer` were deleted. The `or` fallbacks in that
+    TrainingArguments block are gone with the function, not cleaned
+    in place. `getattr(config, "log_to_wandb", True)` on `SFTTrainer`
+    and in the reward download loop is gone with those classes.
+    The same two fallbacks remain in `dpo_engine.py` `train_token_step`:
+    `max_grad_norm or 1.0` and `getattr(config, "log_to_wandb", True)`.
+    `warmup_ratio` was removed from `OptimizationConfig`, `toy_mode`,
+    `default_config`, `configs/toy.yaml`, and `configs/default.yaml`.
+    A schedule with `warmup_steps = ceil(ratio * n_steps)` on this
+    call's step count would make a 2-step run differ from the first
+    half of a 4-step run, and the resume test requires `==`.
   - `get_dataloader` builds a `DataLoader` with `shuffle=True` and no
     generator. An S0.8 checkpoint stores the Python, NumPy, and torch
     RNG. It does not store a DataLoader generator. A shuffled loader
     rebuilt after resume does not continue the same order. Save that
     generator state with the checkpoint.
+  - 2026-11-12. `get_dataloader` and `IgnorePaddingLabelCollator` were
+    deleted with the Hugging Face SFT path. There is no shuffled
+    training loader today. The generator-state item stays for when
+    S0.11e adds a loader. The tiny loops sample with the Python,
+    NumPy, and torch RNGs the checkpoint already saves.
   - 2026-11-11. `frozen_reference_copy` is defined in `dpo_engine.py`.
     `ppo_engine.py` imports it, and `run-ppo` uses that import.
     Move it to a shared module when `dpo_engine.py` or `ppo_engine.py`
@@ -1481,6 +1533,25 @@ Cover:
     still lives in `dpo_engine.py` while PPO imports it. Move it to
     a shared module when `dpo_engine.py` or `ppo_engine.py` is next
     edited. S0.11d edits `dpo_engine.py`, so that edit is the move.
+  - 2026-11-12. Not done here. `SFTTrainer` (Hugging Face `Trainer`),
+    `sft_training_arguments`, the eval wiring, `load_model_with_lora`,
+    `RewardModelTrainer` and `load_reward_model_with_lora`, both
+    module `__main__` download blocks, `get_dataloader`, and
+    `IgnorePaddingLabelCollator` were deleted. `run_sft_training` and
+    `run_reward_training` are the only SFT and reward training code.
+    Build the real model and data path on those loops. Do not bring
+    back a Hugging Face `Trainer`. `SFTTrainer.train` masked only
+    padding, so prompt tokens were trained, and it did not call
+    `seed_everything` or the checkpoint helpers.
+    `[project.optional-dependencies] train` is gone. Nothing in the
+    package imports accelerate. `requirements-cpu.txt` still pins
+    `accelerate==1.15.0` because trl requires it.
+    `warmup_ratio` is removed from `OptimizationConfig`, `toy_mode`,
+    `default_config`, and both YAML files. It was accepted and ignored.
+    A per-call `ceil(ratio * n_steps)` schedule would break the exact
+    4-step versus 2-plus-2 resume. `lora_target_modules` stays
+    declared and validated. No current trainer applies LoRA. Read it
+    when a real model is loaded onto these loops.
 
 ### [x] S0.9 Delete the orphaned distributed scaffolding
 - Branch: `chore/S0.9-delete-distributed`.
@@ -1787,3 +1858,4 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-11-11 · S0.11b · Rollouts store gathered response log-probs. `run-ppo --tiny` trains tiny_lm on CPU with a frozen copy of the initial policy. Step 0 has ratio 1, KL 0, and clip fraction 0. N=2 resume matches with `==` and `torch.equal`. 216 passed. · 6319627, a0b8110
 - 2026-11-11 · S0.11e · Notes only. `train_step` forwards the frozen reference again. The rollout already stores `logprobs_reference` with shape `[B, R]`. Use those values, one fewer reference forward. Move `frozen_reference_copy` when `dpo_engine.py` or `ppo_engine.py` is next edited. · fa0f5cb
 - 2026-11-11 · S0.11c · `train-sft --tiny` masks the loss to completion tokens. `train-reward --tiny` uses `-log sigmoid(r_chosen - r_rejected)`. N=8 on the tiny data: completion NLL falls, and every chosen score rises above rejected. N=2 resume matches with `==` and `torch.equal`. accelerate is the `[train]` extra. 238 passed. · 78622f3, c1a365d
+- 2026-11-12 · S0.11c · One training path each for SFT and the reward model. The Hugging Face trainers, the eval wiring, and `warmup_ratio` are gone. There is no `[train]` extra. 235 passed. · 744dcfb
