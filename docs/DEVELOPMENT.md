@@ -19,7 +19,7 @@ Install the package and the `[test]` extra under the CPU lock:
 python -m pip install -e ".[test]" -c requirements-cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu
 ```
 
-`requirements-cpu.txt` pins `torch==2.15.0+cpu` from the CPU wheel index, plus pytest, ruff, pydantic, PyYAML, numpy, transformers, datasets, accelerate, and `trl==1.17.1`.
+`requirements-cpu.txt` pins `torch==2.15.0+cpu` from the CPU wheel index, plus pytest, ruff, pydantic, PyYAML, numpy, transformers, datasets, accelerate, and `trl==1.17.1`. The accelerate pin stays because TRL requires it. rlpost does not import accelerate.
 
 Without the lock, the same extra is:
 
@@ -27,7 +27,7 @@ Without the lock, the same extra is:
 pip install -e ".[test]"
 ```
 
-That command resolves torch from PyPI. The `[lora]` extra adds `peft` for the SFT and reward trainers. Weights & Biases is optional: the engines import it only when it is installed.
+That command resolves torch from PyPI. The `[lora]` extra adds `peft`. No current trainer applies LoRA. There is no `[train]` extra. Weights & Biases is optional: the DPO and PPO engines import it only when it is installed and logging is on.
 
 Then:
 
@@ -39,7 +39,7 @@ pytest -q
 
 Ruff selects E, F, and I, and leaves line length to the formatter (`E501` is ignored). The pytest options in `pyproject.toml` skip tests marked `slow` or `gpu`.
 
-The failures that are still red are listed under S0.6 in [ROADMAP.md](../ROADMAP.md). They are not marked xfail.
+The default CPU pytest run on this branch is green. Older red runs are recorded under S0.6 in [ROADMAP.md](../ROADMAP.md). They are not marked xfail.
 
 ## CI
 
@@ -59,7 +59,7 @@ The package floor stays `torch>=2.15`. That floor was checked on torch 2.15. `to
 
 ## Commands
 
-`python -m rlpost.cli train-sft` and `train-reward` construct their trainers and call `train`. Both will try to download models and data. Neither has a recorded CPU run.
+`train-sft --tiny` and `train-reward --tiny` train `tiny_lm` on CPU and write `{output_dir}/run.json`. Without `--tiny` each exits non-zero and does not download a model. `run_sft_training` and `run_reward_training` are the only SFT and reward training paths.
 
 `run-ppo --tiny` trains `tiny_lm` on CPU and writes `{output_dir}/run.json`. The reference is a frozen copy of the initial policy. Without `--tiny` it exits non-zero and does not download a model.
 

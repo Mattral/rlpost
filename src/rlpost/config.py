@@ -99,6 +99,7 @@ class ModelConfig(BaseConfig):
         lora_rank: LoRA rank for low-rank adaptation.
         lora_alpha: LoRA scaling factor (effective learning rate).
         lora_dropout: Dropout probability in LoRA layers.
+        lora_target_modules: Module names LoRA adapts when a real model is loaded. No current trainer applies LoRA.
         attn_implementation: Attention mechanism ('flash_attention_2' or 'eager').
     """
 
@@ -150,10 +151,29 @@ class ModelConfig(BaseConfig):
         le=1.0,
         description="Dropout probability in LoRA layers",
     )
+    lora_target_modules: list[str] = Field(
+        default_factory=lambda: ["q_proj", "v_proj"],
+        description=(
+            "Module names LoRA adapts when a real model is loaded. No current trainer applies LoRA."
+        ),
+    )
     attn_implementation: Literal["flash_attention_2", "eager"] = Field(
         default="eager",
         description="Attention mechanism to use (flash_attention_2 requires compatible GPU)",
     )
+
+    @field_validator("lora_target_modules")
+    @classmethod
+    def validate_lora_target_modules(cls, value: list[str]) -> list[str]:
+        """Require at least one non-empty module name."""
+        if len(value) < 1:
+            raise ValueError("lora_target_modules must name at least one module")
+        for name in value:
+            if not isinstance(name, str) or name.strip() == "":
+                raise ValueError(
+                    f"lora_target_modules entries must be non-empty strings, got {name!r}"
+                )
+        return list(value)
 
     @field_validator("load_in_4bit")
     @classmethod
@@ -176,7 +196,6 @@ class OptimizationConfig(BaseConfig):
         weight_decay: L2 regularization coefficient.
         gradient_accumulation_steps: Number of batches to accumulate before backward pass.
         max_grad_norm: Gradient clipping threshold (L2 norm).
-        warmup_ratio: Fraction of total steps for learning rate warmup.
         lr_scheduler_type: Learning rate schedule ('linear', 'cosine', 'constant').
         num_train_epochs: Number of complete passes through training dataset.
         mixed_precision: Mixed precision training mode ('bf16', 'fp16', or 'no').
@@ -206,12 +225,6 @@ class OptimizationConfig(BaseConfig):
         default=1.0,
         gt=0.0,
         description="Gradient clipping threshold (L2 norm)",
-    )
-    warmup_ratio: float = Field(
-        default=0.1,
-        ge=0.0,
-        le=1.0,
-        description="Fraction of total training steps for warmup",
     )
     lr_scheduler_type: Literal["linear", "cosine", "constant"] = Field(
         default="linear",
@@ -387,6 +400,7 @@ class DatasetConfig(BaseConfig):
     Attributes:
         dataset_name: Hugging Face dataset name or local path.
         dataset_split: Which split to use ('train', 'validation', etc.).
+        dataset_size: How many leading pairs to keep. None keeps the split.
         preference_field: Column name for preferred response.
         rejected_field: Column name for rejected response.
         prompt_field: Column name for input prompt.
@@ -406,6 +420,13 @@ class DatasetConfig(BaseConfig):
     dataset_split: str = Field(
         default="train",
         description="Dataset split ('train', 'validation', 'test', etc.)",
+    )
+    dataset_size: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Keep this many pairs from the start of the loaded split. None keeps the split."
+        ),
     )
     preference_field: str = Field(
         default="chosen",
@@ -648,7 +669,6 @@ class TrainingConfig(BaseConfig):
                 weight_decay=0.01,
                 gradient_accumulation_steps=1,
                 max_grad_norm=1.0,
-                warmup_ratio=0.1,
                 lr_scheduler_type="linear",
                 num_train_epochs=1,
                 mixed_precision="no",
@@ -727,7 +747,6 @@ class TrainingConfig(BaseConfig):
                 weight_decay=0.01,
                 gradient_accumulation_steps=4,
                 max_grad_norm=1.0,
-                warmup_ratio=0.1,
                 lr_scheduler_type="cosine",
                 num_train_epochs=3,
                 mixed_precision="bf16",

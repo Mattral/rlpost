@@ -33,6 +33,7 @@ class TestModelConfig:
         assert config.load_in_8bit is False
         assert config.use_peft_lora is True
         assert config.lora_rank == 8
+        assert config.lora_target_modules == ["q_proj", "v_proj"]
 
     def test_custom_model_config(self) -> None:
         """Verify custom ModelConfig values are set correctly."""
@@ -56,6 +57,17 @@ class TestModelConfig:
         """Verify LoRA rank must be positive."""
         with pytest.raises(ValueError):
             ModelConfig(lora_rank=0)
+
+    def test_lora_target_modules_are_read_from_the_field(self) -> None:
+        """The list is the field. An empty name is rejected."""
+        config = ModelConfig(lora_target_modules=["k_proj", "o_proj"])
+        assert config.lora_target_modules == ["k_proj", "o_proj"]
+        with pytest.raises(ValueError):
+            ModelConfig(lora_target_modules=[])
+        with pytest.raises(ValueError):
+            ModelConfig(lora_target_modules=[""])
+        with pytest.raises(ValueError):
+            ModelConfig(lora_target_modules=["q_proj", " "])
 
     def test_attn_implementation_literal(self) -> None:
         """Verify attention implementation is restricted to valid values."""
@@ -95,17 +107,6 @@ class TestOptimizationConfig:
             OptimizationConfig(learning_rate=0.0)
         with pytest.raises(ValueError):
             OptimizationConfig(learning_rate=-1e-5)
-
-    def test_warmup_ratio_validation(self) -> None:
-        """Verify warmup_ratio is bounded [0, 1]."""
-        config = OptimizationConfig(warmup_ratio=0.0)
-        assert config.warmup_ratio == 0.0
-
-        config = OptimizationConfig(warmup_ratio=1.0)
-        assert config.warmup_ratio == 1.0
-
-        with pytest.raises(ValueError):
-            OptimizationConfig(warmup_ratio=1.5)
 
     def test_mixed_precision_literal(self) -> None:
         """Verify mixed_precision is restricted to valid values."""
@@ -283,6 +284,15 @@ class TestDatasetConfig:
         assert config.batch_size == 32
         assert config.max_seq_length == 512
         assert config.pin_memory is True
+        assert config.dataset_size is None
+
+    def test_dataset_size_is_a_positive_prefix_or_absent(self) -> None:
+        """None keeps the split. A set size is an int >= 1."""
+        assert DatasetConfig(dataset_size=4).dataset_size == 4
+        with pytest.raises(ValueError):
+            DatasetConfig(dataset_size=0)
+        with pytest.raises(ValueError):
+            DatasetConfig(dataset_size=-3)
 
     def test_batch_size_validation(self) -> None:
         """Verify batch size must be positive."""
@@ -435,6 +445,8 @@ class TestConfigYAMLLoading:
             assert config.alignment.missing_eos_penalty is None
             assert config.alignment.temperature == 1.0
             assert config.checkpoint_path is None
+            assert config.model.lora_target_modules == ["q_proj", "v_proj"]
+            assert config.dataset.dataset_size is None
 
     def test_load_default_yaml(self) -> None:
         """Verify default.yaml can be loaded from configs directory."""
@@ -447,6 +459,8 @@ class TestConfigYAMLLoading:
             assert config.alignment.missing_eos_penalty is None
             assert config.alignment.temperature == 1.0
             assert config.checkpoint_path is None
+            assert config.model.lora_target_modules == ["q_proj", "v_proj"]
+            assert config.dataset.dataset_size is None
 
 
 class TestConfigConsistency:
@@ -463,16 +477,14 @@ class TestConfigConsistency:
         # This should be allowed (no validation), but users should follow convention
         assert config.dataset.eval_batch_size == 8
 
-    def test_learning_rate_and_warmup(self) -> None:
-        """Verify warmup and learning rate are compatible."""
+    def test_learning_rate(self) -> None:
+        """Verify a set learning rate is stored."""
         config = TrainingConfig(
             optimization=OptimizationConfig(
                 learning_rate=1e-4,
-                warmup_ratio=0.1,
             )
         )
         assert config.optimization.learning_rate == 1e-4
-        assert config.optimization.warmup_ratio == 0.1
 
     def test_alignment_and_optimization_consistency(self) -> None:
         """Verify alignment and optimization configs are compatible."""

@@ -1,8 +1,9 @@
-"""Preference-pair loading for SFT, the reward model, and DPO.
+"""Preference-pair loading.
 
 Pairs are ``prompt``, ``chosen``, and ``rejected`` strings. Toy mode tries
 to cache 1,000 HH-RLHF rows. The real HH-RLHF split does not have a
 ``prompt`` column, so that path raises. Nothing in ``tests/`` loads it.
+The tiny training loops do not call this module.
 """
 
 import json
@@ -12,7 +13,7 @@ from pathlib import Path
 from typing import Iterator, Optional
 
 from datasets import Dataset, load_dataset
-from torch.utils.data import DataLoader, IterableDataset
+from torch.utils.data import IterableDataset
 
 from rlpost.config import DatasetConfig
 
@@ -168,8 +169,8 @@ class PreferencePairDataset(IterableDataset):
                 )
             )
 
-        # Limit to dataset_size if specified
-        if self.config.dataset_size:
+        # None keeps the split. The field is validated ge=1 when set.
+        if self.config.dataset_size is not None:
             pairs = pairs[: self.config.dataset_size]
 
         return pairs
@@ -313,89 +314,6 @@ class ToyDatasetLoader:
 
         logger.info(f"Loaded {len(pairs)} toy pairs")
         return pairs
-
-
-class IgnorePaddingLabelCollator:
-    """Pad a batch and set padding labels to -100.
-
-    ``labels`` is a clone of ``input_ids``. Positions where ``attention_mask``
-    is 0 are set to -100, the ignore index used by a causal-LM loss.
-    """
-
-    def __init__(self, tokenizer, max_length: int = 512):
-        """Initialize collator.
-
-        Args:
-            tokenizer: Transformers tokenizer
-            max_length: Max sequence length (default: 512)
-        """
-        self.tokenizer = tokenizer
-        self.max_length = max_length
-
-    def __call__(self, batch: list[dict]) -> dict:
-        """Pad the batch and set padding labels to -100.
-
-        Args:
-            batch: List of tokenized examples
-
-        Returns:
-            Dict with input_ids, attention_mask, and labels. Padding labels are -100.
-        """
-        padded = self.tokenizer.pad(
-            batch,
-            max_length=self.max_length,
-            padding="max_length",
-            return_tensors="pt",
-        )
-
-        padded["labels"] = padded["input_ids"].clone()
-        padded["labels"][padded["attention_mask"] == 0] = -100
-
-        return padded
-
-
-def get_dataloader(
-    config: DatasetConfig,
-    tokenizer,
-    use_toy: bool = False,
-) -> DataLoader:
-    """Create DataLoader for training.
-
-    Args:
-        config: DatasetConfig with batch size and sequence length
-        tokenizer: Transformers tokenizer
-        use_toy: If True, use 1K toy dataset
-
-    Returns:
-        PyTorch DataLoader ready for training
-    """
-    if use_toy:
-        pairs = ToyDatasetLoader.load()
-    else:
-        dataset = PreferencePairDataset(config)
-        dataset.load()
-        pairs = list(dataset)
-
-    # Tokenize pairs
-    def tokenize_fn(pair: PreferencePair):
-        chosen_tokens = tokenizer(
-            pair.prompt + pair.chosen,
-            max_length=config.max_seq_length,
-            truncation=True,
-            return_tensors="pt",
-        )
-        return chosen_tokens
-
-    tokenized = [tokenize_fn(pair) for pair in pairs]
-
-    # Create DataLoader
-    collator = IgnorePaddingLabelCollator(tokenizer, config.max_seq_length)
-    return DataLoader(
-        tokenized,
-        batch_size=config.batch_size,
-        collate_fn=collator,
-        shuffle=True,
-    )
 
 
 if __name__ == "__main__":
