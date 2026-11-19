@@ -280,7 +280,7 @@ The exit criteria for Stage 0:
   - `python -c "import rlpost.cli"` in the test extra raises
     `ModuleNotFoundError: peft`. The CLI imports the trainers at import time.
     That coupling is recorded under S0.11c. It is not changed here.
-    2026-11-12: nothing imports peft. The `[lora]` extra is removed.
+    2026-11-19: nothing imports peft. The `[lora]` extra is removed.
     The CLI does not import those trainers.
   - typer and rich are required because `cli.py` imports them. They are not
     pinned in the CPU lock. The 3.12 CPU install resolved typer 0.27.3 and
@@ -1431,7 +1431,7 @@ Cover:
     would make a 2-step run differ from the first half of a 4-step
     run. The resume test requires `==`. The learning rate stays constant.
     The 2026-11-11 bullets above describe the tree before this deletion.
-    Later the same day, `use_peft_lora`, `lora_rank`, `lora_alpha`,
+    On 2026-11-19, `use_peft_lora`, `lora_rank`, `lora_alpha`,
     `lora_dropout`, and `lora_target_modules` are removed. Nothing
     read them. The `[lora]` extra is removed. See S0.11e.
   - Pytest on this branch before this deletion, `.venv`, torch 2.15.0+cpu:
@@ -1443,7 +1443,7 @@ Cover:
     `pytest -q` exited 0 and printed 235 progress marks. It did not
     print its own duration line. `/usr/bin/time` reported 121.42s.
     That run is `744dcfb`, on 2026-11-12.
-  - Pytest after the unread LoRA fields were removed, same day, `.venv`,
+  - Pytest after the unread LoRA fields were removed, on 2026-11-19, `.venv`,
     torch 2.15.0+cpu: 233 passed. `pytest --collect-only -q` lists
     per-file counts that sum to 233. `pytest -q` exited 0 and printed
     233 progress marks. It did not print its own duration line.
@@ -1560,7 +1560,7 @@ Cover:
     `default_config`, and both YAML files. It was accepted and ignored.
     A per-call `ceil(ratio * n_steps)` schedule would break the exact
     4-step versus 2-plus-2 resume.
-  - 2026-11-12. `use_peft_lora`, `lora_rank`, `lora_alpha`,
+  - 2026-11-19. `use_peft_lora`, `lora_rank`, `lora_alpha`,
     `lora_dropout`, and `lora_target_modules` are removed from
     `ModelConfig`, `toy_mode`, `default_config`, and both YAML files.
     Nothing read them. The `[lora]` extra is removed. Nothing imports
@@ -1873,4 +1873,4 @@ Append one line per finished item: `YYYY-MM-DD · <item-id> · <outcome> · <PR/
 - 2026-11-11 · S0.11e · Notes only. `train_step` forwards the frozen reference again. The rollout already stores `logprobs_reference` with shape `[B, R]`. Use those values, one fewer reference forward. Move `frozen_reference_copy` when `dpo_engine.py` or `ppo_engine.py` is next edited. · fa0f5cb
 - 2026-11-11 · S0.11c · `train-sft --tiny` masks the loss to completion tokens. `train-reward --tiny` uses `-log sigmoid(r_chosen - r_rejected)`. N=8 on the tiny data: completion NLL falls, and every chosen score rises above rejected. N=2 resume matches with `==` and `torch.equal`. accelerate is the `[train]` extra. 238 passed. · 78622f3, c1a365d
 - 2026-11-12 · S0.11c · One training path each for SFT and the reward model. The Hugging Face trainers, the eval wiring, and `warmup_ratio` are gone. There is no `[train]` extra. 235 passed. · 744dcfb
-- 2026-11-12 · S0.11c · Unread LoRA fields and the `[lora]` extra are removed. Re-add LoRA only with code that applies it and a test that only adapter weights change. 233 passed. · d63e243
+- 2026-11-19 · S0.11c · Unread LoRA fields and the `[lora]` extra are removed. Re-add LoRA only with code that applies it and a test that only adapter weights change. 233 passed. · d63e243

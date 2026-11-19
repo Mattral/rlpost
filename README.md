@@ -11,7 +11,7 @@ The repository was formerly [Improving-LLM-Models-with-RLHF-PPO-DPO](https://git
 
 Unit-tested on CPU. No GPU benchmark yet.
 
-Check on 2026-11-12, Python 3.12, torch 2.15.0+cpu, `PYTHONPATH=src`:
+Check on 2026-11-19, Python 3.12, torch 2.15.0+cpu, `PYTHONPATH=src`:
 
 - `pytest --collect-only -q` collects 233 tests. The per-file counts sum to 233.
 - `pytest -q` exits 0 and prints 233 progress marks. `/usr/bin/time` reported 113.03s.

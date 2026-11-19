@@ -284,7 +284,7 @@ S0.4b removed four of these. `IgnorePaddingLabelCollator` set padding labels to 
 
 From Kyle, resolved on 2026-11-11:
 
-- `sft_engine.py` and `reward_engine.py` read `ModelConfig.lora_target_modules`. `dataset.py` reads `DatasetConfig.dataset_size`. Those fields were not declared. S0.11c declares and validates them. The LoRA list defaults to `["q_proj", "v_proj"]`. `dataset_size` is `None` or an int >= 1. On 2026-11-12 the LoRA loaders were deleted with the Hugging Face trainers. Later the same day the unread LoRA fields were removed. S0.11e re-adds LoRA only with code that applies it and a test that only adapter weights change.
+- `sft_engine.py` and `reward_engine.py` read `ModelConfig.lora_target_modules`. `dataset.py` reads `DatasetConfig.dataset_size`. Those fields were not declared. S0.11c declares and validates them. The LoRA list defaults to `["q_proj", "v_proj"]`. `dataset_size` is `None` or an int >= 1. On 2026-11-12 the LoRA loaders were deleted with the Hugging Face trainers. On 2026-11-19 the unread LoRA fields were removed. S0.11e re-adds LoRA only with code that applies it and a test that only adapter weights change.
 
 From thitsarhmwe-commits:
 
