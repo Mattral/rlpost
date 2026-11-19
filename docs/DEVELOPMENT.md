@@ -27,7 +27,7 @@ Without the lock, the same extra is:
 pip install -e ".[test]"
 ```
 
-That command resolves torch from PyPI. The `[lora]` extra adds `peft`. No current trainer applies LoRA. There is no `[train]` extra. Weights & Biases is optional: the DPO and PPO engines import it only when it is installed and logging is on.
+That command resolves torch from PyPI. There is no `[lora]` extra and no `[train]` extra. Nothing imports peft. Weights & Biases is optional: the DPO and PPO engines import it only when it is installed and logging is on.
 
 Then:
 
