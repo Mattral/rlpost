@@ -1,8 +1,8 @@
 """Command-line interface (CLI) for RLHF training pipelines.
 
 Provides:
-- train-sft: Supervised fine-tuning on instruction-following data
-- train-reward: Reward model training on preference pairs
+- train-sft: SFT on tiny_lm when ``--tiny`` is set. Does not download a model.
+- train-reward: Reward model on tiny_lm when ``--tiny`` is set. Does not download a model.
 - run-ppo: PPO on tiny_lm when ``--tiny`` is set. Does not download a model.
 - run-dpo: DPO on tiny_lm when ``--tiny`` is set. Does not download a model.
 - Global --toy flag for small-model testing on T4 (<20 minutes)
@@ -10,13 +10,10 @@ Provides:
 """
 
 import logging
-from pathlib import Path
 from typing import Optional
 
 import typer
 from rich.console import Console
-
-from rlpost.config import TrainingConfig
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -25,7 +22,7 @@ app = typer.Typer(
     name="rlpost",
     help=(
         "SFT, reward-model, PPO, and DPO commands. "
-        "run-ppo --tiny and run-dpo --tiny train tiny_lm on CPU."
+        "--tiny trains tiny_lm on CPU and does not download a model."
     ),
 )
 
@@ -45,25 +42,40 @@ def setup_logging(verbose: bool = False) -> None:
 
 @app.command()
 def train_sft(
-    config: Optional[str] = typer.Option(
-        None,
-        "--config",
-        help="Path to training config YAML (default: configs/default.yaml)",
-    ),
     output_dir: Optional[str] = typer.Option(
         None,
         "--output-dir",
-        help="Output directory for checkpoints (default: output/sft_{timestamp})",
+        help="Directory for run.json. Required with --tiny.",
     ),
-    num_epochs: int = typer.Option(
-        3,
-        "--epochs",
-        help="Number of training epochs",
-    ),
-    toy: bool = typer.Option(
+    tiny: bool = typer.Option(
         False,
-        "--toy",
-        help="Use toy dataset (1K samples) for quick testing on T4",
+        "--tiny",
+        help="Train tiny_lm on CPU. Does not download a model.",
+    ),
+    steps: int = typer.Option(
+        1,
+        "--steps",
+        help="SFT updates to take in this call. At least 1.",
+    ),
+    batch_size: int = typer.Option(
+        4,
+        "--batch-size",
+        help="Rows per update.",
+    ),
+    seed: Optional[int] = typer.Option(
+        None,
+        "--seed",
+        help="TrainingConfig.seed. Default 42.",
+    ),
+    checkpoint: Optional[str] = typer.Option(
+        None,
+        "--checkpoint",
+        help="Checkpoint file written at the end of this call.",
+    ),
+    resume: bool = typer.Option(
+        False,
+        "--resume",
+        help="Load --checkpoint before the first step.",
     ),
     verbose: bool = typer.Option(
         False,
@@ -71,97 +83,109 @@ def train_sft(
         help="Enable debug logging",
     ),
 ) -> None:
-    """Train SFT (supervised fine-tuning) model on instruction data.
+    """Train SFT on tiny_lm.
 
-    This stage fine-tunes the base model on high-quality instruction-following
-    examples before RLHF training.
+    ``--tiny`` builds one tiny Llama and trains it on a fixed list of
+    prompt and completion strings. The loss ignores prompt tokens. It
+    does not download a model. Pass ``--checkpoint`` to write a
+    checkpoint at the end, and ``--resume`` to load that file first.
 
     Example:
-        python -m rlpost.cli train-sft --toy --epochs 1
-        python -m rlpost.cli train-sft --config configs/default.yaml
+        python -m rlpost.cli train-sft --tiny --steps 2 --output-dir ./outputs/sft
     """
-    from rlpost.sft_engine import SFTTrainer
+    from torch.optim import AdamW
+
+    from rlpost.sft_engine import TINY_SFT_ROWS, run_sft_training, tiny_sft_config
+    from rlpost.tiny_lm import TinyCharTokenizer, tiny_causal_lm
 
     setup_logging(verbose)
 
+    if not tiny:
+        raise typer.BadParameter(
+            "Pass --tiny. train-sft trains tiny_lm on CPU and does not download a model."
+        )
+    if output_dir is None:
+        raise typer.BadParameter("--output-dir is required")
+    if isinstance(steps, bool) or steps < 1:
+        raise typer.BadParameter("--steps must be an int >= 1")
+    if isinstance(batch_size, bool) or batch_size < 1:
+        raise typer.BadParameter("--batch-size must be an int >= 1")
+    if resume and checkpoint is None:
+        raise typer.BadParameter("--resume needs --checkpoint")
+    run_seed = 42 if seed is None else seed
+    if isinstance(run_seed, bool) or run_seed < 0:
+        raise typer.BadParameter("--seed must be an int >= 0")
+
     try:
-        # Load config
-        if config:
-            train_config = TrainingConfig.from_yaml(config)
-            console.print(f"[green]✓[/green] Loaded config: {config}")
-        else:
-            if toy:
-                train_config = TrainingConfig.toy_mode()
-                console.print("[green]✓[/green] Using toy config")
-            else:
-                train_config = TrainingConfig.from_yaml("configs/default.yaml")
-                console.print("[green]✓[/green] Using default config")
-
-        # Validate config
-        if train_config.optimization.learning_rate <= 0:
-            raise ValueError("Learning rate must be positive")
-        if train_config.dataset.batch_size <= 0:
-            raise ValueError("Batch size must be positive")
-
+        train_config = tiny_sft_config(
+            output_dir=output_dir,
+            seed=run_seed,
+            batch_size=batch_size,
+            checkpoint_path=checkpoint,
+        )
+        model = tiny_causal_lm(train_config.seed)
+        optimizer = AdamW(
+            model.parameters(),
+            lr=train_config.optimization.learning_rate,
+            weight_decay=train_config.optimization.weight_decay,
+        )
+        result = run_sft_training(
+            model,
+            optimizer,
+            train_config,
+            steps,
+            TINY_SFT_ROWS,
+            TinyCharTokenizer(),
+            resume_from=checkpoint if resume else None,
+        )
         console.print(
-            f"[dim]Config: {train_config.model.policy_model_id}, "
-            f"batch_size={train_config.dataset.batch_size}[/dim]"
+            f"[green]train-sft finished[/green] step={result.step} "
+            f"loss={result.losses[-1]:.6f}\n"
+            f"  run: {result.output_path}"
         )
-
-        # Setup output directory
-        if output_dir is None:
-            from datetime import datetime
-
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_dir = f"output/sft_{timestamp}"
-
-        output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
-
-        # Train
-        console.print("\n[bold cyan]Starting SFT training...[/bold cyan]")
-        trainer = SFTTrainer(train_config, use_toy=toy)
-        result = trainer.train(
-            output_dir=str(output_path),
-            num_train_epochs=num_epochs,
-        )
-
-        console.print(
-            f"\n[green]✓ SFT training complete[/green]\n"
-            f"  Output: {output_path}\n"
-            f"  Final Loss: {result.training_loss:.4f}"
-        )
-
-        # Save model
-        trainer.save_model(str(output_path))
-        console.print(f"[green]✓[/green] Model saved to {output_path}")
-
+        if result.checkpoint_path is not None:
+            console.print(f"  checkpoint: {result.checkpoint_path}")
     except Exception as e:
-        console.print(f"[red]✗ Error: {e}[/red]", style="bold")
+        console.print(f"[red]Error: {e}[/red]", style="bold")
         raise typer.Exit(1)
 
 
 @app.command()
 def train_reward(
-    config: Optional[str] = typer.Option(
-        None,
-        "--config",
-        help="Path to training config YAML",
-    ),
     output_dir: Optional[str] = typer.Option(
         None,
         "--output-dir",
-        help="Output directory for checkpoints",
+        help="Directory for run.json. Required with --tiny.",
     ),
-    num_epochs: int = typer.Option(
-        3,
-        "--epochs",
-        help="Number of training epochs",
-    ),
-    toy: bool = typer.Option(
+    tiny: bool = typer.Option(
         False,
-        "--toy",
-        help="Use toy dataset for quick testing",
+        "--tiny",
+        help="Train tiny_lm on CPU. Does not download a model.",
+    ),
+    steps: int = typer.Option(
+        1,
+        "--steps",
+        help="Reward updates to take in this call. At least 1.",
+    ),
+    batch_size: int = typer.Option(
+        4,
+        "--batch-size",
+        help="Pairs per update.",
+    ),
+    seed: Optional[int] = typer.Option(
+        None,
+        "--seed",
+        help="TrainingConfig.seed. Default 42.",
+    ),
+    checkpoint: Optional[str] = typer.Option(
+        None,
+        "--checkpoint",
+        help="Checkpoint file written at the end of this call.",
+    ),
+    resume: bool = typer.Option(
+        False,
+        "--resume",
+        help="Load --checkpoint before the first step.",
     ),
     verbose: bool = typer.Option(
         False,
@@ -169,64 +193,71 @@ def train_reward(
         help="Enable debug logging",
     ),
 ) -> None:
-    """Train reward model on preference pairs.
+    """Train a reward model on tiny_lm.
 
-    The reward model learns to score chosen > rejected responses,
-    enabling PPO to optimize the policy.
+    ``--tiny`` builds one tiny sequence scorer and trains it on a fixed
+    list of preference pairs. The loss is ``-log sigmoid(r_chosen -
+    r_rejected)``. It does not download a model. Pass ``--checkpoint``
+    to write a checkpoint at the end, and ``--resume`` to load that
+    file first.
 
     Example:
-        python -m rlpost.cli train-reward --toy --epochs 1
+        python -m rlpost.cli train-reward --tiny --steps 2 --output-dir ./outputs/reward
     """
-    from rlpost.reward_engine import RewardModelTrainer
+    from torch.optim import AdamW
+
+    from rlpost.reward_engine import TINY_REWARD_PAIRS, run_reward_training, tiny_reward_config
+    from rlpost.tiny_lm import TinyCharTokenizer, tiny_reward_model
 
     setup_logging(verbose)
 
+    if not tiny:
+        raise typer.BadParameter(
+            "Pass --tiny. train-reward trains tiny_lm on CPU and does not download a model."
+        )
+    if output_dir is None:
+        raise typer.BadParameter("--output-dir is required")
+    if isinstance(steps, bool) or steps < 1:
+        raise typer.BadParameter("--steps must be an int >= 1")
+    if isinstance(batch_size, bool) or batch_size < 1:
+        raise typer.BadParameter("--batch-size must be an int >= 1")
+    if resume and checkpoint is None:
+        raise typer.BadParameter("--resume needs --checkpoint")
+    run_seed = 42 if seed is None else seed
+    if isinstance(run_seed, bool) or run_seed < 0:
+        raise typer.BadParameter("--seed must be an int >= 0")
+
     try:
-        # Load config
-        if config:
-            train_config = TrainingConfig.from_yaml(config)
-        else:
-            if toy:
-                train_config = TrainingConfig.toy_mode()
-            else:
-                train_config = TrainingConfig.from_yaml("configs/default.yaml")
-
+        train_config = tiny_reward_config(
+            output_dir=output_dir,
+            seed=run_seed,
+            batch_size=batch_size,
+            checkpoint_path=checkpoint,
+        )
+        model = tiny_reward_model(train_config.seed)
+        optimizer = AdamW(
+            model.parameters(),
+            lr=train_config.optimization.learning_rate,
+            weight_decay=train_config.optimization.weight_decay,
+        )
+        result = run_reward_training(
+            model,
+            optimizer,
+            train_config,
+            steps,
+            TINY_REWARD_PAIRS,
+            TinyCharTokenizer(),
+            resume_from=checkpoint if resume else None,
+        )
         console.print(
-            f"[dim]Config: {train_config.model.reward_model_id}, "
-            f"batch_size={train_config.dataset.batch_size}[/dim]"
+            f"[green]train-reward finished[/green] step={result.step} "
+            f"loss={result.losses[-1]:.6f}\n"
+            f"  run: {result.output_path}"
         )
-
-        # Setup output directory
-        if output_dir is None:
-            from datetime import datetime
-
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_dir = f"output/reward_model_{timestamp}"
-
-        output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
-
-        # Train
-        console.print("\n[bold cyan]Starting reward model training...[/bold cyan]")
-        trainer = RewardModelTrainer(train_config, use_toy=toy)
-        result = trainer.train(
-            output_dir=str(output_path),
-            num_train_epochs=num_epochs,
-        )
-
-        console.print(
-            f"\n[green]✓ Reward training complete[/green]\n"
-            f"  Output: {output_path}\n"
-            f"  Final Loss: {result['loss']:.4f}\n"
-            f"  Accuracy: {result['accuracy']:.4f}"
-        )
-
-        # Save model
-        trainer.save_model(str(output_path))
-        console.print(f"[green]✓[/green] Model saved to {output_path}")
-
+        if result.checkpoint_path is not None:
+            console.print(f"  checkpoint: {result.checkpoint_path}")
     except Exception as e:
-        console.print(f"[red]✗ Error: {e}[/red]", style="bold")
+        console.print(f"[red]Error: {e}[/red]", style="bold")
         raise typer.Exit(1)
 
 

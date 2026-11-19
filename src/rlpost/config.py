@@ -85,7 +85,7 @@ class ModelConfig(BaseConfig):
     """Model architecture and checkpoint paths.
 
     Supports dynamic model selection from Hugging Face, with optional
-    quantization and LoRA parameters.
+    quantization.
 
     Attributes:
         policy_model_id: Hugging Face model ID or local path for policy/actor model.
@@ -95,10 +95,6 @@ class ModelConfig(BaseConfig):
         trust_remote_code: Allow loading of custom code from Hugging Face.
         load_in_8bit: Use 8-bit quantization via bitsandbytes.
         load_in_4bit: Use 4-bit quantization via bitsandbytes.
-        use_peft_lora: Enable LoRA fine-tuning via PEFT.
-        lora_rank: LoRA rank for low-rank adaptation.
-        lora_alpha: LoRA scaling factor (effective learning rate).
-        lora_dropout: Dropout probability in LoRA layers.
         attn_implementation: Attention mechanism ('flash_attention_2' or 'eager').
     """
 
@@ -130,26 +126,6 @@ class ModelConfig(BaseConfig):
         default=False,
         description="Use 4-bit quantization via bitsandbytes",
     )
-    use_peft_lora: bool = Field(
-        default=True,
-        description="Enable Parameter-Efficient Fine-Tuning (LoRA)",
-    )
-    lora_rank: int = Field(
-        default=8,
-        ge=1,
-        description="LoRA rank (r parameter in LoRA decomposition)",
-    )
-    lora_alpha: int = Field(
-        default=16,
-        ge=1,
-        description="LoRA alpha scaling factor (scales learning rate)",
-    )
-    lora_dropout: float = Field(
-        default=0.05,
-        ge=0.0,
-        le=1.0,
-        description="Dropout probability in LoRA layers",
-    )
     attn_implementation: Literal["flash_attention_2", "eager"] = Field(
         default="eager",
         description="Attention mechanism to use (flash_attention_2 requires compatible GPU)",
@@ -176,7 +152,6 @@ class OptimizationConfig(BaseConfig):
         weight_decay: L2 regularization coefficient.
         gradient_accumulation_steps: Number of batches to accumulate before backward pass.
         max_grad_norm: Gradient clipping threshold (L2 norm).
-        warmup_ratio: Fraction of total steps for learning rate warmup.
         lr_scheduler_type: Learning rate schedule ('linear', 'cosine', 'constant').
         num_train_epochs: Number of complete passes through training dataset.
         mixed_precision: Mixed precision training mode ('bf16', 'fp16', or 'no').
@@ -206,12 +181,6 @@ class OptimizationConfig(BaseConfig):
         default=1.0,
         gt=0.0,
         description="Gradient clipping threshold (L2 norm)",
-    )
-    warmup_ratio: float = Field(
-        default=0.1,
-        ge=0.0,
-        le=1.0,
-        description="Fraction of total training steps for warmup",
     )
     lr_scheduler_type: Literal["linear", "cosine", "constant"] = Field(
         default="linear",
@@ -387,6 +356,7 @@ class DatasetConfig(BaseConfig):
     Attributes:
         dataset_name: Hugging Face dataset name or local path.
         dataset_split: Which split to use ('train', 'validation', etc.).
+        dataset_size: How many leading pairs to keep. None keeps the split.
         preference_field: Column name for preferred response.
         rejected_field: Column name for rejected response.
         prompt_field: Column name for input prompt.
@@ -406,6 +376,13 @@ class DatasetConfig(BaseConfig):
     dataset_split: str = Field(
         default="train",
         description="Dataset split ('train', 'validation', 'test', etc.)",
+    )
+    dataset_size: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Keep this many pairs from the start of the loaded split. None keeps the split."
+        ),
     )
     preference_field: str = Field(
         default="chosen",
@@ -474,7 +451,7 @@ class TrainingConfig(BaseConfig):
         eval_steps: Evaluate every N training steps (0 = no evaluation).
         save_steps: Save checkpoint every N training steps.
         save_total_limit: Maximum number of recent checkpoints to keep.
-        model: Model configuration (paths, quantization, LoRA).
+        model: Model configuration (paths and quantization).
         optimization: Optimizer and learning rate settings.
         alignment: RLHF/DPO hyperparameters.
         dataset: Dataset and data loading configuration.
@@ -636,10 +613,6 @@ class TrainingConfig(BaseConfig):
                 trust_remote_code=False,
                 load_in_8bit=False,
                 load_in_4bit=False,
-                use_peft_lora=True,
-                lora_rank=4,
-                lora_alpha=8,
-                lora_dropout=0.05,
                 attn_implementation="eager",
             ),
             optimization=OptimizationConfig(
@@ -648,7 +621,6 @@ class TrainingConfig(BaseConfig):
                 weight_decay=0.01,
                 gradient_accumulation_steps=1,
                 max_grad_norm=1.0,
-                warmup_ratio=0.1,
                 lr_scheduler_type="linear",
                 num_train_epochs=1,
                 mixed_precision="no",
@@ -715,10 +687,6 @@ class TrainingConfig(BaseConfig):
                 trust_remote_code=False,
                 load_in_8bit=False,
                 load_in_4bit=False,
-                use_peft_lora=True,
-                lora_rank=16,
-                lora_alpha=32,
-                lora_dropout=0.05,
                 attn_implementation="flash_attention_2",
             ),
             optimization=OptimizationConfig(
@@ -727,7 +695,6 @@ class TrainingConfig(BaseConfig):
                 weight_decay=0.01,
                 gradient_accumulation_steps=4,
                 max_grad_norm=1.0,
-                warmup_ratio=0.1,
                 lr_scheduler_type="cosine",
                 num_train_epochs=3,
                 mixed_precision="bf16",

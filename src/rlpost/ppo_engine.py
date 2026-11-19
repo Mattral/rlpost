@@ -197,7 +197,7 @@ class PPOMetrics:
     Attributes:
         policy_loss: Clipped surrogate objective loss.
         value_loss: Critic network loss.
-        entropy: Policy entropy (explorativity metric).
+        entropy: Policy entropy.
         kl_divergence: Mean per-token KL(policy || reference) under kl_estimator.
         explained_variance: Fraction of value function explained.
         adaptive_kl_coefficient: Current KL penalty coefficient (beta).

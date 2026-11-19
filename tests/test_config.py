@@ -31,31 +31,21 @@ class TestModelConfig:
         config = ModelConfig()
         assert config.policy_model_id == "gpt2"
         assert config.load_in_8bit is False
-        assert config.use_peft_lora is True
-        assert config.lora_rank == 8
+        assert config.attn_implementation == "eager"
 
     def test_custom_model_config(self) -> None:
         """Verify custom ModelConfig values are set correctly."""
         config = ModelConfig(
             policy_model_id="meta-llama/Llama-2-7b",
             reward_model_id="microsoft/deberta-v3-large",
-            lora_rank=16,
-            lora_alpha=32,
         )
         assert config.policy_model_id == "meta-llama/Llama-2-7b"
         assert config.reward_model_id == "microsoft/deberta-v3-large"
-        assert config.lora_rank == 16
-        assert config.lora_alpha == 32
 
     def test_quantization_validation(self) -> None:
         """Verify that both 8-bit and 4-bit cannot be enabled simultaneously."""
         with pytest.raises(ValueError, match="Cannot enable both"):
             ModelConfig(load_in_8bit=True, load_in_4bit=True)
-
-    def test_lora_rank_validation(self) -> None:
-        """Verify LoRA rank must be positive."""
-        with pytest.raises(ValueError):
-            ModelConfig(lora_rank=0)
 
     def test_attn_implementation_literal(self) -> None:
         """Verify attention implementation is restricted to valid values."""
@@ -69,13 +59,11 @@ class TestModelConfig:
         """Verify ModelConfig can be serialized and deserialized as JSON."""
         config1 = ModelConfig(
             policy_model_id="gpt2-medium",
-            lora_rank=12,
         )
         json_str = config1.to_json_str()
         config2 = ModelConfig.from_json_str(json_str)
 
         assert config2.policy_model_id == "gpt2-medium"
-        assert config2.lora_rank == 12
 
 
 class TestOptimizationConfig:
@@ -95,17 +83,6 @@ class TestOptimizationConfig:
             OptimizationConfig(learning_rate=0.0)
         with pytest.raises(ValueError):
             OptimizationConfig(learning_rate=-1e-5)
-
-    def test_warmup_ratio_validation(self) -> None:
-        """Verify warmup_ratio is bounded [0, 1]."""
-        config = OptimizationConfig(warmup_ratio=0.0)
-        assert config.warmup_ratio == 0.0
-
-        config = OptimizationConfig(warmup_ratio=1.0)
-        assert config.warmup_ratio == 1.0
-
-        with pytest.raises(ValueError):
-            OptimizationConfig(warmup_ratio=1.5)
 
     def test_mixed_precision_literal(self) -> None:
         """Verify mixed_precision is restricted to valid values."""
@@ -283,6 +260,15 @@ class TestDatasetConfig:
         assert config.batch_size == 32
         assert config.max_seq_length == 512
         assert config.pin_memory is True
+        assert config.dataset_size is None
+
+    def test_dataset_size_is_a_positive_prefix_or_absent(self) -> None:
+        """None keeps the split. A set size is an int >= 1."""
+        assert DatasetConfig(dataset_size=4).dataset_size == 4
+        with pytest.raises(ValueError):
+            DatasetConfig(dataset_size=0)
+        with pytest.raises(ValueError):
+            DatasetConfig(dataset_size=-3)
 
     def test_batch_size_validation(self) -> None:
         """Verify batch size must be positive."""
@@ -325,11 +311,11 @@ class TestTrainingConfig:
     def test_training_config_nested_validation(self) -> None:
         """Verify nested config objects are validated."""
         config = TrainingConfig(
-            model=ModelConfig(lora_rank=16),
+            model=ModelConfig(policy_model_id="distilgpt2"),
             optimization=OptimizationConfig(learning_rate=1e-4),
             alignment=AlignmentConfig(ppo_epsilon=0.15),
         )
-        assert config.model.lora_rank == 16
+        assert config.model.policy_model_id == "distilgpt2"
         assert config.optimization.learning_rate == 1e-4
         assert config.alignment.ppo_epsilon == 0.15
 
@@ -435,6 +421,7 @@ class TestConfigYAMLLoading:
             assert config.alignment.missing_eos_penalty is None
             assert config.alignment.temperature == 1.0
             assert config.checkpoint_path is None
+            assert config.dataset.dataset_size is None
 
     def test_load_default_yaml(self) -> None:
         """Verify default.yaml can be loaded from configs directory."""
@@ -447,6 +434,7 @@ class TestConfigYAMLLoading:
             assert config.alignment.missing_eos_penalty is None
             assert config.alignment.temperature == 1.0
             assert config.checkpoint_path is None
+            assert config.dataset.dataset_size is None
 
 
 class TestConfigConsistency:
@@ -463,16 +451,14 @@ class TestConfigConsistency:
         # This should be allowed (no validation), but users should follow convention
         assert config.dataset.eval_batch_size == 8
 
-    def test_learning_rate_and_warmup(self) -> None:
-        """Verify warmup and learning rate are compatible."""
+    def test_learning_rate(self) -> None:
+        """Verify a set learning rate is stored."""
         config = TrainingConfig(
             optimization=OptimizationConfig(
                 learning_rate=1e-4,
-                warmup_ratio=0.1,
             )
         )
         assert config.optimization.learning_rate == 1e-4
-        assert config.optimization.warmup_ratio == 0.1
 
     def test_alignment_and_optimization_consistency(self) -> None:
         """Verify alignment and optimization configs are compatible."""

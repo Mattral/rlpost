@@ -1,8 +1,9 @@
 """Tiny random-init Llama and a character tokenizer that fits its vocab.
 
-CPU tests, ``run-dpo --tiny``, and ``run-ppo --tiny`` use this model.
-It does not download weights. Vocab size is 128. Pad id is 0, bos is 1,
-eos is 2. ``TinyValueModel`` is the PPO value head.
+CPU tests and the ``--tiny`` commands use this module. It does not
+download weights. Vocab size is 128. Pad id is 0, bos is 1, eos is 2.
+``TinyValueModel`` is the PPO value head. ``TinyRewardModel`` is the
+sequence scorer for ``train-reward --tiny``.
 """
 
 from __future__ import annotations
@@ -42,6 +43,44 @@ class TinyValueModel(torch.nn.Module):
 def tiny_value_model(seed: int) -> TinyValueModel:
     """Build ``TinyValueModel``. ``seed`` is the run seed."""
     return TinyValueModel(seed)
+
+
+class TinyRewardModel(torch.nn.Module):
+    """Sequence scorer for ``train-reward --tiny``. One scalar per row.
+
+    An embedding of the tiny vocab, a masked mean over non-pad tokens,
+    and a linear map to one score. No dropout. ``seed`` sets
+    ``torch.manual_seed`` before the weights are created. A resumed run
+    replaces those weights from the checkpoint.
+
+    ``forward`` returns ``[B]``.
+    """
+
+    def __init__(self, seed: int) -> None:
+        super().__init__()
+        if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
+            raise ValueError(f"seed must be an int >= 0, got {seed!r}")
+        torch.manual_seed(seed)
+        self.embed = torch.nn.Embedding(VOCAB, 32)
+        self.proj = torch.nn.Linear(32, 1)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        hidden = self.embed(input_ids)
+        if attention_mask is None:
+            pooled = hidden.mean(dim=1)
+        else:
+            mask = attention_mask.to(device=hidden.device, dtype=hidden.dtype).unsqueeze(-1)
+            pooled = (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
+        return self.proj(pooled).squeeze(-1)
+
+
+def tiny_reward_model(seed: int) -> TinyRewardModel:
+    """Build ``TinyRewardModel``. ``seed`` is the run seed."""
+    return TinyRewardModel(seed)
 
 
 def tiny_causal_lm(seed: int) -> LlamaForCausalLM:
