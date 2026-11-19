@@ -43,9 +43,6 @@ test = [
     "ruff==0.17.3",
     "trl==1.17.1",
 ]
-lora = [
-    "peft>=0.17",
-]
 
 [project.urls]
 Homepage = "https://github.com/Mattral/rlpost"

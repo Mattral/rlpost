@@ -18,13 +18,6 @@ model:
   trust_remote_code: false
   load_in_8bit: false
   load_in_4bit: false
-  use_peft_lora: true
-  lora_rank: 4
-  lora_alpha: 8
-  lora_dropout: 0.05
-  lora_target_modules:
-    - q_proj
-    - v_proj
   attn_implementation: eager
 
 optimization:

@@ -31,43 +31,21 @@ class TestModelConfig:
         config = ModelConfig()
         assert config.policy_model_id == "gpt2"
         assert config.load_in_8bit is False
-        assert config.use_peft_lora is True
-        assert config.lora_rank == 8
-        assert config.lora_target_modules == ["q_proj", "v_proj"]
+        assert config.attn_implementation == "eager"
 
     def test_custom_model_config(self) -> None:
         """Verify custom ModelConfig values are set correctly."""
         config = ModelConfig(
             policy_model_id="meta-llama/Llama-2-7b",
             reward_model_id="microsoft/deberta-v3-large",
-            lora_rank=16,
-            lora_alpha=32,
         )
         assert config.policy_model_id == "meta-llama/Llama-2-7b"
         assert config.reward_model_id == "microsoft/deberta-v3-large"
-        assert config.lora_rank == 16
-        assert config.lora_alpha == 32
 
     def test_quantization_validation(self) -> None:
         """Verify that both 8-bit and 4-bit cannot be enabled simultaneously."""
         with pytest.raises(ValueError, match="Cannot enable both"):
             ModelConfig(load_in_8bit=True, load_in_4bit=True)
-
-    def test_lora_rank_validation(self) -> None:
-        """Verify LoRA rank must be positive."""
-        with pytest.raises(ValueError):
-            ModelConfig(lora_rank=0)
-
-    def test_lora_target_modules_are_read_from_the_field(self) -> None:
-        """The list is the field. An empty name is rejected."""
-        config = ModelConfig(lora_target_modules=["k_proj", "o_proj"])
-        assert config.lora_target_modules == ["k_proj", "o_proj"]
-        with pytest.raises(ValueError):
-            ModelConfig(lora_target_modules=[])
-        with pytest.raises(ValueError):
-            ModelConfig(lora_target_modules=[""])
-        with pytest.raises(ValueError):
-            ModelConfig(lora_target_modules=["q_proj", " "])
 
     def test_attn_implementation_literal(self) -> None:
         """Verify attention implementation is restricted to valid values."""
@@ -81,13 +59,11 @@ class TestModelConfig:
         """Verify ModelConfig can be serialized and deserialized as JSON."""
         config1 = ModelConfig(
             policy_model_id="gpt2-medium",
-            lora_rank=12,
         )
         json_str = config1.to_json_str()
         config2 = ModelConfig.from_json_str(json_str)
 
         assert config2.policy_model_id == "gpt2-medium"
-        assert config2.lora_rank == 12
 
 
 class TestOptimizationConfig:
@@ -335,11 +311,11 @@ class TestTrainingConfig:
     def test_training_config_nested_validation(self) -> None:
         """Verify nested config objects are validated."""
         config = TrainingConfig(
-            model=ModelConfig(lora_rank=16),
+            model=ModelConfig(policy_model_id="distilgpt2"),
             optimization=OptimizationConfig(learning_rate=1e-4),
             alignment=AlignmentConfig(ppo_epsilon=0.15),
         )
-        assert config.model.lora_rank == 16
+        assert config.model.policy_model_id == "distilgpt2"
         assert config.optimization.learning_rate == 1e-4
         assert config.alignment.ppo_epsilon == 0.15
 
@@ -445,7 +421,6 @@ class TestConfigYAMLLoading:
             assert config.alignment.missing_eos_penalty is None
             assert config.alignment.temperature == 1.0
             assert config.checkpoint_path is None
-            assert config.model.lora_target_modules == ["q_proj", "v_proj"]
             assert config.dataset.dataset_size is None
 
     def test_load_default_yaml(self) -> None:
@@ -459,7 +434,6 @@ class TestConfigYAMLLoading:
             assert config.alignment.missing_eos_penalty is None
             assert config.alignment.temperature == 1.0
             assert config.checkpoint_path is None
-            assert config.model.lora_target_modules == ["q_proj", "v_proj"]
             assert config.dataset.dataset_size is None
 
 
